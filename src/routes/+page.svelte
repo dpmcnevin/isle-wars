@@ -466,7 +466,7 @@
 		<div class="mapwrap">
 			<svg
 				bind:this={mapSvg}
-				viewBox="0 0 {$game.map.width} {$game.map.height}"
+				viewBox={$game.map.viewBox ? `${$game.map.viewBox.x} ${$game.map.viewBox.y} ${$game.map.viewBox.w} ${$game.map.viewBox.h}` : `0 0 ${$game.map.width} ${$game.map.height}`}
 				class="map"
 				onpointermove={onSvgPointerMove}
 				onpointerup={onSvgPointerUp}

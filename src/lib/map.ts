@@ -30,6 +30,7 @@ export interface GameMap {
 	waterHexes: [number, number][][]; // hex polygons for unassigned (water) cells
 	width: number;
 	height: number;
+	viewBox: { x: number; y: number; w: number; h: number }; // tight bbox around land
 	winThreshold: number;
 }
 
@@ -241,7 +242,7 @@ export function generateMap(seed: number = Math.floor(Math.random() * 1e9)): Gam
 	const height = 900;
 
 	// Randomize island count. Fewer islands ⇒ each grows larger.
-	const nIslands = 5 + Math.floor(rnd() * 7); // 5..11
+	const nIslands = 7 + Math.floor(rnd() * 5); // 7..11 — more islands = fuller map
 
 	// Bonus values (also drives territory count):
 	// 50% small (2..4), 35% medium (5..7), 15% big (8..12).
@@ -307,7 +308,25 @@ export function generateMap(seed: number = Math.floor(Math.random() * 1e9)): Gam
 	// Grow in order: biggest first (matches seed ordering above so they get room).
 	for (const isl of orderedIslands) {
 		const seed = seeds.find((s2) => s2.islandIdx === isl.i)!;
-		const claimed = growIsland(hexGrid, claimedBy, [seed.col, seed.row], targets[isl.i], isl.i, rnd);
+		let claimed = growIsland(hexGrid, claimedBy, [seed.col, seed.row], targets[isl.i], isl.i, rnd);
+		// If the primary seed rejected (its neighbors already touched another
+		// island's water buffer), try nearby free hexes so we don't lose the
+		// entire island. Search outward in expanding rings.
+		if (claimed.size === 0) {
+			outer: for (let radius = 1; radius <= 6; radius++) {
+				for (let dr = -radius; dr <= radius; dr++) {
+					for (let dc = -radius; dc <= radius; dc++) {
+						if (Math.abs(dr) !== radius && Math.abs(dc) !== radius) continue;
+						const nc = seed.col + dc;
+						const nr = seed.row + dr;
+						if (!inBounds(hexGrid, nc, nr)) continue;
+						if (claimedBy.has(hexKey(nc, nr))) continue;
+						claimed = growIsland(hexGrid, claimedBy, [nc, nr], targets[isl.i], isl.i, rnd);
+						if (claimed.size > 0) break outer;
+					}
+				}
+			}
+		}
 		const hexes: Hex[] = [];
 		for (const k of claimed) {
 			const [c, r] = k.split(',').map(Number);
@@ -564,6 +583,27 @@ export function generateMap(seed: number = Math.floor(Math.random() * 1e9)): Gam
 		}
 	}
 
+	// Compute a tight viewBox around the actual land, plus a small water margin,
+	// so the SVG doesn't render huge empty regions where no island grew.
+	let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity;
+	for (const g of grids) {
+		for (const [px, py] of g.cell) {
+			if (px < minX) minX = px;
+			if (px > maxX) maxX = px;
+			if (py < minY) minY = py;
+			if (py > maxY) maxY = py;
+		}
+	}
+	if (!isFinite(minX)) {
+		// Fallback if there are no grids (shouldn't happen).
+		minX = 0; minY = 0; maxX = width; maxY = height;
+	}
+	const waterMargin = Math.max(60, s * 1.5); // ~1.5 hex of water on each side
+	const vbX = Math.max(0, minX - waterMargin);
+	const vbY = Math.max(0, minY - waterMargin);
+	const vbW = Math.min(width, maxX + waterMargin) - vbX;
+	const vbH = Math.min(height, maxY + waterMargin) - vbY;
+
 	return {
 		islands,
 		grids,
@@ -572,6 +612,7 @@ export function generateMap(seed: number = Math.floor(Math.random() * 1e9)): Gam
 		waterHexes,
 		width,
 		height,
+		viewBox: { x: vbX, y: vbY, w: vbW, h: vbH },
 		winThreshold: Math.min(30, Math.floor(grids.length * 0.66))
 	};
 }

@@ -178,7 +178,7 @@ function emptyStatsMap(): Record<Player, PlayerStats> {
 	return { blue: emptyStats(), green: emptyStats(), red: emptyStats(), brown: emptyStats() };
 }
 
-export const SAVE_KEY = 'isle-wars-save-v7';
+export const SAVE_KEY = 'isle-wars-save-v8';
 
 export const game = writable<GameState>(startGame(1, 3));
 
