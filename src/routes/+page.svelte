@@ -837,7 +837,7 @@
 					</select>
 				</label>
 				<button class="icon-btn" title="New Game" onclick={() => (showMenu = !showMenu)}>{showMenu ? '✕' : 'New'}</button>
-				<button class="icon-btn" title="Debug" onclick={() => (showDebug = !showDebug)}>Debug</button>
+				<button class="icon-btn debug-btn" title="Debug" onclick={() => (showDebug = !showDebug)}>Debug</button>
 				<button class="icon-btn danger" title="Clear Save" onclick={confirmClearSave}>Clear</button>
 			</div>
 		</div>
@@ -1584,6 +1584,16 @@
 	.icon-btn {
 		padding: 0.2rem 0.55rem;
 		font-size: 0.8rem;
+	}
+	.debug-btn {
+		background: #ffbe3c;
+		color: #1a1712;
+		border-color: #ffbe3c;
+		font-weight: bold;
+	}
+	.debug-btn:hover {
+		background: #ffcc63;
+		border-color: #ffcc63;
 	}
 
 	.menu {
