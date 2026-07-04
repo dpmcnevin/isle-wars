@@ -1,5 +1,5 @@
 import { writable, derived, get } from 'svelte/store';
-import { generateMap, type GameMap } from './map';
+import { generateMap, crossesRiver, type GameMap } from './map';
 
 export type Player = 'blue' | 'green' | 'red' | 'brown';
 export const PLAYERS: Player[] = ['blue', 'green', 'red', 'brown'];
@@ -32,7 +32,9 @@ export type CardType =
 	| 'invasion'
 	| 'deforest'
 	| 'storm'
-	| 'artillery';
+	| 'artillery'
+	| 'bridge'
+	| 'oasis';
 
 export const CARD_LABELS: Record<CardType, string> = {
 	air: 'Air Move',
@@ -50,7 +52,9 @@ export const CARD_LABELS: Record<CardType, string> = {
 	invasion: 'Water Invasion',
 	deforest: 'Deforestation',
 	storm: 'Storm',
-	artillery: 'Artillery'
+	artillery: 'Artillery',
+	bridge: 'Bridge',
+	oasis: 'Oasis'
 };
 
 export interface CardMeta {
@@ -155,6 +159,18 @@ export const CARD_META: Record<CardType, CardMeta> = {
 		kind: 'attack',
 		when: 'Action phase (from a city ★)',
 		desc: 'Bombard any hex up to 2 steps away, launched from one of your cities (★). Roll four times — each hit removes one defender. Attackers never lose armies. Terrain and fortification bonuses still count.'
+	},
+	bridge: {
+		icon: '🌉',
+		kind: 'attack',
+		when: 'Action phase, before attacking',
+		desc: 'Bridge a river for your next attack — the defender loses the +1 river-crossing bonus. Consumed by the first attack.'
+	},
+	oasis: {
+		icon: '🌴',
+		kind: 'terrain',
+		when: 'Placement or Action phase',
+		desc: 'Irrigate a desert hex you control, turning it back into plains. Removes the heat attrition (1 army lost per move into it).'
 	}
 };
 
@@ -175,7 +191,9 @@ const CARD_POOL: CardType[] = [
 	'invasion',
 	'deforest',
 	'storm',
-	'artillery'
+	'artillery',
+	'bridge', 'bridge',
+	'oasis'
 ];
 
 export type Phase =
@@ -200,6 +218,7 @@ export type Phase =
 	| 'invasion_from'
 	| 'invasion_to'
 	| 'deforest_select'
+	| 'oasis_select'
 	| 'storm_from'
 	| 'storm_to'
 	| 'artillery_from'
@@ -247,6 +266,9 @@ export interface GameState {
 	pendingDiscard: boolean;
 	// Elite Troops card active — attacker rolls get +2 for the next attack sequence.
 	eliteAttackActive: boolean;
+	// Bridge card active — cancels the +1 river-crossing defender bonus for the
+	// next attack. Consumed by the first attack roll.
+	bridgeAttackActive: boolean;
 	// Water Invasion card added a temporary sea lane for this attack. If the
 	// attack succeeds it stays; if it fails, it's removed.
 	pendingInvasionLane: [number, number] | null;
@@ -308,23 +330,37 @@ export interface DebugSettings {
 	disableSave: boolean;
 	starterCards: boolean; // give blue every card type on new games
 	autoPlay: boolean; // AI takes over all four players
+	dieSides: number; // base die max value; 10 by default
 }
 
+const DEFAULT_DIE_SIDES = 10;
+
 function loadDebugSettings(): DebugSettings {
-	const dflt: DebugSettings = { disableSave: false, starterCards: false, autoPlay: false };
+	const dflt: DebugSettings = {
+		disableSave: false, starterCards: false, autoPlay: false, dieSides: DEFAULT_DIE_SIDES
+	};
 	if (typeof window === 'undefined') return dflt;
 	try {
 		const raw = localStorage.getItem(DEBUG_KEY);
 		if (raw) {
 			const parsed = JSON.parse(raw) as DebugSettings;
+			const sides = Math.round(Number(parsed.dieSides));
 			return {
 				disableSave: !!parsed.disableSave,
 				starterCards: !!parsed.starterCards,
-				autoPlay: !!parsed.autoPlay
+				autoPlay: !!parsed.autoPlay,
+				dieSides: sides >= 2 && sides <= 100 ? sides : DEFAULT_DIE_SIDES
 			};
 		}
 	} catch { /* ignore */ }
 	return dflt;
+}
+
+export function rollDie(): number {
+	return 1 + Math.floor(Math.random() * debugSettings.dieSides);
+}
+export function dieSides(): number {
+	return debugSettings.dieSides;
 }
 
 let debugSettings: DebugSettings = loadDebugSettings();
@@ -340,9 +376,13 @@ export function getDebugSettings(): DebugSettings {
 }
 
 export function updateDebugSettings(patch: Partial<DebugSettings>) {
+	const prevSides = debugSettings.dieSides;
 	debugSettings = { ...debugSettings, ...patch };
 	if (typeof window !== 'undefined') {
 		try { localStorage.setItem(DEBUG_KEY, JSON.stringify(debugSettings)); } catch { /* ignore */ }
+	}
+	if (debugSettings.dieSides !== prevSides) {
+		WIN_PROB_CACHE.clear();
 	}
 	// If save was just disabled, wipe any existing save so a reload gets a
 	// fresh map immediately.
@@ -403,13 +443,14 @@ const WIN_PROB_CACHE = new Map<string, number>();
 function perRollAttackerWin(netModifier: number): number {
 	// Net = attackerBonus − defenderBonus. Count (atk, def) pairs where
 	// atk + net > def (defender wins ties, as usual).
+	const sides = debugSettings.dieSides;
 	let wins = 0;
-	for (let atk = 1; atk <= 6; atk++) {
-		for (let def = 1; def <= 6; def++) {
+	for (let atk = 1; atk <= sides; atk++) {
+		for (let def = 1; def <= sides; def++) {
 			if (atk + netModifier > def) wins++;
 		}
 	}
-	return wins / 36;
+	return wins / (sides * sides);
 }
 export function winProbability(atkArmies: number, defArmies: number, defenderBonus = 0, attackerBonus = 0): number {
 	if (atkArmies < 2) return 0;
@@ -427,11 +468,23 @@ export function winProbability(atkArmies: number, defArmies: number, defenderBon
 	return res;
 }
 
-/** Defense bonus for a hex: mountain terrain (+1) + fortification (+2). */
-export function defenseBonus(s: GameState, gridId: number): number {
+/** Extra defender bonus from what the attacker had to cross: +2 for a sea
+ *  lane, +1 for a river, 0 otherwise. Ignored for ranged/artillery attacks. */
+export function crossingDefenseBonus(s: GameState, fromId: number, toId: number): number {
+	for (const [a, b] of s.map.seaLanes) {
+		if ((a === fromId && b === toId) || (a === toId && b === fromId)) return 2;
+	}
+	if (crossesRiver(s.map, fromId, toId)) return s.bridgeAttackActive ? 0 : 1;
+	return 0;
+}
+
+/** Defense bonus for a hex: mountain terrain (+1) + fortification (+2) +
+ *  crossing bonus (sea lane +2 / river +1) when a from hex is supplied. */
+export function defenseBonus(s: GameState, gridId: number, fromId?: number): number {
 	let b = 0;
 	if (s.map.grids[gridId].terrain === 'mountain') b += 1;
 	if (s.states[gridId].fortified) b += 2;
+	if (fromId != null) b += crossingDefenseBonus(s, fromId, gridId);
 	return b;
 }
 
@@ -505,9 +558,7 @@ const HAND_MAX = 5;
 
 function emptyHands(): Record<Player, CardType[]> {
 	const blueStart: CardType[] = debugSettings.starterCards
-		? ['air', 'bonus5', 'bonus8', 'bonus15', 'double', 'bomb', 'antibomb',
-			'reinforce', 'elite', 'sabotage', 'fortify', 'ferry', 'invasion',
-			'deforest', 'storm', 'artillery']
+		? (Object.keys(CARD_LABELS) as CardType[])
 		: [];
 	return { blue: blueStart, green: [], red: [], brown: [] };
 }
@@ -557,6 +608,7 @@ export function startGame(difficulty = 2, startingArmies = 3, seed?: number): Ga
 		lastAttackResult: null,
 		pendingDiscard: false,
 		eliteAttackActive: false,
+		bridgeAttackActive: false,
 		pendingInvasionLane: null,
 		cardPlayedThisTurn: false,
 		usedMarshHexes: [],
@@ -799,6 +851,8 @@ function beginTurn(s: GameState): GameState {
 	s.lastAttackResult = null;
 	s.pendingDiscard = false;
 	s.eliteAttackActive = false;
+			s.bridgeAttackActive = false;
+	s.bridgeAttackActive = false;
 	s.pendingInvasionLane = null;
 	s.cardPlayedThisTurn = false;
 	s.usedMarshHexes = [];
@@ -1265,6 +1319,18 @@ export function selectGrid(gridId: number): void {
 				s.message = 'Attack, move, or pass.';
 				break;
 			}
+			case 'oasis_select': {
+				if (s.map.grids[gridId].terrain !== 'desert') { s.message = 'Pick a desert hex.'; break; }
+				if (s.states[gridId].owner !== s.current) { s.message = 'Oasis only works on a desert you control.'; break; }
+				s.map.grids[gridId].terrain = 'plain';
+				const idx = (s as any)._pendingCardIdx as number;
+				consumeCard(s, idx);
+				delete (s as any)._pendingCardIdx;
+				log(s, `${PLAYER_NAMES[s.current]} irrigated the desert at ${gridLabel(s, gridId)}.`, 'card');
+				s.phase = 'action';
+				s.message = 'Attack, move, or pass.';
+				break;
+			}
 			case 'storm_from': {
 				const hasLane = s.map.seaLanes.some(([a, b]) => a === gridId || b === gridId);
 				if (!hasLane) { s.message = 'Pick a hex that anchors a sea route.'; break; }
@@ -1311,8 +1377,8 @@ export function selectGrid(gridId: number): void {
 				let hits = 0;
 				const ARTILLERY_SHOTS = 4;
 				for (let shot = 1; shot <= ARTILLERY_SHOTS && target.armies > 0; shot++) {
-					const atk = 1 + Math.floor(Math.random() * 6) + forestBonus;
-					const def = 1 + Math.floor(Math.random() * 6) + defBonus;
+					const atk = rollDie() + forestBonus;
+					const def = rollDie() + defBonus;
 					devLog({
 						type: 'artillery_shot',
 						game_id: devLogGameId,
@@ -1375,9 +1441,9 @@ export function rollAttack(): void {
 		if (s.map.grids[s.selectedFrom].terrain === 'marsh' && !s.usedMarshHexes.includes(s.selectedFrom)) {
 			s.usedMarshHexes.push(s.selectedFrom);
 		}
-		const atkBase = 1 + Math.floor(Math.random() * 6);
-		const defBase = 1 + Math.floor(Math.random() * 6);
-		const defBonus = defenseBonus(s, s.selectedTo);
+		const atkBase = rollDie();
+		const defBase = rollDie();
+		const defBonus = defenseBonus(s, s.selectedTo, s.selectedFrom);
 		const atkBonus = attackerBonus(s, s.selectedTo);
 		const eliteBonus = s.eliteAttackActive ? 2 : 0;
 		const atk = atkBase + atkBonus + eliteBonus;
@@ -1428,12 +1494,19 @@ export function rollAttack(): void {
 			s.lastAttackResult = 'win';
 			// Elite Troops was consumed by this successful attack.
 			s.eliteAttackActive = false;
+			s.bridgeAttackActive = false;
 			// Water Invasion succeeded — the sea lane stays permanent.
 			s.pendingInvasionLane = null;
 			log(s, `${PLAYER_NAMES[from.owner!]} conquered ${gridLabel(s, s.selectedTo)}!`, 'defeat');
 			// move at least 1 in
 			from.armies -= 1;
 			to.armies = 1;
+			// Desert attrition: attackers moving into a desert lose 1 more army
+			// to the heat. Applied against the source (follow-on force).
+			if (s.map.grids[s.selectedTo].terrain === 'desert' && from.armies > 0) {
+				from.armies -= 1;
+				log(s, `Desert heat cost ${PLAYER_NAMES[from.owner!]} 1 army entering ${gridLabel(s, s.selectedTo)}.`, 'attack');
+			}
 			updateAlive(s);
 			if (checkWin(s)) return s;
 			if (from.armies > 0) {
@@ -1452,7 +1525,8 @@ export function rollAttack(): void {
 			// Per manual: if attacker drops to 1, forfeit the grid. But never
 			// forfeit to a neutral (null-owner) defender — just end the attack.
 			s.lastAttackResult = 'loss';
-			s.eliteAttackActive = false; // consumed regardless of outcome
+			s.eliteAttackActive = false;
+			s.bridgeAttackActive = false; // consumed regardless of outcome
 			removePendingInvasionLane(s);
 			if (!to.owner) {
 				log(s, `Attacker reduced to 1 — ${gridLabel(s, s.selectedFrom)} attack aborted.`, 'attack');
@@ -1533,6 +1607,11 @@ export function confirmMove(qty: number) {
 		from.armies -= q;
 		to.armies += q;
 		log(s, `${PLAYER_NAMES[s.current]} moved ${q} from ${gridLabel(s, s.selectedFrom)} to ${gridLabel(s, s.selectedTo)}.`, 'info');
+		// Desert heat attrition: moving armies into a desert costs 1 army.
+		if (s.map.grids[s.selectedTo].terrain === 'desert' && to.armies > 0) {
+			to.armies -= 1;
+			log(s, `Desert heat cost ${PLAYER_NAMES[s.current]} 1 army at ${gridLabel(s, s.selectedTo)}.`, 'info');
+		}
 		s.phase = 'action';
 		s.selectedFrom = null;
 		s.selectedTo = null;
@@ -1621,6 +1700,19 @@ export function playCard(idx: number) {
 				s.message = 'Elite Troops active. Attack now (+2 to each roll) — consumed by first attack.';
 				break;
 			}
+			case 'bridge': {
+				if (s.phase !== 'action' && s.phase !== 'attack_select_from' && s.phase !== 'attack_select_to') {
+					s.message = 'Play Bridge in action phase, before attacking.'; return s;
+				}
+				s.phase = 'action';
+				s.selectedFrom = null;
+				s.selectedTo = null;
+				s.bridgeAttackActive = true;
+				consumeCard(s, idx);
+				log(s, `${PLAYER_NAMES[s.current]} deployed a Bridge (cancels river bonus next attack).`, 'card');
+				s.message = 'Bridge active. Your next attack ignores the river-crossing defender bonus.';
+				break;
+			}
 			case 'sabotage': {
 				if (s.phase !== 'placing' && s.phase !== 'action') { s.message = 'Play Sabotage during your turn.'; return s; }
 				s.phase = 'sabotage_select';
@@ -1660,6 +1752,13 @@ export function playCard(idx: number) {
 				s.phase = 'deforest_select';
 				(s as any)._pendingCardIdx = idx;
 				s.message = 'Deforestation: click any forest hex to clear it.';
+				break;
+			}
+			case 'oasis': {
+				if (s.phase !== 'placing' && s.phase !== 'action') { s.message = 'Play Oasis during your turn.'; return s; }
+				s.phase = 'oasis_select';
+				(s as any)._pendingCardIdx = idx;
+				s.message = 'Oasis: click one of your desert hexes to convert it to plains.';
 				break;
 			}
 			case 'storm': {
@@ -1759,6 +1858,10 @@ export function confirmAir(qty: number) {
 			delete (s as any)._pendingCardIdx;
 		}
 		log(s, `${PLAYER_NAMES[s.current]} air-moved ${q} from ${gridLabel(s, s.selectedFrom)} to ${gridLabel(s, s.selectedTo)}.`, 'card');
+		if (s.map.grids[s.selectedTo].terrain === 'desert' && to.armies > 0) {
+			to.armies -= 1;
+			log(s, `Desert heat cost ${PLAYER_NAMES[s.current]} 1 army at ${gridLabel(s, s.selectedTo)}.`, 'card');
+		}
 		s.phase = 'action';
 		s.selectedFrom = null;
 		s.selectedTo = null;

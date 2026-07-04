@@ -16,6 +16,7 @@
 		endTurn,
 		playCard,
 		discardCard,
+		crossingDefenseBonus,
 		loadSavedGame,
 		clearSavedGame,
 		getDebugSettings,
@@ -449,6 +450,17 @@
 			case 'artillery_to':
 				if (s.selectedFrom == null) return false;
 				return canArtilleryTarget(s, s.selectedFrom, id);
+			case 'deforest_select':
+				return s.map.grids[id].terrain === 'forest';
+			case 'oasis_select':
+				return s.map.grids[id].terrain === 'desert' && s.states[id].owner === s.current;
+			case 'storm_from':
+				return s.map.seaLanes.some(([a, b]) => a === id || b === id);
+			case 'storm_to':
+				if (s.selectedFrom == null) return false;
+				return s.map.seaLanes.some(
+					([a, b]) => (a === s.selectedFrom && b === id) || (a === id && b === s.selectedFrom)
+				);
 			default:
 				return false;
 		}
@@ -488,6 +500,150 @@
 		return pts.map((p) => p.join(',')).join(' ');
 	}
 
+	// Build one continuous polyline per river that follows actual hex edges.
+	// For each hex on the river chain, we walk along that hex's perimeter from
+	// the entry face to the exit face, so bends and straight sections both trace
+	// real hex-edge boundaries rather than cutting through hex interiors.
+	const riverPolylines = $derived.by(() => {
+		const rivers = $game.map.rivers ?? [];
+		if (rivers.length === 0) return [] as [number, number][][];
+		const grids = $game.map.grids;
+		const vkey = (v: [number, number]) => `${Math.round(v[0] * 10)},${Math.round(v[1] * 10)}`;
+		// Return the two shared vertices (points on the hex edge) between two
+		// adjacent hexes.
+		const sharedFace = (a: number, b: number): [number, number][] => {
+			const cb = new Set(grids[b].cell.map(vkey));
+			return grids[a].cell.filter((v) => cb.has(vkey(v)));
+		};
+		const idxInCell = (cell: [number, number][], v: [number, number]) => {
+			const k = vkey(v);
+			return cell.findIndex((c) => vkey(c) === k);
+		};
+		// A vertex is "inland" if three land hexes meet at it. Coastal vertices
+		// only appear in one or two land cells (the missing corner is water).
+		const vertLandCount = new Map<string, number>();
+		for (const g of grids) {
+			for (const v of g.cell) {
+				const k = vkey(v);
+				vertLandCount.set(k, (vertLandCount.get(k) ?? 0) + 1);
+			}
+		}
+		const isInland = (v: [number, number]) => (vertLandCount.get(vkey(v)) ?? 0) >= 3;
+		// Perimeter walk in hex `h` from entry to exit. Prefer the direction that
+		// stays inland; break ties by shorter arc so the river doesn't hug the
+		// coast when both sides of the hex are viable.
+		const arcThrough = (h: number, entry: [number, number], exit: [number, number]) => {
+			const cell = grids[h].cell;
+			const n = cell.length;
+			const ei = idxInCell(cell, entry);
+			const xi = idxInCell(cell, exit);
+			if (ei < 0 || xi < 0) return [entry, exit];
+			let best: number[] = [];
+			let bestCost = Infinity;
+			for (const dir of [1, -1] as const) {
+				const seq: number[] = [];
+				let c = ei;
+				for (let s = 0; s <= n; s++) {
+					seq.push(c);
+					if (c === xi) break;
+					c = (c + dir + n) % n;
+				}
+				if (seq[seq.length - 1] !== xi) continue;
+				let coastal = 0;
+				for (let i = 1; i < seq.length - 1; i++) {
+					if (!isInland(cell[seq[i]])) coastal++;
+				}
+				const cost = coastal * 1000 + seq.length;
+				if (cost < bestCost) {
+					bestCost = cost;
+					best = seq;
+				}
+			}
+			return best.map((i) => cell[i]);
+		};
+
+		// Hex-node graph of river edges.
+		const nbr = new Map<number, number[]>();
+		for (const [a, b] of rivers) {
+			if (!nbr.has(a)) nbr.set(a, []);
+			if (!nbr.has(b)) nbr.set(b, []);
+			nbr.get(a)!.push(b);
+			nbr.get(b)!.push(a);
+		}
+		const ek = (a: number, b: number) => (a < b ? `${a}-${b}` : `${b}-${a}`);
+		const used = new Set<string>();
+		const paths: [number, number][][] = [];
+		const nodes = [...nbr.keys()].sort(
+			(a, b) => nbr.get(a)!.length - nbr.get(b)!.length
+		);
+
+		for (const start of nodes) {
+			while (true) {
+				const firstNbr = nbr.get(start)!.find((n) => !used.has(ek(start, n)));
+				if (firstNbr === undefined) break;
+				used.add(ek(start, firstNbr));
+				const chain: number[] = [start, firstNbr];
+				let prev = start;
+				let cur = firstNbr;
+				while (true) {
+					const next = nbr.get(cur)!.find((n) => n !== prev && !used.has(ek(cur, n)));
+					if (next === undefined) break;
+					used.add(ek(cur, next));
+					chain.push(next);
+					prev = cur;
+					cur = next;
+				}
+				// Collect the two vertices of each face (shared hex edge) in the chain.
+				const faces: [[number, number], [number, number]][] = [];
+				for (let i = 0; i < chain.length - 1; i++) {
+					const f = sharedFace(chain[i], chain[i + 1]);
+					if (f.length !== 2) { faces.length = 0; break; }
+					faces.push([f[0], f[1]]);
+				}
+				if (faces.length === 0) continue;
+
+				// Pick a per-face entry vertex (0 or 1) minimizing total perimeter
+				// arc length through interior hexes. Brute-force over 2^faces —
+				// river chains are short (~4–8 faces) so this stays tiny.
+				const eCount = faces.length;
+				let bestMask = 0;
+				let bestCost = Infinity;
+				const totalMasks = 1 << eCount;
+				for (let mask = 0; mask < totalMasks; mask++) {
+					let cost = 0;
+					for (let j = 1; j < chain.length - 1; j++) {
+						const entryV = faces[j - 1][(mask >> (j - 1)) & 1];
+						const exitV = faces[j][(mask >> j) & 1];
+						const arc = arcThrough(chain[j], entryV, exitV);
+						cost += arc.length;
+					}
+					if (cost < bestCost) {
+						bestCost = cost;
+						bestMask = mask;
+					}
+				}
+
+				// Emit the polyline. Start with a short stub across the source face,
+				// walk through each interior hex's chosen perimeter arc, and end with
+				// a stub across the mouth face.
+				const pts: [number, number][] = [];
+				const startEntry = faces[0][bestMask & 1];
+				const startOther = faces[0][1 - (bestMask & 1)];
+				pts.push(startOther, startEntry);
+				for (let j = 1; j < chain.length - 1; j++) {
+					const entryV = faces[j - 1][(bestMask >> (j - 1)) & 1];
+					const exitV = faces[j][(bestMask >> j) & 1];
+					const arc = arcThrough(chain[j], entryV, exitV);
+					for (let i = 1; i < arc.length; i++) pts.push(arc[i]);
+				}
+				const endOther = faces[eCount - 1][1 - ((bestMask >> (eCount - 1)) & 1)];
+				pts.push(endOther);
+				paths.push(pts);
+			}
+		}
+		return paths;
+	});
+
 	function seaLanePath(a: number, b: number, s: typeof $game) {
 		// Draw as a quadratic Bezier that arcs perpendicular to the segment.
 		// A slight curve prevents lanes from overlapping straight-through hex
@@ -516,12 +672,20 @@
 	let debugDisableSave = $state(false);
 	let debugStarterCards = $state(false);
 	let debugAutoPlay = $state(false);
+	let debugDieSides = $state(10);
 
 	function loadDebugUi() {
 		const d = getDebugSettings();
 		debugDisableSave = d.disableSave;
 		debugStarterCards = d.starterCards;
 		debugAutoPlay = d.autoPlay;
+		debugDieSides = d.dieSides;
+	}
+
+	function setDebugDieSides(v: number) {
+		const sides = Math.max(2, Math.min(100, Math.round(v || 0)));
+		debugDieSides = sides;
+		updateDebugSettings({ dieSides: sides });
 	}
 
 	function toggleDebugDisableSave() {
@@ -542,15 +706,14 @@
 		if (debugAutoPlay && !$game.gameStarted) startGamePlaying();
 	}
 
+	interface HexModifier { name: string; desc: string; }
 	interface HexInfo {
 		title: string;
 		owner: string;
 		ownerColor: string;
 		armies: number;
 		city?: string;
-		terrainName: string;
-		terrainDesc: string;
-		fortified: boolean;
+		modifiers: HexModifier[];
 	}
 	function hexInfo(gridId: number): HexInfo {
 		const g = $game.map.grids[gridId];
@@ -562,18 +725,35 @@
 			plain: ['Plain', 'Open ground. No combat modifier.'],
 			mountain: ['Mountain', 'Defender rolls +1 on every die.'],
 			forest: ['Forest', 'Attacker rolls +1 (cover on approach).'],
-			marsh: ['Marsh', 'After attacking from here, cannot launch another attack from this hex this turn.']
+			marsh: ['Marsh', 'After attacking from here, cannot launch another attack from this hex this turn.'],
+			desert: ['Desert', 'Heat attrition — any move into a desert (conquest, regular move, or air move) burns 1 army. Cannot host a production center.']
 		};
+		const modifiers: HexModifier[] = [];
+		if (g.production) {
+			modifiers.push({
+				name: 'City',
+				desc: 'Production center (★) — grants extra reinforcements to its owner and is the only launchpad for Artillery.'
+			});
+		}
 		const [terrainName, terrainDesc] = terrainMap[g.terrain] ?? ['Plain', ''];
+		// Only surface terrain when it has an actual effect. Plain adds nothing on
+		// its own; skip it unless there are no other modifiers to show.
+		if (g.terrain !== 'plain' || modifiers.length === 0) {
+			modifiers.push({ name: terrainName, desc: terrainDesc });
+		}
+		if (st.fortified) {
+			modifiers.push({
+				name: '🛡 Fortified',
+				desc: '+2 defense on this hex. Lost when the hex is captured.'
+			});
+		}
 		return {
 			title,
 			owner,
 			ownerColor,
 			armies: st.armies,
 			city: g.cityName,
-			terrainName,
-			terrainDesc,
-			fortified: !!st.fortified
+			modifiers
 		};
 	}
 
@@ -586,6 +766,52 @@
 </script>
 
 <svelte:head><title>Isle Wars — SvelteKit clone</title></svelte:head>
+
+<!-- Shared hex-render snippets: used by both the map SVG and the attack modal
+     so any change to how a hex reads (badge, fort ring, prod star, terrain
+     overlay, city label) stays consistent everywhere. -->
+{#snippet hexTerrain(polyPts: string, terrain: 'plain'|'mountain'|'forest'|'marsh'|'desert')}
+	{#if terrain === 'mountain'}
+		<polygon points={polyPts} fill="url(#mountain-pattern)" pointer-events="none" />
+	{:else if terrain === 'forest'}
+		<polygon points={polyPts} fill="url(#forest-pattern)" pointer-events="none" />
+	{:else if terrain === 'marsh'}
+		<polygon points={polyPts} fill="url(#marsh-pattern)" pointer-events="none" />
+	{:else if terrain === 'desert'}
+		<polygon points={polyPts} fill="url(#desert-pattern)" pointer-events="none" />
+	{/if}
+{/snippet}
+{#snippet hexBadge(gridId: number, cx: number, cy: number, scale: number, showCityLabel: boolean)}
+	{@const g = $game.map.grids[gridId]}
+	{@const st = $game.states[gridId]}
+	{@const badgeR = 20 * scale}
+	{@const fortR1 = 30 * scale}
+	{@const fortR2 = 34 * scale}
+	<g pointer-events="none">
+		{#if st.fortified}
+			<circle cx={cx} cy={cy} r={fortR1} fill="none" stroke="#7fcfff" stroke-width={3 * scale} stroke-dasharray="{6 * scale} {4 * scale}" opacity="0.95" />
+			<circle cx={cx} cy={cy} r={fortR2} fill="none" stroke="#7fcfff" stroke-width={1.5 * scale} opacity="0.55" />
+		{/if}
+		<circle cx={cx} cy={cy} r={badgeR} fill="#000" fill-opacity="0.6"
+			stroke={st.fortified ? '#7fcfff' : g.production ? '#ffe14a' : '#fff'}
+			stroke-width={(st.fortified ? 3 : g.production ? 2.5 : 1.5) * scale} />
+		<text x={cx} y={cy + 7 * scale} text-anchor="middle"
+			font-family="monospace" font-weight="bold"
+			font-size={20 * scale} fill="#fff">{st.armies}</text>
+		{#if st.fortified}
+			<text x={cx - 18 * scale} y={cy - 14 * scale} text-anchor="middle"
+				font-size={16 * scale} style="filter: drop-shadow(0 0 {3 * scale}px #7fcfff);">🛡</text>
+		{/if}
+		{#if g.production}
+			<text x={cx + 20 * scale} y={cy - 15 * scale} text-anchor="middle"
+				font-size={18 * scale} fill="#ffe14a">★</text>
+			{#if showCityLabel && g.cityName}
+				<text x={cx} y={cy + 34 * scale} class="city-label city-label-outline" text-anchor="middle">{g.cityName}</text>
+				<text x={cx} y={cy + 34 * scale} class="city-label" text-anchor="middle">{g.cityName}</text>
+			{/if}
+		{/if}
+	</g>
+{/snippet}
 
 <main>
 	<header>
@@ -666,8 +892,20 @@
 						<div class="toggle-desc">The AI controls all four players so you can watch a game play itself. Turn off to take over Blue again.</div>
 					</div>
 				</label>
+				<div class="toggle-card">
+					<div class="toggle-text" style="flex:1">
+						<div class="toggle-title">Base die sides</div>
+						<div class="toggle-desc">Combat rolls a fair 1–N die per side. Higher N shrinks the impact of the +1/+2 bonuses; d6 is the classic feel, d10 is the current default.</div>
+					</div>
+					<div class="die-controls">
+						{#each [6, 8, 10, 12, 20] as sides}
+							<button class="die-btn" class:on={debugDieSides === sides} onclick={() => setDebugDieSides(sides)}>d{sides}</button>
+						{/each}
+						<input class="die-num" type="number" min="2" max="100" value={debugDieSides} onchange={(e) => setDebugDieSides(+(e.currentTarget as HTMLInputElement).value)} />
+					</div>
+				</div>
 			</div>
-			<div class="debug-footer">Settings apply to the next game you start.</div>
+			<div class="debug-footer">Settings apply immediately (die changes take effect on the next roll).</div>
 		</section>
 	{/if}
 
@@ -727,6 +965,16 @@
 						<circle cx="34" cy="30" r="11" fill="#000" opacity="0.28" />
 						<circle cx="34" cy="28" r="3.2" fill="#5cb85c" opacity="0.32" />
 					</pattern>
+					<!-- Desert pattern: warm sand overlay with a few dune ridges and
+					     scattered dots so it reads as arid ground. -->
+					<pattern id="desert-pattern" width="44" height="38" patternUnits="userSpaceOnUse">
+						<rect x="0" y="0" width="44" height="38" fill="#e8c07a" opacity="0.32" />
+						<path d="M-2 26 Q10 20 22 26 T46 26" fill="none" stroke="#8a5a20" stroke-width="1.3" opacity="0.55" stroke-linecap="round" />
+						<path d="M-2 12 Q10 6 22 12 T46 12" fill="none" stroke="#8a5a20" stroke-width="1.1" opacity="0.4" stroke-linecap="round" />
+						<circle cx="8" cy="32" r="1.1" fill="#5c3a12" opacity="0.6" />
+						<circle cx="30" cy="18" r="1" fill="#5c3a12" opacity="0.55" />
+						<circle cx="36" cy="34" r="1.1" fill="#5c3a12" opacity="0.6" />
+					</pattern>
 					<!-- Marsh pattern: horizontal reed strokes suggesting wet ground. -->
 					<pattern id="marsh-pattern" width="40" height="34" patternUnits="userSpaceOnUse">
 						<path d="M4 10 Q10 5 16 10 T28 10" fill="none" stroke="#000" stroke-width="1.6" opacity="0.35" stroke-linecap="round" />
@@ -783,35 +1031,44 @@
 				{/each}
 				<!-- Terrain overlays: mountains + forests + marshes -->
 				{#each $game.map.grids as g}
-					{#if g.terrain === 'mountain'}
-						<polygon points={polygonPoints(g.cell)} fill="url(#mountain-pattern)" pointer-events="none" />
-					{:else if g.terrain === 'forest'}
-						<polygon points={polygonPoints(g.cell)} fill="url(#forest-pattern)" pointer-events="none" />
-					{:else if g.terrain === 'marsh'}
-						<polygon points={polygonPoints(g.cell)} fill="url(#marsh-pattern)" pointer-events="none" />
-					{/if}
+					{@render hexTerrain(polygonPoints(g.cell), g.terrain)}
+				{/each}
+				<!-- Rivers: thick layered strokes (dark banks + mid + highlight) with
+				     a soft glow, straddling the shared edge between two land hexes. -->
+				<defs>
+					<filter id="river-glow" x="-30%" y="-30%" width="160%" height="160%">
+						<feGaussianBlur stdDeviation="2.5" result="blur" />
+						<feMerge>
+							<feMergeNode in="blur" />
+							<feMergeNode in="SourceGraphic" />
+						</feMerge>
+					</filter>
+				</defs>
+				{#each riverPolylines as pts}
+					<g pointer-events="none" filter="url(#river-glow)">
+						<polyline
+							points={polygonPoints(pts)}
+							fill="none"
+							stroke="#0a2e5c" stroke-width="14"
+							stroke-linecap="round" stroke-linejoin="round"
+						/>
+						<polyline
+							points={polygonPoints(pts)}
+							fill="none"
+							stroke="#3ea0e0" stroke-width="9"
+							stroke-linecap="round" stroke-linejoin="round"
+						/>
+						<polyline
+							points={polygonPoints(pts)}
+							fill="none"
+							stroke="#e0f2ff" stroke-width="3"
+							stroke-linecap="round" stroke-linejoin="round"
+						/>
+					</g>
 				{/each}
 				<!-- Army count badges, production stars, and city names -->
 				{#each $game.map.grids as g}
-					{@const st = $game.states[g.id]}
-					<g pointer-events="none">
-						{#if st.fortified}
-							<circle cx={g.x} cy={g.y} r="30" fill="none" stroke="#7fcfff" stroke-width="3" stroke-dasharray="6 4" opacity="0.95" />
-							<circle cx={g.x} cy={g.y} r="34" fill="none" stroke="#7fcfff" stroke-width="1.5" opacity="0.55" />
-						{/if}
-						<circle cx={g.x} cy={g.y} r="20" fill="#000" fill-opacity="0.6" stroke={st.fortified ? '#7fcfff' : g.production ? '#ffe14a' : '#fff'} stroke-width={st.fortified ? 3 : g.production ? 2.5 : 1.5} />
-						<text x={g.x} y={g.y + 7} class="node-label" text-anchor="middle">{st.armies}</text>
-						{#if st.fortified}
-							<text x={g.x - 18} y={g.y - 14} class="fort-icon" text-anchor="middle">🛡</text>
-						{/if}
-						{#if g.production}
-							<text x={g.x + 20} y={g.y - 15} class="prod-star" text-anchor="middle">★</text>
-							{#if g.cityName}
-								<text x={g.x} y={g.y + 34} class="city-label city-label-outline" text-anchor="middle">{g.cityName}</text>
-								<text x={g.x} y={g.y + 34} class="city-label" text-anchor="middle">{g.cityName}</text>
-							{/if}
-						{/if}
-					</g>
+					{@render hexBadge(g.id, g.x, g.y, 1, true)}
 				{/each}
 				<!-- Island name labels centered on the island's centroid, with a
 				     dark stroked outline so they read on any hex color. -->
@@ -879,10 +1136,10 @@
 						{#if target != null}
 							{@const atkA = $game.states[$game.selectedFrom].armies}
 							{@const defA = $game.states[target].armies}
-							{@const defB = defenseBonus($game, target)}
+							{@const defB = defenseBonus($game, target, $game.selectedFrom)}
 							{@const atkB = attackerBonus($game, target)}
 							{@const wp = Math.round(winProbability(atkA, defA, defB, atkB) * 100)}
-							{@const modTxt = defB ? ` +${defB} ⛰` : atkB ? ` (atk +${atkB} 🌲)` : ''}
+							{@const modTxt = defB ? ` +${defB} def` : atkB ? ` (atk +${atkB} 🌲)` : ''}
 							<p class="hint">{gridLabelLocal($game.selectedFrom, $game)} ({atkA}) vs {gridLabelLocal(target, $game)} ({defA}{modTxt}) · <strong style="color:{wp >= 65 ? '#7fff7f' : wp >= 35 ? '#ffd67f' : '#ff7f7f'}">{wp}% win</strong></p>
 						{:else}
 							<p class="hint">Attackable neighbors are outlined in white. Hover to preview odds.</p>
@@ -891,27 +1148,10 @@
 				{/if}
 
 				{#if $game.current === HUMAN && $game.phase === 'attack_rolling'}
-					<div class="row">
-						{#if autoRolling}
-							<button onclick={stopAutoRoll}>Stop</button>
-						{:else}
-							<button onclick={rollAttack}>Roll!</button>
-							<button onclick={startAutoRoll}>Auto-Roll</button>
-						{/if}
-						<button onclick={quitAttack} disabled={autoRolling}>Cancel Attack</button>
-					</div>
-					{#if $game.selectedFrom != null && $game.selectedTo != null}
-						{@const atkA = $game.states[$game.selectedFrom].armies}
-						{@const defA = $game.states[$game.selectedTo].armies}
-						{@const defB = defenseBonus($game, $game.selectedTo)}
-						{@const atkB = attackerBonus($game, $game.selectedTo)}
-						{@const wp = Math.round(winProbability(atkA, defA, defB, atkB) * 100)}
-						{@const modTxt = defB ? ` +${defB} ⛰` : atkB ? ` (atk +${atkB} 🌲)` : ''}
-						<p class="hint">{gridLabelLocal($game.selectedFrom, $game)} ({atkA}) → {gridLabelLocal($game.selectedTo, $game)} ({defA}{modTxt}) · <strong style="color:{wp >= 65 ? '#7fff7f' : wp >= 35 ? '#ffd67f' : '#ff7f7f'}">{wp}% win</strong></p>
-					{/if}
+					<p class="hint">Roll the dice in the attack modal.</p>
 				{/if}
 
-				{#if $game.current === HUMAN && ($game.phase === 'move_select_from' || $game.phase === 'move_select_to' || $game.phase === 'bomb_select' || $game.phase === 'air_from' || $game.phase === 'air_to' || $game.phase === 'reinforce_select' || $game.phase === 'sabotage_select' || $game.phase === 'fortify_select' || $game.phase === 'ferry_from' || $game.phase === 'ferry_to' || $game.phase === 'invasion_from' || $game.phase === 'invasion_to' || $game.phase === 'artillery_from' || $game.phase === 'artillery_to' || $game.phase === 'deforest_select' || $game.phase === 'storm_from' || $game.phase === 'storm_to')}
+				{#if $game.current === HUMAN && ($game.phase === 'move_select_from' || $game.phase === 'move_select_to' || $game.phase === 'bomb_select' || $game.phase === 'air_from' || $game.phase === 'air_to' || $game.phase === 'reinforce_select' || $game.phase === 'sabotage_select' || $game.phase === 'fortify_select' || $game.phase === 'ferry_from' || $game.phase === 'ferry_to' || $game.phase === 'invasion_from' || $game.phase === 'invasion_to' || $game.phase === 'artillery_from' || $game.phase === 'artillery_to' || $game.phase === 'deforest_select' || $game.phase === 'oasis_select' || $game.phase === 'storm_from' || $game.phase === 'storm_to')}
 					<div class="row">
 						<button onclick={cancelAction}>Cancel</button>
 					</div>
@@ -1001,9 +1241,44 @@
 		{@const src = qtySourceHex()!}
 		{@const srcArmies = $game.states[src].armies}
 		{@const info = qtyInfo(srcArmies)}
+		{@const dstId = $game.phase !== 'placing' ? $game.selectedTo : null}
+		{@const qtyHR = 62}
+		{@const qtyHexPts = [0,1,2,3,4,5]
+			.map((i) => {
+				const a = (Math.PI / 3) * i - Math.PI / 2;
+				return `${100 + qtyHR * Math.cos(a)},${90 + qtyHR * Math.sin(a)}`;
+			}).join(' ')}
 		<div class="qty-modal-backdrop" onclick={cancelQty} role="presentation">
 			<div class="qty-modal" onclick={(e) => e.stopPropagation()} role="dialog" aria-label={info.title}>
 				<div class="qty-modal-title">{info.title}</div>
+				{#snippet qtyHex(gridId: number)}
+					{@const g = $game.map.grids[gridId]}
+					{@const owner = $game.states[gridId].owner}
+					{@const color = owner ? PLAYER_COLORS[owner] : '#556'}
+					<svg class="side-hex" viewBox="0 0 200 180" xmlns="http://www.w3.org/2000/svg">
+						<polygon points={qtyHexPts} fill={color} stroke="#0a1420" stroke-width="2" />
+						{@render hexTerrain(qtyHexPts, g.terrain)}
+						{@render hexBadge(gridId, 100, 90, 1.4, false)}
+					</svg>
+				{/snippet}
+				{#if dstId != null}
+					<div class="qty-hex-row">
+						{@render qtyHex(src)}
+						<div class="qty-arrow" aria-hidden="true">→</div>
+						{@render qtyHex(dstId)}
+					</div>
+					{@const dstG = $game.map.grids[dstId]}
+					{#if dstG.terrain === 'desert' || dstG.terrain === 'mountain' || dstG.terrain === 'forest' || dstG.terrain === 'marsh'}
+						<ul class="qty-mods">
+							{#if dstG.terrain === 'desert'}<li class="warn">🏜 Desert — 1 army lost to heat on arrival</li>{/if}
+							{#if dstG.terrain === 'mountain'}<li>⛰ Mountain — defender bonus if attacked from here</li>{/if}
+							{#if dstG.terrain === 'forest'}<li>🌲 Forest — attackers get cover on approach</li>{/if}
+							{#if dstG.terrain === 'marsh'}<li class="warn">💧 Marsh — can't launch a second attack after using this as a source</li>{/if}
+						</ul>
+					{/if}
+				{:else}
+					{@render qtyHex(src)}
+				{/if}
 				<div class="qty-modal-sub">
 					{#if $game.phase === 'placing'}
 						On <strong>{gridLabelLocal(src, $game)}</strong>
@@ -1029,6 +1304,85 @@
 				<div class="qty-modal-actions">
 					<button onclick={cancelQty}>Cancel</button>
 					<button class="primary" onclick={confirmQty}>{info.confirmLabel}</button>
+				</div>
+			</div>
+		</div>
+	{/if}
+
+	{#if $game.current === HUMAN && $game.phase === 'attack_rolling' && $game.selectedFrom != null && $game.selectedTo != null}
+		{@const src = $game.selectedFrom}
+		{@const tgt = $game.selectedTo}
+		{@const srcSt = $game.states[src]}
+		{@const tgtSt = $game.states[tgt]}
+		{@const srcG = $game.map.grids[src]}
+		{@const tgtG = $game.map.grids[tgt]}
+		{@const atkA = srcSt.armies}
+		{@const defA = tgtSt.armies}
+		{@const defB = defenseBonus($game, tgt, src)}
+		{@const atkB = attackerBonus($game, tgt)}
+		{@const eliteB = $game.eliteAttackActive ? 2 : 0}
+		{@const xBonus = crossingDefenseBonus($game, src, tgt)}
+		{@const bridgeCancels = $game.bridgeAttackActive && $game.map.rivers.some(([a,b]) => (a===src && b===tgt) || (a===tgt && b===src))}
+		{@const wp = Math.round(winProbability(atkA, defA, defB, atkB + eliteB) * 100)}
+		<div class="attack-modal-backdrop" role="presentation">
+			<div class="attack-modal" role="dialog" aria-label="Attack">
+				<div class="attack-title">
+					<span>Attack</span>
+					<span class="attack-wp" style="color:{wp >= 65 ? '#7fff7f' : wp >= 35 ? '#ffd67f' : '#ff7f7f'}">{wp}% win</span>
+				</div>
+				<div class="attack-hexes">
+					{#snippet attackHex(gridId: number, role: 'attacker' | 'defender', roleLabel: string)}
+						{@const g = $game.map.grids[gridId]}
+						{@const st = $game.states[gridId]}
+						{@const owner = st.owner}
+						{@const color = owner ? PLAYER_COLORS[owner] : '#556'}
+						{@const cx = 100}
+						{@const cy = 90}
+						{@const HR = 62}
+						{@const hexPts = [0,1,2,3,4,5]
+							.map((i) => {
+								const a = (Math.PI / 3) * i - Math.PI / 2;
+								return `${cx + HR * Math.cos(a)},${cy + HR * Math.sin(a)}`;
+							}).join(' ')}
+						<div class="attack-side {role}">
+							<div class="side-label">{roleLabel}</div>
+							<div class="side-name">{gridLabelLocal(gridId, $game)}{g.cityName ? ` · ${g.cityName}` : ''}</div>
+							<div class="side-owner" style="color:{color}">{owner ? PLAYER_NAMES[owner] : 'Neutral'}</div>
+							<svg class="side-hex" viewBox="0 0 200 180" xmlns="http://www.w3.org/2000/svg">
+								<polygon points={hexPts} fill={color} stroke="#0a1420" stroke-width="2" />
+								{@render hexTerrain(hexPts, g.terrain)}
+								{@render hexBadge(gridId, cx, cy, 1.4, false)}
+							</svg>
+							<ul class="side-mods">
+								<li>Base die 1–{debugDieSides}</li>
+								{#if role === 'attacker'}
+									{#if atkB > 0}<li class="pos">+{atkB} 🌲 forest cover on target</li>{/if}
+									{#if eliteB > 0}<li class="pos">+{eliteB} 🛡 Elite Troops</li>{/if}
+									{#if g.terrain === 'marsh'}<li class="warn">Marsh — cannot re-attack from here this turn</li>{/if}
+								{:else}
+									{#if g.terrain === 'mountain'}<li class="pos">+1 ⛰ mountain</li>{/if}
+									{#if st.fortified}<li class="pos">+2 🛡 fortified</li>{/if}
+									{#if xBonus === 2}<li class="pos">+2 ⚓ sea-lane crossing</li>{/if}
+									{#if xBonus === 1}<li class="pos">+1 💧 river crossing</li>{/if}
+									{#if bridgeCancels}<li class="warn">🌉 Bridge cancels river bonus</li>{/if}
+									{#if g.terrain === 'forest'}<li class="warn">Forest — attacker gets +1</li>{/if}
+									{#if g.terrain === 'desert'}<li class="warn">Desert — heat burns 1 army when moving in</li>{/if}
+								{/if}
+							</ul>
+						</div>
+					{/snippet}
+					{@render attackHex(src, 'attacker', 'Attacker')}
+					<div class="attack-vs">vs</div>
+					{@render attackHex(tgt, 'defender', 'Defender')}
+				</div>
+				<div class="attack-actions">
+					{#if autoRolling}
+						<button onclick={stopAutoRoll}>Stop</button>
+					{:else}
+						<button class="primary" onclick={rollAttack}>Roll</button>
+						<button onclick={startAutoRoll}>Auto-Roll</button>
+					{/if}
+					<button onclick={quitAttack} disabled={autoRolling}>Cancel</button>
 				</div>
 			</div>
 		</div>
@@ -1151,13 +1505,12 @@
 		</div>
 		<div class="tt-owner">{info.owner}</div>
 		{#if info.city}<div class="tt-city">★ {info.city}</div>{/if}
-		<div class="tt-terrain">
-			<div class="tt-terrain-name">{info.terrainName}</div>
-			{#if info.terrainDesc}<div class="tt-terrain-desc">{info.terrainDesc}</div>{/if}
-		</div>
-		{#if info.fortified}
-			<div class="tt-fort">🛡 Fortified — +2 defense (lost when hex is captured).</div>
-		{/if}
+		{#each info.modifiers as m}
+			<div class="tt-terrain">
+				<div class="tt-terrain-name">{m.name}</div>
+				{#if m.desc}<div class="tt-terrain-desc">{m.desc}</div>{/if}
+			</div>
+		{/each}
 	</div>
 {/if}
 
@@ -1363,7 +1716,7 @@
 	}
 	.water-label {
 		fill: #7aaccc;
-		font-size: 9px;
+		font-size: 15px;
 		font-family: 'Georgia', 'Times New Roman', serif;
 		font-style: italic;
 		letter-spacing: 0.05em;
@@ -1669,6 +2022,140 @@
 		margin-top: 0.75rem;
 	}
 	.qty-modal-actions button { padding: 0.7rem 0.5rem; font-size: 0.95rem; font-weight: bold; }
+	.qty-hex-row {
+		display: grid;
+		grid-template-columns: 1fr auto 1fr;
+		align-items: center;
+		gap: 0.5rem;
+	}
+	.qty-arrow {
+		color: #ffe14a;
+		font-size: 2rem;
+		font-weight: bold;
+		text-align: center;
+		user-select: none;
+	}
+	.qty-mods {
+		list-style: none;
+		padding: 0;
+		margin: 0.35rem 0 0.25rem;
+		font-size: 0.82rem;
+		color: #c8d8ea;
+	}
+	.qty-mods li { padding: 0.15rem 0; }
+	.qty-mods li.pos { color: #7fff9f; }
+	.qty-mods li.warn { color: #ffb37f; }
+
+	.attack-modal-backdrop {
+		position: fixed;
+		inset: 0;
+		background: rgba(4, 10, 20, 0.7);
+		backdrop-filter: blur(2px);
+		display: flex;
+		align-items: center;
+		justify-content: center;
+		z-index: 1500;
+	}
+	.attack-modal {
+		background: linear-gradient(180deg, #10304a, #0a1a2c);
+		border: 2px solid #ffe14a;
+		border-radius: 12px;
+		padding: 1.25rem 1.5rem;
+		min-width: 620px;
+		max-width: 780px;
+		box-shadow: 0 12px 40px rgba(0, 0, 0, 0.55), 0 0 30px rgba(255, 225, 74, 0.2);
+	}
+	.attack-title {
+		display: flex;
+		justify-content: space-between;
+		align-items: baseline;
+		color: #e0f0ff;
+		font-size: 1.15rem;
+		font-weight: bold;
+		border-bottom: 1px solid #234;
+		padding-bottom: 0.5rem;
+		margin-bottom: 0.75rem;
+	}
+	.attack-wp { font-size: 1.05rem; font-family: monospace; }
+	.attack-hexes {
+		display: grid;
+		grid-template-columns: 1fr auto 1fr;
+		align-items: stretch;
+		gap: 0.75rem;
+	}
+	.attack-side {
+		border: 1px solid #234;
+		border-radius: 10px;
+		padding: 0.75rem 0.85rem;
+		background: rgba(0, 0, 0, 0.25);
+		display: flex;
+		flex-direction: column;
+		align-items: stretch;
+	}
+	.side-hex {
+		display: block;
+		width: 100%;
+		max-width: 220px;
+		height: auto;
+		margin: 0.35rem auto 0.5rem;
+	}
+	.side-label {
+		color: #8fb0d0;
+		font-size: 0.72rem;
+		text-transform: uppercase;
+		letter-spacing: 0.08em;
+	}
+	.side-name { color: #e8f2ff; font-weight: bold; font-size: 1rem; margin-top: 0.1rem; }
+	.side-owner { font-size: 0.85rem; font-weight: bold; margin-bottom: 0.35rem; }
+	.side-armies {
+		font-size: 2.4rem;
+		font-family: monospace;
+		font-weight: bold;
+		color: #ffe14a;
+		text-align: center;
+		line-height: 1;
+		margin-top: 0.15rem;
+	}
+	.side-armies-label {
+		text-align: center;
+		color: #7fa0c0;
+		font-size: 0.72rem;
+		text-transform: uppercase;
+		letter-spacing: 0.08em;
+		margin-bottom: 0.4rem;
+	}
+	.side-mods {
+		list-style: none;
+		padding: 0;
+		margin: 0;
+		font-size: 0.82rem;
+		color: #c8d8ea;
+	}
+	.side-mods li { padding: 0.15rem 0; }
+	.side-mods li.pos { color: #7fff9f; }
+	.side-mods li.warn { color: #ffb37f; }
+	.attack-vs {
+		align-self: center;
+		color: #6a8ab0;
+		font-family: 'Georgia', serif;
+		font-style: italic;
+		font-size: 1.15rem;
+	}
+	.attack-actions {
+		display: grid;
+		grid-template-columns: 2fr 2fr 1fr;
+		gap: 0.5rem;
+		margin-top: 0.9rem;
+	}
+	.attack-actions button {
+		padding: 0.75rem 0.5rem;
+		font-size: 0.95rem;
+		font-weight: bold;
+	}
+	.attack-actions .primary {
+		background: #ffe14a;
+		color: #1a1a1a;
+	}
 
 	.debug-panel {
 		border: 1px solid #4a3a1a;
@@ -1770,6 +2257,33 @@
 		font-size: 0.75rem;
 		font-style: italic;
 		text-align: right;
+	}
+	.die-controls {
+		display: flex;
+		flex-wrap: wrap;
+		gap: 0.35rem;
+		align-items: center;
+	}
+	.die-btn {
+		background: #1a1d26;
+		color: #cfd6e2;
+		border: 1px solid #33384a;
+		border-radius: 6px;
+		padding: 0.3rem 0.55rem;
+		font-family: monospace;
+		font-size: 0.85rem;
+		cursor: pointer;
+	}
+	.die-btn:hover { border-color: #556; }
+	.die-btn.on { border-color: #ffbe3c; background: #2a2113; color: #ffdf87; }
+	.die-num {
+		width: 4.5rem;
+		background: #12141a;
+		color: #e0e0ea;
+		border: 1px solid #33384a;
+		border-radius: 6px;
+		padding: 0.25rem 0.4rem;
+		font-family: monospace;
 	}
 
 	.hex-tooltip {

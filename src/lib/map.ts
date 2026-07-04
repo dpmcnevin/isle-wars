@@ -9,7 +9,7 @@ export interface Island {
 	shape: [number, number][]; // outline of the union of member hexes
 }
 
-export type Terrain = 'plain' | 'mountain' | 'forest' | 'marsh';
+export type Terrain = 'plain' | 'mountain' | 'forest' | 'marsh' | 'desert';
 
 export interface Grid {
 	id: number;
@@ -36,10 +36,18 @@ export interface GameMap {
 	seaLanes: [number, number][];
 	waterHexes: [number, number][][]; // hex polygons for unassigned (water) cells
 	waterFeatures: WaterFeature[]; // named lakes and bays
+	rivers: [number, number][]; // unordered land-land edge pairs (a < b)
 	width: number;
 	height: number;
 	viewBox: { x: number; y: number; w: number; h: number }; // tight bbox around land
 	winThreshold: number;
+}
+
+/** True if the edge between two land hexes is a river. */
+export function crossesRiver(map: GameMap, a: number, b: number): boolean {
+	const lo = Math.min(a, b), hi = Math.max(a, b);
+	for (const [x, y] of map.rivers) if (x === lo && y === hi) return true;
+	return false;
 }
 
 export function mulberry32(a: number) {
@@ -487,17 +495,33 @@ export function generateMap(seed: number = Math.floor(Math.random() * 1e9)): Gam
 	function pathClearsOtherIslands(aId: number, bId: number): boolean {
 		const a = grids[aId], b = grids[bId];
 		const dx = b.x - a.x, dy = b.y - a.y;
-		const dist = Math.hypot(dx, dy);
+		const dist = Math.hypot(dx, dy) || 1;
 		const steps = Math.max(6, Math.ceil(dist / 15));
 		const startT = 0.08, endT = 0.92;
-		for (let i = 0; i <= steps; i++) {
-			const t = startT + (endT - startT) * (i / steps);
-			const px = a.x + dx * t;
-			const py = a.y + dy * t;
+		// Same curve the renderer draws — arc height 6% of length, up to 22px,
+		// perpendicular, with a deterministic side from the endpoint ids.
+		const arc = Math.min(22, dist * 0.06);
+		const side = ((aId + bId) % 2 === 0) ? 1 : -1;
+		const perpX = (-dy / dist) * arc * side;
+		const perpY = (dx / dist) * arc * side;
+		const midX = (a.x + b.x) / 2 + perpX;
+		const midY = (a.y + b.y) / 2 + perpY;
+		function pointClear(px: number, py: number): boolean {
 			for (const g of grids) {
 				if (g.id === aId || g.id === bId) continue;
 				if (pathInPoly(px, py, g.cell)) return false;
 			}
+			return true;
+		}
+		for (let i = 0; i <= steps; i++) {
+			const t = startT + (endT - startT) * (i / steps);
+			// Straight-line sample
+			if (!pointClear(a.x + dx * t, a.y + dy * t)) return false;
+			// Quadratic Bezier sample matching the rendered curve
+			const omt = 1 - t;
+			const bx = omt * omt * a.x + 2 * omt * t * midX + t * t * b.x;
+			const by = omt * omt * a.y + 2 * omt * t * midY + t * t * b.y;
+			if (!pointClear(bx, by)) return false;
 		}
 		return true;
 	}
@@ -645,6 +669,124 @@ export function generateMap(seed: number = Math.floor(Math.random() * 1e9)): Gam
 		for (const id of range) grids[id].terrain = 'marsh';
 	}
 
+	// Deserts: rare, 25% chance per island. A desert costs the attacker one
+	// army just to enter (heat attrition), and can't host production centers.
+	for (const isl of islands) {
+		const gs = grids.filter((g) => g.island === isl.id);
+		if (gs.length < 4) continue;
+		if (rnd() >= 0.25) continue;
+		const plains = gs.filter((g) => g.terrain === 'plain');
+		if (plains.length === 0) continue;
+		const start = plains[Math.floor(rnd() * plains.length)];
+		const rangeSize = 1 + Math.floor(rnd() * 3); // 1..3
+		const range = new Set<number>([start.id]);
+		const frontier: number[] = [start.id];
+		while (range.size < rangeSize && frontier.length > 0) {
+			const cur = frontier.shift()!;
+			const neighbors = adj[cur].filter(
+				(n) => grids[n].island === isl.id && !range.has(n) && grids[n].terrain === 'plain'
+			);
+			if (neighbors.length === 0) continue;
+			const pick = neighbors[Math.floor(rnd() * neighbors.length)];
+			range.add(pick);
+			frontier.push(pick);
+		}
+		for (const id of range) {
+			grids[id].terrain = 'desert';
+			grids[id].production = false;
+		}
+	}
+
+	// Rivers: from a mountain hex (or random plain if none), walk toward the
+	// coast picking neighbors with more water-side exposure, laying down a
+	// land-land edge at each step. Rivers give the defender +1 die when the
+	// attacker crosses them.
+	const rivers: [number, number][] = [];
+	const riverKey = new Set<string>();
+	const addRiver = (a: number, b: number) => {
+		const lo = Math.min(a, b), hi = Math.max(a, b);
+		const k = `${lo},${hi}`;
+		if (riverKey.has(k)) return;
+		riverKey.add(k);
+		rivers.push([lo, hi]);
+	};
+	// Count only same-island land neighbors — adj is polluted by cross-island
+	// sea-lane pairs at this point in the pipeline.
+	const coastScore = grids.map((_, gid) =>
+		6 - adj[gid].filter((n) => grids[n].island === grids[gid].island).length
+	);
+	// A vertex is inland when three land hexes meet there. When any face of a
+	// river crossing has a coastal vertex, that face touches the sea — the
+	// river should end there rather than continue along the shoreline.
+	const rvVKey = (v: [number, number]) => `${Math.round(v[0] * 10)},${Math.round(v[1] * 10)}`;
+	const vertLandCount = new Map<string, number>();
+	for (const g of grids) {
+		for (const v of g.cell) {
+			const k = rvVKey(v);
+			vertLandCount.set(k, (vertLandCount.get(k) ?? 0) + 1);
+		}
+	}
+	const faceHitsWater = (a: number, b: number): boolean => {
+		const cb = new Set(grids[b].cell.map(rvVKey));
+		for (const v of grids[a].cell) {
+			const k = rvVKey(v);
+			if (cb.has(k) && (vertLandCount.get(k) ?? 0) < 3) return true;
+		}
+		return false;
+	};
+	for (const isl of islands) {
+		const own = grids.filter((g) => g.island === isl.id);
+		if (own.length < 4) continue;
+		const mountains = own.filter((g) => g.terrain === 'mountain');
+		// One river per island — small islands sometimes skip.
+		const nRivers = own.length >= 6 || mountains.length > 0 ? 1 : 0;
+		// Start deep inland: the mountain (or plain) with the lowest coast
+		// score is the most interior hex on the island.
+		// Prefer mountains, but always fall back to inland plains after them —
+		// mountains often sit on coast edges, and a mountain-only source list
+		// would give up before trying the deeper interior.
+		const rankedSources = [
+			...mountains.slice().sort((a, b) => coastScore[a.id] - coastScore[b.id]),
+			...own.filter((g) => g.terrain !== 'mountain')
+				.sort((a, b) => coastScore[a.id] - coastScore[b.id]),
+		];
+		// Walk as far as possible along the island. Cap at island size so we
+		// can never visit more hexes than the island contains.
+		const maxSteps = Math.min(30, own.length);
+		for (let k = 0; k < nRivers; k++) {
+			// Try each ranked source until we find a walk long enough. Rivers
+			// shorter than the minimum are discarded rather than committed.
+			const MIN_RIVER_LEN = 4;
+			for (let attempt = 0; attempt < rankedSources.length; attempt++) {
+				const src = rankedSources[attempt];
+				let cur = src.id;
+				const visited = new Set<number>([cur]);
+				const walk: [number, number][] = [];
+				for (let step = 0; step < maxSteps; step++) {
+					const opts = adj[cur].filter(
+						(n) => !visited.has(n) && grids[n].island === isl.id
+					);
+					if (opts.length === 0) break;
+					// Stay inland: prefer neighbors with the lowest coast score, so
+				// the river only reaches the shore at its natural mouth.
+				opts.sort((a, b) => (coastScore[a] - coastScore[b]) * 0.5 + (rnd() - 0.5));
+					const next = opts[0];
+					walk.push([cur, next]);
+					visited.add(next);
+					cur = next;
+					// If the face we just crossed touches the sea at either
+					// vertex, this is the river's mouth — stop rather than
+					// continuing along the shoreline.
+					if (faceHitsWater(walk[walk.length - 1][0], walk[walk.length - 1][1])) break;
+				}
+				if (walk.length >= MIN_RIVER_LEN) {
+					for (const [a, b] of walk) addRiver(a, b);
+					break;
+				}
+			}
+		}
+	}
+
 	// Assign a unique city name to every production-center hex.
 	const cityPool = [...CITY_NAMES].sort(() => rnd() - 0.5);
 	let cityIdx = 0;
@@ -780,6 +922,7 @@ export function generateMap(seed: number = Math.floor(Math.random() * 1e9)): Gam
 		seaLanes,
 		waterHexes,
 		waterFeatures,
+		rivers,
 		width,
 		height,
 		viewBox: { x: vbX, y: vbY, w: vbW, h: vbH },

@@ -16,6 +16,7 @@ import {
 	type CardType,
 	type GameState
 } from './game';
+import { crossesRiver } from './map';
 
 /**
  * Run one full turn for an AI player. Assumes current player === p and
@@ -63,7 +64,7 @@ export async function runAiTurn(p: Player, tickMs = 90) {
 			p2 === 'bomb_select' || p2 === 'air_from' || p2 === 'air_to' || p2 === 'air_qty' ||
 			p2 === 'reinforce_select' || p2 === 'sabotage_select' || p2 === 'fortify_select' ||
 			p2 === 'ferry_from' || p2 === 'ferry_to' || p2 === 'invasion_from' || p2 === 'invasion_to' ||
-			p2 === 'deforest_select' || p2 === 'storm_from' || p2 === 'storm_to'
+			p2 === 'deforest_select' || p2 === 'oasis_select' || p2 === 'storm_from' || p2 === 'storm_to'
 		) {
 			cancelAction();
 		}
@@ -323,6 +324,14 @@ function tryPlayCardAction(p: Player) {
 			return;
 		}
 	}
+	// Bridge before an attack that crosses a river.
+	{
+		const idx = s.hands[p].findIndex((c) => c === 'bridge');
+		if (idx >= 0 && opp && crossesRiver(s.map, opp.from, opp.to)) {
+			playCard(idx);
+			return;
+		}
+	}
 	// Bomb a beefy enemy hex on our border.
 	s = get(game);
 	{
@@ -353,6 +362,19 @@ function tryPlayCardAction(p: Player) {
 		if (idx >= 0 && target != null) {
 			playCard(idx);
 			if (get(game).phase === 'deforest_select') selectGrid(target);
+			return;
+		}
+	}
+	// Oasis: irrigate one of our own desert hexes to remove heat attrition.
+	s = get(game);
+	{
+		const idx = s.hands[p].findIndex((c) => c === 'oasis');
+		const target = s.map.grids.findIndex(
+			(g) => g.terrain === 'desert' && s.states[g.id].owner === p
+		);
+		if (idx >= 0 && target >= 0) {
+			playCard(idx);
+			if (get(game).phase === 'oasis_select') selectGrid(target);
 			return;
 		}
 	}
