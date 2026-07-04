@@ -57,6 +57,29 @@
 	let tooltipPos = $state<{ x: number; y: number } | null>(null);
 	let hoveredCard = $state<CardType | null>(null);
 	let cardTipPos = $state<{ x: number; y: number } | null>(null);
+	let hoveredLogIdx = $state<number | null>(null);
+	let logTipPos = $state<{ x: number; y: number } | null>(null);
+
+	function logIcon(kind: string) {
+		switch (kind) {
+			case 'attack': return '⚔';
+			case 'defeat': return '☠';
+			case 'card': return '🎴';
+			case 'event': return '⚡';
+			default: return '·';
+		}
+	}
+	function onLogHoverEnter(i: number, e: PointerEvent) {
+		hoveredLogIdx = i;
+		logTipPos = { x: e.clientX, y: e.clientY };
+	}
+	function onLogHoverMove(e: PointerEvent) {
+		if (hoveredLogIdx != null) logTipPos = { x: e.clientX, y: e.clientY };
+	}
+	function onLogHoverLeave() {
+		hoveredLogIdx = null;
+		logTipPos = null;
+	}
 
 	function onCardHoverEnter(c: CardType, e: PointerEvent) {
 		hoveredCard = c;
@@ -244,13 +267,14 @@
 	}
 	function stopAutoRoll() { autoRolling = false; }
 
-	// Reactively drive AI turns whenever current is not the human.
+	// Reactively drive AI turns whenever current is not the human (or always,
+	// when the "Auto-play" debug option is on).
 	$effect(() => {
 		const s = $game;
 		if (aiRunning) return;
 		if (!s.gameStarted) return; // waiting for Start Game
 		if (s.phase === 'game_over') return;
-		if (s.current === HUMAN) return;
+		if (s.current === HUMAN && !debugAutoPlay) return;
 		aiRunning = true;
 		(async () => {
 			await new Promise((r) => setTimeout(r, aiSpeed === 0 ? 40 : 200));
@@ -345,11 +369,13 @@
 	let showDebug = $state(false);
 	let debugDisableSave = $state(false);
 	let debugStarterCards = $state(false);
+	let debugAutoPlay = $state(false);
 
 	function loadDebugUi() {
 		const d = getDebugSettings();
 		debugDisableSave = d.disableSave;
 		debugStarterCards = d.starterCards;
+		debugAutoPlay = d.autoPlay;
 	}
 
 	function toggleDebugDisableSave() {
@@ -360,6 +386,14 @@
 	function toggleDebugStarterCards() {
 		debugStarterCards = !debugStarterCards;
 		updateDebugSettings({ starterCards: debugStarterCards });
+	}
+
+	function toggleDebugAutoPlay() {
+		debugAutoPlay = !debugAutoPlay;
+		updateDebugSettings({ autoPlay: debugAutoPlay });
+		// If autoplay was just enabled and we're waiting on the start gate,
+		// go ahead and start so the AI can run.
+		if (debugAutoPlay && !$game.gameStarted) startGamePlaying();
 	}
 
 	interface HexInfo {
@@ -476,6 +510,14 @@
 					<div class="toggle-text">
 						<div class="toggle-title">Blue starts with every card</div>
 						<div class="toggle-desc">Deals one of each card type to Blue's hand at the start of every new game for testing.</div>
+					</div>
+				</label>
+				<label class="toggle-card" class:on={debugAutoPlay}>
+					<input type="checkbox" checked={debugAutoPlay} onchange={toggleDebugAutoPlay} />
+					<div class="toggle-slot"><div class="toggle-thumb"></div></div>
+					<div class="toggle-text">
+						<div class="toggle-title">Auto-play the whole game</div>
+						<div class="toggle-desc">The AI controls all four players so you can watch a game play itself. Turn off to take over Blue again.</div>
 					</div>
 				</label>
 			</div>
@@ -807,15 +849,21 @@
 
 			<section class="panel">
 				<h3>Log</h3>
-				<ul class="log">
-					{#each $game.log as e}
-						<li class={e.kind ?? 'info'}>
-							<span class="turn-tag">T{e.turn}</span>
-							{#if e.player}<span class="pdot" style="background:{PLAYER_COLORS[e.player]}"></span>{/if}
-							{e.text}
-						</li>
+				<div class="log-grid">
+					{#each $game.log as e, i}
+						<button
+							class="log-chip kind-{e.kind ?? 'info'}"
+							style={e.player ? `--player:${PLAYER_COLORS[e.player]}` : ''}
+							onpointerenter={(ev) => onLogHoverEnter(i, ev)}
+							onpointermove={onLogHoverMove}
+							onpointerleave={onLogHoverLeave}
+							aria-label={e.text}
+						>
+							<span class="chip-turn">T{e.turn}</span>
+							<span class="chip-icon">{logIcon(e.kind ?? 'info')}</span>
+						</button>
 					{/each}
-				</ul>
+				</div>
 			</section>
 		</aside>
 	</div>
@@ -895,6 +943,22 @@
 	</section>
 	{/if}
 </main>
+
+{#if hoveredLogIdx != null && logTipPos && $game.log[hoveredLogIdx]}
+	{@const le = $game.log[hoveredLogIdx]}
+	{@const lp = clampTip(logTipPos.x, logTipPos.y, 300, 100)}
+	<div class="log-tooltip kind-{le.kind ?? 'info'}" style="left:{lp.x}px; top:{lp.y}px">
+		<div class="lt-header">
+			<span class="lt-turn">Turn {le.turn}</span>
+			{#if le.player}
+				<span class="lt-player-dot" style="background:{PLAYER_COLORS[le.player]}"></span>
+				<span class="lt-player-name">{PLAYER_NAMES[le.player]}</span>
+			{/if}
+			<span class="lt-kind">{logIcon(le.kind ?? 'info')} {le.kind ?? 'info'}</span>
+		</div>
+		<div class="lt-text">{le.text}</div>
+	</div>
+{/if}
 
 {#if hoveredCard != null && cardTipPos}
 	{@const cm = CARD_META[hoveredCard]}
@@ -1234,27 +1298,81 @@
 	}
 	.ct-desc { color: #d0e6f5; line-height: 1.4; margin-bottom: 0.35rem; }
 	.ct-when { color: #7fcfff; font-size: 0.72rem; }
-	.log {
-		list-style: none;
-		padding: 0;
-		margin: 0;
+	.log-grid {
+		display: flex;
+		flex-wrap: wrap;
+		gap: 4px;
 		max-height: 260px;
 		overflow-y: auto;
-		font-size: 0.8rem;
+		padding: 2px;
 	}
-	.log li {
-		padding: 0.2rem 0;
-		border-bottom: 1px solid #1a3040;
+	.log-chip {
+		--player: #4a7a9a;
 		display: flex;
-		gap: 0.4rem;
-		align-items: baseline;
+		flex-direction: column;
+		align-items: center;
+		justify-content: center;
+		gap: 0;
+		width: 32px;
+		height: 32px;
+		padding: 0;
+		border: 1px solid var(--player);
+		border-radius: 4px;
+		background: #081826;
+		cursor: pointer;
+		color: var(--player);
+		transition: transform 0.08s, background 0.08s;
 	}
-	.log li.attack { color: #ffbb99; }
-	.log li.card { color: #ffe14a; }
-	.log li.event { color: #ff99ff; }
-	.log li.defeat { color: #ff9999; }
-	.turn-tag { color: #4a7a9a; font-family: monospace; font-size: 0.7rem; }
-	.pdot { width: 10px; height: 10px; border-radius: 50%; display: inline-block; }
+	.log-chip:hover { transform: translateY(-1px); background: #10304a; }
+	.chip-turn { font-family: monospace; font-size: 0.55rem; line-height: 1; color: #6a9abf; margin-top: 1px; }
+	.chip-icon { font-size: 0.95rem; line-height: 1; margin-top: -1px; }
+	/* Kind tints for the left bar / icon color */
+	.log-chip.kind-attack { border-left: 3px solid #ffbb99; }
+	.log-chip.kind-attack .chip-icon { color: #ffbb99; }
+	.log-chip.kind-defeat { border-left: 3px solid #ff9999; }
+	.log-chip.kind-defeat .chip-icon { color: #ff9999; }
+	.log-chip.kind-card { border-left: 3px solid #ffe14a; }
+	.log-chip.kind-card .chip-icon { color: #ffe14a; }
+	.log-chip.kind-event { border-left: 3px solid #ff99ff; }
+	.log-chip.kind-event .chip-icon { color: #ff99ff; }
+	.log-chip.kind-info .chip-icon { color: #6a9abf; }
+
+	.log-tooltip {
+		position: fixed;
+		z-index: 1000;
+		background: #0a1420;
+		border: 1px solid #2a4a6a;
+		border-radius: 6px;
+		padding: 0.55rem 0.7rem;
+		box-shadow: 0 4px 14px rgba(0, 0, 0, 0.6);
+		color: #d0e6f5;
+		font-size: 0.82rem;
+		min-width: 220px;
+		max-width: 300px;
+		pointer-events: none;
+	}
+	.log-tooltip.kind-attack { border-top: 3px solid #ffbb99; }
+	.log-tooltip.kind-defeat { border-top: 3px solid #ff9999; }
+	.log-tooltip.kind-card { border-top: 3px solid #ffe14a; }
+	.log-tooltip.kind-event { border-top: 3px solid #ff99ff; }
+	.log-tooltip.kind-info { border-top: 3px solid #6a9abf; }
+	.lt-header {
+		display: flex;
+		align-items: center;
+		gap: 0.4rem;
+		font-size: 0.72rem;
+		margin-bottom: 0.35rem;
+	}
+	.lt-turn { color: #7fcfff; font-family: monospace; }
+	.lt-player-dot { width: 9px; height: 9px; border-radius: 50%; }
+	.lt-player-name { color: #d0e6f5; }
+	.lt-kind {
+		margin-left: auto;
+		text-transform: uppercase;
+		letter-spacing: 0.08em;
+		color: #7a9abf;
+	}
+	.lt-text { color: #e0f0ff; line-height: 1.35; }
 
 	.analytics {
 		border: 1px solid #1a3040;

@@ -295,25 +295,34 @@ export const DEBUG_KEY = 'isle-wars-debug';
 
 export interface DebugSettings {
 	disableSave: boolean;
-	starterCards: boolean; // give blue ferry + invasion on new games
+	starterCards: boolean; // give blue every card type on new games
+	autoPlay: boolean; // AI takes over all four players
 }
 
 function loadDebugSettings(): DebugSettings {
-	if (typeof window === 'undefined') return { disableSave: false, starterCards: false };
+	const dflt: DebugSettings = { disableSave: false, starterCards: false, autoPlay: false };
+	if (typeof window === 'undefined') return dflt;
 	try {
 		const raw = localStorage.getItem(DEBUG_KEY);
 		if (raw) {
 			const parsed = JSON.parse(raw) as DebugSettings;
 			return {
 				disableSave: !!parsed.disableSave,
-				starterCards: !!parsed.starterCards
+				starterCards: !!parsed.starterCards,
+				autoPlay: !!parsed.autoPlay
 			};
 		}
 	} catch { /* ignore */ }
-	return { disableSave: false, starterCards: false };
+	return dflt;
 }
 
 let debugSettings: DebugSettings = loadDebugSettings();
+
+// Hoisted here (before startGame runs at module load) so the dev logger's
+// module-init call to devLogGameStart doesn't hit a TDZ error.
+let devLogGameId: string | null = null;
+const TERRAIN_IDX: Record<string, number> = { plain: 0, mountain: 1, forest: 2, marsh: 3 };
+const PLAYER_IDX: Record<Player, number> = { blue: 0, green: 1, red: 2, brown: 3 };
 
 export function getDebugSettings(): DebugSettings {
 	return { ...debugSettings };
@@ -569,7 +578,9 @@ export function startGame(difficulty = 2, startingArmies = 3, seed?: number): Ga
 		stats: emptyStatsMap()
 	};
 	// Start first turn
-	return beginTurn(state);
+	const ready = beginTurn(state);
+	devLogGameStart(ready);
+	return ready;
 }
 
 function mulberry32(a: number) {
@@ -605,7 +616,142 @@ function computeReinforcements(s: GameState, p: Player): number {
 }
 
 function log(s: GameState, text: string, kind: LogEntry['kind'] = 'info', player: Player | null = s.current) {
-	s.log = [{ turn: s.turn, player, text, kind }, ...s.log].slice(0, 100);
+	const entry: LogEntry = { turn: s.turn, player, text, kind };
+	s.log = [entry, ...s.log].slice(0, 100);
+}
+
+// ---------------------------------------------------------------------------
+// Dev-only ML training logger. Emits JSONL events to /tmp/isle-wars-events.jsonl
+// via Vite's dev middleware. Structured for easy ingestion into training
+// pipelines (one JSON object per line).
+//
+// Event types:
+//   { type: 'game_start', game_id, seed, difficulty, players, map }
+//   { type: 'action',     game_id, turn, actor, phase, action, state_before }
+//   { type: 'attack_result', game_id, turn, actor, from, to, dice, conquered, ...}
+//   { type: 'event',      game_id, turn, event_type, details }
+//   { type: 'game_end',   game_id, turn, winner, final_stats, per_player_summary }
+//
+// `state_before` snapshots the fields most useful for RL/supervised learning:
+//   grid_owners: number[]  // player index 0..3 or -1 for neutral
+//   grid_armies: number[]
+//   grid_terrain: number[] // 0 plain, 1 mountain, 2 forest, 3 marsh
+//   grid_fortified: number[] // 0/1
+//   grid_production: number[] // 0/1
+//   sea_lanes: [number, number][]
+//   hands: Record<Player, string[]> // card types in each hand
+//   scores: Record<Player, {territories, armies, alive}>
+//   current: Player
+//   phase: Phase
+//   armies_to_place: number
+// ---------------------------------------------------------------------------
+
+function devLog(payload: object) {
+	if (typeof window === 'undefined') return;
+	if (!import.meta.env.DEV) return;
+	try {
+		void fetch('/api/log', {
+			method: 'POST',
+			headers: { 'content-type': 'application/json' },
+			body: JSON.stringify(payload)
+		}).catch(() => { /* network errors ignored */ });
+	} catch { /* ignore */ }
+}
+
+function snapshotState(s: GameState) {
+	const grid_owners: number[] = [];
+	const grid_armies: number[] = [];
+	const grid_terrain: number[] = [];
+	const grid_fortified: number[] = [];
+	const grid_production: number[] = [];
+	for (const g of s.map.grids) {
+		const st = s.states[g.id];
+		grid_owners.push(st.owner ? PLAYER_IDX[st.owner] : -1);
+		grid_armies.push(st.armies);
+		grid_terrain.push(TERRAIN_IDX[g.terrain] ?? 0);
+		grid_fortified.push(st.fortified ? 1 : 0);
+		grid_production.push(g.production ? 1 : 0);
+	}
+	const scores: Record<Player, { territories: number; armies: number; alive: boolean }> =
+		{ blue: { territories: 0, armies: 0, alive: s.alive.blue },
+		  green: { territories: 0, armies: 0, alive: s.alive.green },
+		  red: { territories: 0, armies: 0, alive: s.alive.red },
+		  brown: { territories: 0, armies: 0, alive: s.alive.brown } };
+	for (const st of s.states) {
+		if (!st.owner) continue;
+		scores[st.owner].territories++;
+		scores[st.owner].armies += st.armies;
+	}
+	return {
+		grid_owners,
+		grid_armies,
+		grid_terrain,
+		grid_fortified,
+		grid_production,
+		sea_lanes: s.map.seaLanes,
+		hands: s.hands,
+		scores,
+		current: s.current,
+		phase: s.phase,
+		armies_to_place: s.armiesToPlace,
+		card_played_this_turn: s.cardPlayedThisTurn,
+		last_attack_result: s.lastAttackResult
+	};
+}
+
+/** Emit a game-lifecycle event to the dev log. Meant to be called from
+ * game-state actions (place/attack/move/card/turn-boundary). */
+export function devLogAction(actor: Player, action: object, s: GameState) {
+	if (!devLogGameId) return;
+	devLog({
+		type: 'action',
+		game_id: devLogGameId,
+		turn: s.turn,
+		actor,
+		phase: s.phase,
+		action,
+		state_before: snapshotState(s)
+	});
+}
+
+function devLogGameStart(s: GameState) {
+	devLogGameId = `${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`;
+	if (!import.meta.env.DEV) return;
+	devLog({
+		type: 'game_start',
+		game_id: devLogGameId,
+		seed: s.seed,
+		difficulty: s.difficulty,
+		players: PLAYERS,
+		map: {
+			width: s.map.width,
+			height: s.map.height,
+			islands: s.map.islands.map((i) => ({ id: i.id, name: i.name, value: i.value })),
+			grids: s.map.grids.map((g) => ({
+				id: g.id,
+				island: g.island,
+				terrain: g.terrain,
+				production: g.production,
+				city: g.cityName ?? null
+			})),
+			adj: s.map.adj,
+			sea_lanes_initial: s.map.seaLanes
+		},
+		initial_state: snapshotState(s)
+	});
+}
+
+function devLogGameEnd(s: GameState) {
+	if (!devLogGameId) return;
+	devLog({
+		type: 'game_end',
+		game_id: devLogGameId,
+		turn: s.turn,
+		winner: s.winner,
+		final_state: snapshotState(s),
+		stats: s.stats
+	});
+	devLogGameId = null;
 }
 
 function removePendingInvasionLane(s: GameState) {
@@ -699,12 +845,12 @@ function nextPlayer(p: Player): Player {
 function checkWin(s: GameState): boolean {
 	if (s.map.grids.length === 0) return false; // degenerate: empty map
 	const alivePlayers = PLAYERS.filter((p) => s.alive[p]);
-	// Someone owns all grids
 	for (const p of PLAYERS) {
 		if (countryCount(s, p) === s.map.grids.length) {
 			s.winner = p;
 			s.phase = 'game_over';
 			log(s, `${PLAYER_NAMES[p]} has conquered the world!`, 'defeat', null);
+			devLogGameEnd(s);
 			return true;
 		}
 	}
@@ -712,6 +858,7 @@ function checkWin(s: GameState): boolean {
 		s.winner = alivePlayers[0];
 		s.phase = 'game_over';
 		log(s, `${PLAYER_NAMES[alivePlayers[0]]} is the last army standing!`, 'defeat', null);
+		devLogGameEnd(s);
 		return true;
 	}
 	return false;
@@ -727,9 +874,13 @@ function updateAlive(s: GameState) {
 }
 
 function applyRandomEvent(s: GameState) {
-	// Bucket weights inside a fired event: earthquake 32%, flood 32%,
-	// rebellion 31%, rebels-flip 5% (rare because it teleports ownership).
 	const r = Math.random();
+	const eventType =
+		r < 0.32 ? 'earthquake' :
+		r < 0.64 ? 'flood' :
+		r < 0.95 ? 'rebellion' :
+		'rebels_flip';
+	devLog({ type: 'random_event', game_id: devLogGameId, turn: s.turn, event_type: eventType });
 	if (r < 0.32) {
 		// Earthquake — 3-4 grids
 		const count = 3 + Math.floor(Math.random() * 2);
@@ -809,6 +960,7 @@ export function placeArmies(gridId: number, qty: number): void {
 			return s;
 		}
 		const q = Math.max(1, Math.min(qty, s.armiesToPlace));
+		devLogAction(s.current, { kind: 'place', grid: gridId, qty: q }, s);
 		s.states[gridId].armies += q;
 		s.armiesToPlace -= q;
 		if (s.armiesToPlace === 0) {
@@ -862,17 +1014,21 @@ export function cancelAction() {
 export function endTurn() {
 	game.update((s) => {
 		if (s.phase !== 'action') return s;
-		// Card rule: award unless the turn ends with an attack LOSS.
-		// (Not attacking at all still yields a card — reward for a peaceful turn.)
-		const shouldAward = s.lastAttackResult !== 'loss' && !s.turnCardAwarded;
+		devLogAction(s.current, { kind: 'end_turn' }, s);
+		// Card rule: card unless you attacked this turn and lost every battle.
+		// So: conquered ≥1 hex → card, didn't attack → card, only losses → no card.
+		const attackedAndLostAll = s.lastAttackResult === 'loss' && !s.defeatedThisTurn;
+		const shouldAward = !attackedAndLostAll && !s.turnCardAwarded;
 		if (shouldAward) {
 			const card = drawCard(s);
 			if (card) {
 				s.hands[s.current] = [...s.hands[s.current], card];
 				log(s, `${PLAYER_NAMES[s.current]} drew a ${CARD_LABELS[card]} card.`, 'card');
 				s.turnCardAwarded = true;
-				// If human is over the hand limit, pause for them to pick a discard.
-				if (s.current === 'blue' && s.hands.blue.length > HAND_MAX) {
+				// If the human is over the hand limit, pause for them to pick a
+				// discard. In auto-play mode, blue is AI-controlled — skip the pause
+				// and auto-discard the oldest card(s).
+				if (s.current === 'blue' && s.hands.blue.length > HAND_MAX && !debugSettings.autoPlay) {
 					s.pendingDiscard = true;
 					s.phase = 'discard';
 					s.message = 'Hand full — click a card to discard.';
@@ -950,6 +1106,7 @@ export function selectGrid(gridId: number): void {
 				if (s.selectedFrom == null) break;
 				if (!s.map.adj[s.selectedFrom].includes(gridId)) { s.message = 'Not adjacent.'; break; }
 				if (s.states[gridId].owner === s.current) { s.message = 'Choose an enemy or neutral territory.'; break; }
+				devLogAction(s.current, { kind: 'attack_begin', from: s.selectedFrom, to: gridId }, s);
 				s.selectedTo = gridId;
 				s.phase = 'attack_rolling';
 				s.message = 'Rolling…';
@@ -1163,6 +1320,22 @@ export function rollAttack(): void {
 		if (s.map.grids[s.selectedTo].terrain === 'mountain') defMods.push('+1 ⛰');
 		if (s.states[s.selectedTo].fortified) defMods.push('+2 fort');
 		const defTxt = defMods.length ? `${def} (${defMods.join(', ')})` : `${def}`;
+		devLog({
+			type: 'attack_roll',
+			game_id: devLogGameId,
+			turn: s.turn,
+			actor: attacker,
+			from: s.selectedFrom,
+			to: s.selectedTo,
+			attacker_armies_before: from.armies,
+			defender_armies_before: to.armies,
+			dice_atk: atk,
+			dice_def: def,
+			atk_bonus: atkBonus,
+			def_bonus: defBonus,
+			elite_bonus: eliteBonus,
+			defender: defender
+		});
 		if (atk > def) {
 			to.armies -= 1;
 			s.stats[attacker].attacksWon++;
@@ -1283,6 +1456,7 @@ export function confirmMove(qty: number) {
 		const from = s.states[s.selectedFrom];
 		const to = s.states[s.selectedTo];
 		const q = Math.max(1, Math.min(qty, from.armies - 1));
+		devLogAction(s.current, { kind: 'move', from: s.selectedFrom, to: s.selectedTo, qty: q }, s);
 		from.armies -= q;
 		to.armies += q;
 		log(s, `${PLAYER_NAMES[s.current]} moved ${q} from ${gridLabel(s, s.selectedFrom)} to ${gridLabel(s, s.selectedTo)}.`, 'info');
@@ -1310,6 +1484,7 @@ export function playCard(idx: number) {
 			s.message = 'Only one card per turn.';
 			return s;
 		}
+		devLogAction(s.current, { kind: 'play_card', card, index: idx }, s);
 		switch (card) {
 			case 'bonus5':
 			case 'bonus8':
@@ -1468,6 +1643,19 @@ export function confirmAir(qty: number) {
 
 export function startGamePlaying() {
 	game.update((s) => { s.gameStarted = true; return s; });
+}
+
+/** Force the current player's turn to end even if they have no territories left
+ * or are stuck in a phase they can't act on. Used by the AI to keep an
+ * auto-play game moving after a player is eliminated. */
+export function forceEndTurn() {
+	game.update((s) => {
+		if (s.phase === 'game_over') return s;
+		s.phase = 'action';
+		s.selectedFrom = null;
+		s.selectedTo = null;
+		return advanceTurn(s);
+	});
 }
 
 export function newGame(difficulty: number, startingArmies: number) {
