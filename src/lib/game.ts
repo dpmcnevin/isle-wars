@@ -24,13 +24,14 @@ export type CardType =
 	| 'double'
 	| 'bomb'
 	| 'antibomb'
-	| 'wild'
 	| 'reinforce'
 	| 'elite'
 	| 'sabotage'
 	| 'fortify'
 	| 'ferry'
-	| 'invasion';
+	| 'invasion'
+	| 'deforest'
+	| 'storm';
 
 export const CARD_LABELS: Record<CardType, string> = {
 	air: 'Air Move',
@@ -40,13 +41,113 @@ export const CARD_LABELS: Record<CardType, string> = {
 	double: 'Double',
 	bomb: 'Bomb',
 	antibomb: 'Anti-Bomb',
-	wild: 'Wild',
 	reinforce: 'Reinforce (+3)',
 	elite: 'Elite Troops',
 	sabotage: 'Sabotage',
 	fortify: 'Fortify',
 	ferry: 'Ferry Route',
-	invasion: 'Water Invasion'
+	invasion: 'Water Invasion',
+	deforest: 'Deforestation',
+	storm: 'Storm'
+};
+
+export interface CardMeta {
+	icon: string;
+	kind: 'attack' | 'defense' | 'boost' | 'movement' | 'terrain';
+	when: string;
+	desc: string;
+}
+export const CARD_META: Record<CardType, CardMeta> = {
+	air: {
+		icon: '✈',
+		kind: 'movement',
+		when: 'Action phase',
+		desc: 'Move armies between any two of your territories, ignoring adjacency. Ends the turn.'
+	},
+	bonus5: {
+		icon: '+5',
+		kind: 'boost',
+		when: 'Placement phase',
+		desc: 'Add 5 armies to your placement pool this turn.'
+	},
+	bonus8: {
+		icon: '+8',
+		kind: 'boost',
+		when: 'Placement phase',
+		desc: 'Add 8 armies to your placement pool this turn.'
+	},
+	bonus15: {
+		icon: '+15',
+		kind: 'boost',
+		when: 'Placement phase',
+		desc: 'Add 15 armies to your placement pool this turn.'
+	},
+	double: {
+		icon: '×2',
+		kind: 'boost',
+		when: 'Placement phase',
+		desc: 'Double the number of armies you place this turn.'
+	},
+	bomb: {
+		icon: '💣',
+		kind: 'attack',
+		when: 'Placement or Action phase',
+		desc: 'Detonate on any enemy territory to destroy 3–7 of their armies.'
+	},
+	antibomb: {
+		icon: '🛡',
+		kind: 'defense',
+		when: 'Passive',
+		desc: 'Automatically absorbs the next bomb targeting one of your hexes. No action needed.'
+	},
+	reinforce: {
+		icon: '➕',
+		kind: 'boost',
+		when: 'Placement or Action phase',
+		desc: 'Add 3 armies to any one of your territories immediately.'
+	},
+	elite: {
+		icon: '⚔',
+		kind: 'attack',
+		when: 'Action phase, before attacking',
+		desc: 'Your next attack sequence rolls +2 on every die. Consumed by the first attack.'
+	},
+	sabotage: {
+		icon: '☠',
+		kind: 'attack',
+		when: 'Placement or Action phase',
+		desc: 'Halve the armies of any enemy territory (rounded down, min 1).'
+	},
+	fortify: {
+		icon: '⛩',
+		kind: 'defense',
+		when: 'Placement or Action phase',
+		desc: 'Give one of your hexes a permanent +2 defense bonus. Lost when the hex is captured.'
+	},
+	ferry: {
+		icon: '⚓',
+		kind: 'movement',
+		when: 'Placement or Action phase',
+		desc: 'Open a permanent sea lane between two of your territories over clear water.'
+	},
+	invasion: {
+		icon: '🚢',
+		kind: 'attack',
+		when: 'Action phase',
+		desc: 'Open a temporary sea lane and launch an attack across it. The lane stays only if you conquer the target.'
+	},
+	deforest: {
+		icon: '🪓',
+		kind: 'terrain',
+		when: 'Placement or Action phase',
+		desc: 'Clear any forest hex on the map. Removes the +1 attacker bonus that forests provide.'
+	},
+	storm: {
+		icon: '🌩',
+		kind: 'terrain',
+		when: 'Placement or Action phase',
+		desc: 'Destroy any existing sea lane. Pick both endpoints of the route to sever.'
+	}
 };
 
 // Weighted card draw pool
@@ -58,13 +159,14 @@ const CARD_POOL: CardType[] = [
 	'double', 'double',
 	'bomb', 'bomb',
 	'antibomb', 'antibomb',
-	'wild',
 	'reinforce', 'reinforce',
 	'elite', 'elite',
 	'sabotage',
 	'fortify',
 	'ferry',
-	'invasion'
+	'invasion',
+	'deforest',
+	'storm'
 ];
 
 export type Phase =
@@ -88,6 +190,9 @@ export type Phase =
 	| 'ferry_to'
 	| 'invasion_from'
 	| 'invasion_to'
+	| 'deforest_select'
+	| 'storm_from'
+	| 'storm_to'
 	| 'discard'
 	| 'game_over';
 
@@ -134,6 +239,13 @@ export interface GameState {
 	// Water Invasion card added a temporary sea lane for this attack. If the
 	// attack succeeds it stays; if it fails, it's removed.
 	pendingInvasionLane: [number, number] | null;
+	// Whether the current player has already played a non-passive card this turn.
+	cardPlayedThisTurn: boolean;
+	// Grid IDs of marsh hexes that were used as an attack source this turn.
+	// These can't be used as attack sources again until next turn.
+	usedMarshHexes: number[];
+	// True once the player has pressed "Start Game" — AI won't act until then.
+	gameStarted: boolean;
 	// Log
 	log: LogEntry[];
 	// UI hints
@@ -178,9 +290,50 @@ function emptyStatsMap(): Record<Player, PlayerStats> {
 	return { blue: emptyStats(), green: emptyStats(), red: emptyStats(), brown: emptyStats() };
 }
 
-export const SAVE_KEY = 'isle-wars-save-v8';
+export const SAVE_KEY = 'isle-wars-save-v11';
+export const DEBUG_KEY = 'isle-wars-debug';
 
-export const game = writable<GameState>(startGame(1, 3));
+export interface DebugSettings {
+	disableSave: boolean;
+	starterCards: boolean; // give blue ferry + invasion on new games
+}
+
+function loadDebugSettings(): DebugSettings {
+	if (typeof window === 'undefined') return { disableSave: false, starterCards: false };
+	try {
+		const raw = localStorage.getItem(DEBUG_KEY);
+		if (raw) {
+			const parsed = JSON.parse(raw) as DebugSettings;
+			return {
+				disableSave: !!parsed.disableSave,
+				starterCards: !!parsed.starterCards
+			};
+		}
+	} catch { /* ignore */ }
+	return { disableSave: false, starterCards: false };
+}
+
+let debugSettings: DebugSettings = loadDebugSettings();
+
+export function getDebugSettings(): DebugSettings {
+	return { ...debugSettings };
+}
+
+export function updateDebugSettings(patch: Partial<DebugSettings>) {
+	debugSettings = { ...debugSettings, ...patch };
+	if (typeof window !== 'undefined') {
+		try { localStorage.setItem(DEBUG_KEY, JSON.stringify(debugSettings)); } catch { /* ignore */ }
+	}
+	// If save was just disabled, wipe any existing save so a reload gets a
+	// fresh map immediately.
+	if (patch.disableSave === true) {
+		if (typeof window !== 'undefined') {
+			try { localStorage.removeItem(SAVE_KEY); } catch { /* ignore */ }
+		}
+	}
+}
+
+export const game = writable<GameState>(startGame(2, 3));
 
 let persistenceInitialized = false;
 
@@ -194,19 +347,22 @@ export function loadSavedGame(): boolean {
 	if (typeof window === 'undefined') return false;
 	if (persistenceInitialized) return false;
 	let loaded = false;
-	try {
-		const raw = localStorage.getItem(SAVE_KEY);
-		if (raw) {
-			const parsed = JSON.parse(raw) as GameState;
-			if (parsed && parsed.map && Array.isArray(parsed.map.grids)) {
-				game.set(parsed);
-				loaded = true;
+	if (!debugSettings.disableSave) {
+		try {
+			const raw = localStorage.getItem(SAVE_KEY);
+			if (raw) {
+				const parsed = JSON.parse(raw) as GameState;
+				if (parsed && parsed.map && Array.isArray(parsed.map.grids)) {
+					game.set(parsed);
+					loaded = true;
+				}
 			}
-		}
-	} catch { /* corrupt / privacy mode */ }
-	// Start auto-saving from here on.
+		} catch { /* corrupt / privacy mode */ }
+	}
 	persistenceInitialized = true;
+	// Auto-save subscription is always registered but only writes if enabled.
 	game.subscribe((s) => {
+		if (debugSettings.disableSave) return;
 		try {
 			localStorage.setItem(SAVE_KEY, JSON.stringify(s));
 		} catch { /* quota / privacy mode */ }
@@ -328,7 +484,12 @@ export function clearSavedGame() {
 const HAND_MAX = 5;
 
 function emptyHands(): Record<Player, CardType[]> {
-	return { blue: [], green: [], red: [], brown: [] };
+	const blueStart: CardType[] = debugSettings.starterCards
+		? ['air', 'bonus5', 'bonus8', 'bonus15', 'double', 'bomb', 'antibomb',
+			'reinforce', 'elite', 'sabotage', 'fortify', 'ferry', 'invasion',
+			'deforest', 'storm']
+		: [];
+	return { blue: blueStart, green: [], red: [], brown: [] };
 }
 
 function emptyAlive(): Record<Player, boolean> {
@@ -391,6 +552,9 @@ export function startGame(difficulty = 2, startingArmies = 3, seed?: number): Ga
 		pendingDiscard: false,
 		eliteAttackActive: false,
 		pendingInvasionLane: null,
+		cardPlayedThisTurn: false,
+		usedMarshHexes: [],
+		gameStarted: false,
 		log: [
 			{
 				turn: 1,
@@ -493,6 +657,8 @@ function beginTurn(s: GameState): GameState {
 	s.pendingDiscard = false;
 	s.eliteAttackActive = false;
 	s.pendingInvasionLane = null;
+	s.cardPlayedThisTurn = false;
+	s.usedMarshHexes = [];
 	s.doubleActive = false;
 	s.selectedFrom = null;
 	s.selectedTo = null;
@@ -771,6 +937,10 @@ export function selectGrid(gridId: number): void {
 			case 'attack_select_from': {
 				if (s.states[gridId].owner !== s.current) { s.message = 'Choose your own territory.'; break; }
 				if (s.states[gridId].armies < 2) { s.message = 'Need at least 2 armies to attack.'; break; }
+				if (s.usedMarshHexes.includes(gridId)) {
+					s.message = 'Marsh already used this turn — troops are still mired.';
+					break;
+				}
 				s.selectedFrom = gridId;
 				s.phase = 'attack_select_to';
 				s.message = 'Select an ADJACENT enemy territory.';
@@ -834,7 +1004,7 @@ export function selectGrid(gridId: number): void {
 				if (s.states[gridId].owner !== s.current) { s.message = 'Pick one of your territories.'; break; }
 				s.states[gridId].armies += 3;
 				const idx = (s as any)._pendingCardIdx as number;
-				s.hands[s.current] = s.hands[s.current].filter((_, i) => i !== idx);
+				consumeCard(s, idx);
 				delete (s as any)._pendingCardIdx;
 				log(s, `${PLAYER_NAMES[s.current]} reinforced ${gridLabel(s, gridId)} (+3 armies).`, 'card');
 				s.phase = 'action';
@@ -847,7 +1017,7 @@ export function selectGrid(gridId: number): void {
 				const before = g.armies;
 				g.armies = Math.max(1, Math.floor(g.armies / 2));
 				const idx = (s as any)._pendingCardIdx as number;
-				s.hands[s.current] = s.hands[s.current].filter((_, i) => i !== idx);
+				consumeCard(s, idx);
 				delete (s as any)._pendingCardIdx;
 				log(s, `${PLAYER_NAMES[s.current]} sabotaged ${gridLabel(s, gridId)}: ${before} → ${g.armies} armies.`, 'card');
 				s.phase = 'action';
@@ -859,7 +1029,7 @@ export function selectGrid(gridId: number): void {
 				if (s.states[gridId].fortified) { s.message = 'Already fortified.'; break; }
 				s.states[gridId].fortified = true;
 				const idx = (s as any)._pendingCardIdx as number;
-				s.hands[s.current] = s.hands[s.current].filter((_, i) => i !== idx);
+				consumeCard(s, idx);
 				delete (s as any)._pendingCardIdx;
 				log(s, `${PLAYER_NAMES[s.current]} fortified ${gridLabel(s, gridId)} (+2 defense).`, 'card');
 				s.phase = 'action';
@@ -877,12 +1047,16 @@ export function selectGrid(gridId: number): void {
 				if (s.selectedFrom == null) break;
 				if (s.states[gridId].owner !== s.current || gridId === s.selectedFrom) { s.message = 'Choose a different territory of yours.'; break; }
 				if (!canFerryConnect(s, s.selectedFrom, gridId)) { s.message = 'Ferry needs a straight-line water path — no islands in between.'; break; }
+				const laneExists = s.map.seaLanes.some(
+					([x, y]) => (x === s.selectedFrom && y === gridId) || (x === gridId && y === s.selectedFrom)
+				);
+				if (laneExists) { s.message = 'A ferry route already exists there.'; break; }
 				// Establish a permanent sea lane between the two hexes.
 				s.map.seaLanes.push([s.selectedFrom, gridId]);
-				s.map.adj[s.selectedFrom].push(gridId);
-				s.map.adj[gridId].push(s.selectedFrom);
+				if (!s.map.adj[s.selectedFrom].includes(gridId)) s.map.adj[s.selectedFrom].push(gridId);
+				if (!s.map.adj[gridId].includes(s.selectedFrom)) s.map.adj[gridId].push(s.selectedFrom);
 				const idx = (s as any)._pendingCardIdx as number;
-				s.hands[s.current] = s.hands[s.current].filter((_, i) => i !== idx);
+				consumeCard(s, idx);
 				delete (s as any)._pendingCardIdx;
 				log(s, `${PLAYER_NAMES[s.current]} opened a ferry route: ${gridLabel(s, s.selectedFrom)} ↔ ${gridLabel(s, gridId)}.`, 'card');
 				s.phase = 'action';
@@ -908,13 +1082,51 @@ export function selectGrid(gridId: number): void {
 				s.map.adj[gridId].push(s.selectedFrom);
 				s.pendingInvasionLane = [s.selectedFrom, gridId];
 				const idx = (s as any)._pendingCardIdx as number;
-				s.hands[s.current] = s.hands[s.current].filter((_, i) => i !== idx);
+				consumeCard(s, idx);
 				delete (s as any)._pendingCardIdx;
 				log(s, `${PLAYER_NAMES[s.current]} launched a Water Invasion: ${gridLabel(s, s.selectedFrom)} → ${gridLabel(s, gridId)}.`, 'card');
 				// Slip directly into the rolling phase.
 				s.selectedTo = gridId;
 				s.phase = 'attack_rolling';
 				s.message = 'Invasion — rolling…';
+				break;
+			}
+			case 'deforest_select': {
+				if (s.map.grids[gridId].terrain !== 'forest') { s.message = 'Pick a forest hex.'; break; }
+				s.map.grids[gridId].terrain = 'plain';
+				const idx = (s as any)._pendingCardIdx as number;
+				consumeCard(s, idx);
+				delete (s as any)._pendingCardIdx;
+				log(s, `${PLAYER_NAMES[s.current]} cleared the forest at ${gridLabel(s, gridId)}.`, 'card');
+				s.phase = 'action';
+				s.message = 'Attack, move, or pass.';
+				break;
+			}
+			case 'storm_from': {
+				const hasLane = s.map.seaLanes.some(([a, b]) => a === gridId || b === gridId);
+				if (!hasLane) { s.message = 'Pick a hex that anchors a sea route.'; break; }
+				s.selectedFrom = gridId;
+				s.phase = 'storm_to';
+				s.message = 'Storm: click the other end of the sea route to destroy.';
+				break;
+			}
+			case 'storm_to': {
+				if (s.selectedFrom == null) break;
+				const laneIdx = s.map.seaLanes.findIndex(
+					([a, b]) => (a === s.selectedFrom && b === gridId) || (a === gridId && b === s.selectedFrom)
+				);
+				if (laneIdx < 0) { s.message = 'No sea route between those hexes.'; break; }
+				s.map.seaLanes.splice(laneIdx, 1);
+				s.map.adj[s.selectedFrom] = s.map.adj[s.selectedFrom].filter((n) => n !== gridId);
+				s.map.adj[gridId] = s.map.adj[gridId].filter((n) => n !== s.selectedFrom);
+				const idx = (s as any)._pendingCardIdx as number;
+				consumeCard(s, idx);
+				delete (s as any)._pendingCardIdx;
+				log(s, `${PLAYER_NAMES[s.current]} summoned a Storm — sea route ${gridLabel(s, s.selectedFrom)} ↔ ${gridLabel(s, gridId)} destroyed.`, 'card');
+				s.phase = 'action';
+				s.selectedFrom = null;
+				s.selectedTo = null;
+				s.message = 'Attack, move, or pass.';
 				break;
 			}
 		}
@@ -929,6 +1141,10 @@ export function rollAttack(): void {
 		if (s.selectedFrom == null || s.selectedTo == null) return s;
 		const from = s.states[s.selectedFrom];
 		const to = s.states[s.selectedTo];
+		// Mark marsh source as used for this turn — can't launch a second attack from it.
+		if (s.map.grids[s.selectedFrom].terrain === 'marsh' && !s.usedMarshHexes.includes(s.selectedFrom)) {
+			s.usedMarshHexes.push(s.selectedFrom);
+		}
 		const atkBase = 1 + Math.floor(Math.random() * 6);
 		const defBase = 1 + Math.floor(Math.random() * 6);
 		const defBonus = defenseBonus(s, s.selectedTo);
@@ -1079,11 +1295,21 @@ export function confirmMove(qty: number) {
 }
 
 // -- Card actions --
+function consumeCard(s: GameState, idx: number) {
+	s.hands[s.current] = s.hands[s.current].filter((_, i) => i !== idx);
+	s.cardPlayedThisTurn = true;
+}
+
 export function playCard(idx: number) {
 	game.update((s) => {
 		const hand = s.hands[s.current];
 		const card = hand[idx];
 		if (!card) return s;
+		// One-card-per-turn rule (excluding passives).
+		if (s.cardPlayedThisTurn && card !== 'antibomb') {
+			s.message = 'Only one card per turn.';
+			return s;
+		}
 		switch (card) {
 			case 'bonus5':
 			case 'bonus8':
@@ -1091,7 +1317,7 @@ export function playCard(idx: number) {
 				if (s.phase !== 'placing') { s.message = 'Play bonus armies during placement.'; return s; }
 				const n = card === 'bonus5' ? 5 : card === 'bonus8' ? 8 : 15;
 				s.armiesToPlace += n;
-				s.hands[s.current] = hand.filter((_, i) => i !== idx);
+				consumeCard(s, idx);
 				log(s, `${PLAYER_NAMES[s.current]} played ${CARD_LABELS[card]} (+${n}).`, 'card');
 				s.message = `Place ${s.armiesToPlace} armies.`;
 				break;
@@ -1100,7 +1326,7 @@ export function playCard(idx: number) {
 				if (s.phase !== 'placing' || s.doubleActive) { s.message = 'Play Double during placement (once).'; return s; }
 				s.armiesToPlace *= 2;
 				s.doubleActive = true;
-				s.hands[s.current] = hand.filter((_, i) => i !== idx);
+				consumeCard(s, idx);
 				log(s, `${PLAYER_NAMES[s.current]} played Double! Placement doubled to ${s.armiesToPlace}.`, 'card');
 				s.message = `Place ${s.armiesToPlace} armies.`;
 				break;
@@ -1125,9 +1351,6 @@ export function playCard(idx: number) {
 			case 'antibomb':
 				s.message = 'Anti-Bomb is passive — it protects automatically.';
 				break;
-			case 'wild':
-				s.message = 'Wild card is used in set trades (auto).';
-				break;
 			case 'reinforce': {
 				if (s.phase !== 'placing' && s.phase !== 'action') { s.message = 'Play Reinforce during your turn.'; return s; }
 				s.phase = 'reinforce_select';
@@ -1138,7 +1361,7 @@ export function playCard(idx: number) {
 			case 'elite': {
 				if (s.phase !== 'action') { s.message = 'Play Elite Troops in action phase, before attacking.'; return s; }
 				s.eliteAttackActive = true;
-				s.hands[s.current] = hand.filter((_, i) => i !== idx);
+				consumeCard(s, idx);
 				log(s, `${PLAYER_NAMES[s.current]} rallied Elite Troops (+2 attack next battle).`, 'card');
 				s.message = 'Elite Troops active. Attack now (+2 to each roll) — consumed by first attack.';
 				break;
@@ -1175,6 +1398,22 @@ export function playCard(idx: number) {
 				s.message = 'Water Invasion: choose one of your territories to launch from (2+ armies).';
 				break;
 			}
+			case 'deforest': {
+				if (s.phase !== 'placing' && s.phase !== 'action') { s.message = 'Play Deforestation during your turn.'; return s; }
+				s.phase = 'deforest_select';
+				(s as any)._pendingCardIdx = idx;
+				s.message = 'Deforestation: click any forest hex to clear it.';
+				break;
+			}
+			case 'storm': {
+				if (s.phase !== 'placing' && s.phase !== 'action') { s.message = 'Play Storm during your turn.'; return s; }
+				s.phase = 'storm_from';
+				s.selectedFrom = null;
+				s.selectedTo = null;
+				(s as any)._pendingCardIdx = idx;
+				s.message = 'Storm: click one endpoint of the sea route you want to destroy.';
+				break;
+			}
 		}
 		return s;
 	});
@@ -1199,7 +1438,7 @@ function resolveBomb(s: GameState, targetId: number) {
 		if (g.armies < 0) g.armies = 0;
 	}
 	// remove bomb card
-	s.hands[s.current] = s.hands[s.current].filter((_, i) => i !== idx);
+	consumeCard(s, idx);
 	s.phase = 'action';
 	s.selectedFrom = null;
 	updateAlive(s);
@@ -1216,7 +1455,7 @@ export function confirmAir(qty: number) {
 		to.armies += q;
 		const idx = (s as any)._pendingCardIdx as number;
 		if (typeof idx === 'number') {
-			s.hands[s.current] = s.hands[s.current].filter((_, i) => i !== idx);
+			consumeCard(s, idx);
 			delete (s as any)._pendingCardIdx;
 		}
 		log(s, `${PLAYER_NAMES[s.current]} air-moved ${q} from ${gridLabel(s, s.selectedFrom)} to ${gridLabel(s, s.selectedTo)}.`, 'card');
@@ -1227,32 +1466,8 @@ export function confirmAir(qty: number) {
 	});
 }
 
-// Try trading a set of 3 matching cards (with wild). Returns true if traded.
-export function tradeCards(indices: number[]): boolean {
-	let ok = false;
-	game.update((s) => {
-		if (s.phase !== 'placing') return s;
-		if (indices.length !== 3) return s;
-		const hand = s.hands[s.current];
-		const cards = indices.map((i) => hand[i]);
-		if (cards.some((c) => !c)) return s;
-		// Not allowed to trade 3 wilds
-		if (cards.every((c) => c === 'wild')) return s;
-		// Must all match (wild matches anything)
-		const nonWild = cards.filter((c) => c !== 'wild');
-		if (nonWild.length > 0 && !nonWild.every((c) => c === nonWild[0])) return s;
-		// bonus
-		const bonus = 5;
-		s.armiesToPlace += bonus;
-		// remove used cards
-		const set = new Set(indices);
-		s.hands[s.current] = hand.filter((_, i) => !set.has(i));
-		log(s, `${PLAYER_NAMES[s.current]} traded a set of ${CARD_LABELS[(nonWild[0] ?? 'wild') as CardType]} for +${bonus} armies.`, 'card');
-		s.message = `Place ${s.armiesToPlace} armies.`;
-		ok = true;
-		return s;
-	});
-	return ok;
+export function startGamePlaying() {
+	game.update((s) => { s.gameStarted = true; return s; });
 }
 
 export function newGame(difficulty: number, startingArmies: number) {

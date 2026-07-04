@@ -15,9 +15,11 @@
 		confirmAir,
 		endTurn,
 		playCard,
-		tradeCards,
 		loadSavedGame,
 		clearSavedGame,
+		getDebugSettings,
+		updateDebugSettings,
+		startGamePlaying,
 		winProbability,
 		defenseBonus,
 		attackerBonus,
@@ -29,18 +31,16 @@
 		PLAYER_COLORS,
 		PLAYER_NAMES,
 		CARD_LABELS,
+		CARD_META,
 		type Player,
 		type CardType
 	} from '$lib/game';
 	import { runAiTurn } from '$lib/ai';
 
-	let showAnalytics = $state(false);
-
 	let placeQty = $state(1);
 	let moveQty = $state(1);
 	let airQty = $state(1);
 	let moveInQty = $state(0);
-	let selectedCardIdxs = $state<number[]>([]);
 	let difficulty = $state(2);
 	let startingArmies = $state(3);
 	let showMenu = $state(false);
@@ -54,6 +54,46 @@
 
 	let autoRolling = $state(false);
 	let hoveredGrid = $state<number | null>(null);
+	let tooltipPos = $state<{ x: number; y: number } | null>(null);
+	let hoveredCard = $state<CardType | null>(null);
+	let cardTipPos = $state<{ x: number; y: number } | null>(null);
+
+	function onCardHoverEnter(c: CardType, e: PointerEvent) {
+		hoveredCard = c;
+		cardTipPos = { x: e.clientX, y: e.clientY };
+	}
+	function onCardHoverMove(e: PointerEvent) {
+		if (hoveredCard != null) cardTipPos = { x: e.clientX, y: e.clientY };
+	}
+	function onCardHoverLeave() {
+		hoveredCard = null;
+		cardTipPos = null;
+	}
+
+	function clampTip(x: number, y: number, w = 300, h = 160): { x: number; y: number } {
+		const pad = 8;
+		const offset = 14;
+		if (typeof window === 'undefined') return { x: x + offset, y: y + offset };
+		const winW = window.innerWidth;
+		const winH = window.innerHeight;
+		let tx = x + offset;
+		let ty = y + offset;
+		if (tx + w > winW - pad) tx = x - w - offset;
+		if (ty + h > winH - pad) ty = y - h - offset;
+		return {
+			x: Math.max(pad, Math.min(tx, winW - w - pad)),
+			y: Math.max(pad, Math.min(ty, winH - h - pad))
+		};
+	}
+
+	function onHexPointerEnter(id: number, e: PointerEvent) {
+		hoveredGrid = id;
+		tooltipPos = { x: e.clientX, y: e.clientY };
+	}
+	function onHexPointerLeave(id: number) {
+		if (hoveredGrid === id) hoveredGrid = null;
+		tooltipPos = null;
+	}
 
 	// Drag-to-attack state
 	let mapSvg: SVGSVGElement | undefined = $state();
@@ -133,6 +173,7 @@
 	}
 
 	function onSvgPointerMove(e: PointerEvent) {
+		if (hoveredGrid != null) tooltipPos = { x: e.clientX, y: e.clientY };
 		if (pointerDownGrid == null || !pointerDownAt) return;
 		const p = svgPoint(e);
 		if (!p) return;
@@ -173,6 +214,7 @@
 	}
 
 	onMount(() => {
+		loadDebugUi();
 		loadSavedGame();
 		window.addEventListener('keydown', onKey);
 		return () => window.removeEventListener('keydown', onKey);
@@ -206,6 +248,7 @@
 	$effect(() => {
 		const s = $game;
 		if (aiRunning) return;
+		if (!s.gameStarted) return; // waiting for Start Game
 		if (s.phase === 'game_over') return;
 		if (s.current === HUMAN) return;
 		aiRunning = true;
@@ -298,15 +341,60 @@
 		return { x1: g1.x, y1: g1.y, x2: g2.x, y2: g2.y };
 	}
 
-	function toggleCard(idx: number) {
-		if (selectedCardIdxs.includes(idx)) selectedCardIdxs = selectedCardIdxs.filter((i) => i !== idx);
-		else selectedCardIdxs = [...selectedCardIdxs, idx];
+	// Debug menu
+	let showDebug = $state(false);
+	let debugDisableSave = $state(false);
+	let debugStarterCards = $state(false);
+
+	function loadDebugUi() {
+		const d = getDebugSettings();
+		debugDisableSave = d.disableSave;
+		debugStarterCards = d.starterCards;
 	}
 
-	function doTrade() {
-		if (selectedCardIdxs.length !== 3) return;
-		const ok = tradeCards([...selectedCardIdxs]);
-		selectedCardIdxs = [];
+	function toggleDebugDisableSave() {
+		debugDisableSave = !debugDisableSave;
+		updateDebugSettings({ disableSave: debugDisableSave });
+	}
+
+	function toggleDebugStarterCards() {
+		debugStarterCards = !debugStarterCards;
+		updateDebugSettings({ starterCards: debugStarterCards });
+	}
+
+	interface HexInfo {
+		title: string;
+		owner: string;
+		ownerColor: string;
+		armies: number;
+		city?: string;
+		terrainName: string;
+		terrainDesc: string;
+		fortified: boolean;
+	}
+	function hexInfo(gridId: number): HexInfo {
+		const g = $game.map.grids[gridId];
+		const st = $game.states[gridId];
+		const title = gridLabelLocal(gridId, $game);
+		const owner = st.owner ? PLAYER_NAMES[st.owner] : 'Neutral';
+		const ownerColor = st.owner ? PLAYER_COLORS[st.owner] : '#556';
+		const terrainMap: Record<string, [string, string]> = {
+			plain: ['Plain', 'Open ground. No combat modifier.'],
+			mountain: ['Mountain', 'Defender rolls +1 on every die.'],
+			forest: ['Forest', 'Attacker rolls +1 (cover on approach).'],
+			marsh: ['Marsh', 'After attacking from here, cannot launch another attack from this hex this turn.']
+		};
+		const [terrainName, terrainDesc] = terrainMap[g.terrain] ?? ['Plain', ''];
+		return {
+			title,
+			owner,
+			ownerColor,
+			armies: st.armies,
+			city: g.cityName,
+			terrainName,
+			terrainDesc,
+			fortified: !!st.fortified
+		};
 	}
 
 	function gridLabelLocal(id: number, s: typeof $game): string {
@@ -321,29 +409,30 @@
 
 <main>
 	<header>
-		<h1>ISLE WARS</h1>
-		<div class="scoreboard">
-			{#each PLAYERS as p}
-				<div class="score" class:current={$game.current === p} class:dead={!$game.alive[p]}>
-					<span class="dot" style="background:{PLAYER_COLORS[p]}"></span>
-					<strong>{PLAYER_NAMES[p]}</strong>
-					<span>{countryCount($game, p)} / {$game.map.grids.length}</span>
-					<span class="bonus">+{fullIslandBonus($game, p)}</span>
-				</div>
-			{/each}
-		</div>
-		<div class="actions">
-			<button onclick={() => (showMenu = !showMenu)}>{showMenu ? 'Close' : 'New Game'}</button>
-			<button onclick={() => (showAnalytics = !showAnalytics)}>{showAnalytics ? 'Hide' : 'Analytics'}</button>
-			<button class="danger" onclick={confirmClearSave}>Clear Save</button>
-			<label class="speed">AI:
-				<select bind:value={aiSpeed}>
-					<option value={1}>1× (normal)</option>
-					<option value={2}>2× (fast)</option>
-					<option value={0}>instant</option>
-				</select>
-			</label>
-			<span class="turn">Turn {$game.turn}</span>
+		<div class="header-row">
+			<div class="scoreboard">
+				{#each PLAYERS as p}
+					<div class="score" class:current={$game.current === p} class:dead={!$game.alive[p]}>
+						<span class="dot" style="background:{PLAYER_COLORS[p]}"></span>
+						<strong>{PLAYER_NAMES[p]}</strong>
+						<span class="score-nums">{countryCount($game, p)}<span class="dim">/{$game.map.grids.length}</span></span>
+						<span class="bonus">+{fullIslandBonus($game, p)}</span>
+					</div>
+				{/each}
+			</div>
+			<div class="actions">
+				<span class="turn">T{$game.turn}</span>
+				<label class="speed">
+					<select bind:value={aiSpeed}>
+						<option value={1}>1×</option>
+						<option value={2}>2×</option>
+						<option value={0}>⚡</option>
+					</select>
+				</label>
+				<button class="icon-btn" title="New Game" onclick={() => (showMenu = !showMenu)}>{showMenu ? '✕' : 'New'}</button>
+				<button class="icon-btn" title="Debug" onclick={() => (showDebug = !showDebug)}>Debug</button>
+				<button class="icon-btn danger" title="Clear Save" onclick={confirmClearSave}>Clear</button>
+			</div>
 		</div>
 	</header>
 
@@ -365,87 +454,35 @@
 		</section>
 	{/if}
 
-	{#if showAnalytics}
-		{@const hist = $game.history}
-		{@const maxTerr = Math.max(1, ...hist.flatMap((h) => PLAYERS.map((p) => h.territories[p])))}
-		{@const maxArm = Math.max(1, ...hist.flatMap((h) => PLAYERS.map((p) => h.armies[p])))}
-		{@const chartW = 560}
-		{@const chartH = 180}
-		{@const xStep = hist.length > 1 ? chartW / (hist.length - 1) : 0}
-		<section class="analytics">
-			<h2>Analytics</h2>
-			<div class="charts">
-				<div class="chart">
-					<h3>Territories owned</h3>
-					<svg viewBox="0 0 {chartW + 40} {chartH + 30}">
-						<line x1="30" y1={chartH + 5} x2={chartW + 35} y2={chartH + 5} stroke="#345" />
-						<line x1="30" y1="5" x2="30" y2={chartH + 5} stroke="#345" />
-						<text x="26" y="10" text-anchor="end" class="axis">{maxTerr}</text>
-						<text x="26" y={chartH + 8} text-anchor="end" class="axis">0</text>
-						{#each PLAYERS as p}
-							{#if hist.length > 0}
-								<polyline
-									fill="none"
-									stroke={PLAYER_COLORS[p]}
-									stroke-width="2"
-									points={hist.map((h, i) => `${30 + i * xStep},${5 + (chartH - (h.territories[p] / maxTerr) * chartH)}`).join(' ')}
-								/>
-							{/if}
-						{/each}
-					</svg>
-				</div>
-				<div class="chart">
-					<h3>Total armies</h3>
-					<svg viewBox="0 0 {chartW + 40} {chartH + 30}">
-						<line x1="30" y1={chartH + 5} x2={chartW + 35} y2={chartH + 5} stroke="#345" />
-						<line x1="30" y1="5" x2="30" y2={chartH + 5} stroke="#345" />
-						<text x="26" y="10" text-anchor="end" class="axis">{maxArm}</text>
-						<text x="26" y={chartH + 8} text-anchor="end" class="axis">0</text>
-						{#each PLAYERS as p}
-							{#if hist.length > 0}
-								<polyline
-									fill="none"
-									stroke={PLAYER_COLORS[p]}
-									stroke-width="2"
-									points={hist.map((h, i) => `${30 + i * xStep},${5 + (chartH - (h.armies[p] / maxArm) * chartH)}`).join(' ')}
-								/>
-							{/if}
-						{/each}
-					</svg>
-				</div>
+	{#if showDebug}
+		<section class="debug-panel">
+			<div class="debug-header">
+				<span class="debug-badge">DEBUG</span>
+				<h2>Developer Options</h2>
+				<button class="close-x" onclick={() => (showDebug = false)} aria-label="Close debug">✕</button>
 			</div>
-			<table class="stats-table">
-				<thead>
-					<tr>
-						<th></th>
-						<th>Territories</th>
-						<th>Armies</th>
-						<th>Islands</th>
-						<th>Atk W/L</th>
-						<th>Gained</th>
-						<th>Lost</th>
-						<th>Cards drawn</th>
-					</tr>
-				</thead>
-				<tbody>
-					{#each PLAYERS as p}
-						{@const last = hist[hist.length - 1]}
-						{@const st = $game.stats[p]}
-						<tr>
-							<td><span class="dot" style="background:{PLAYER_COLORS[p]}"></span> {PLAYER_NAMES[p]}</td>
-							<td>{last?.territories[p] ?? 0}</td>
-							<td>{last?.armies[p] ?? 0}</td>
-							<td>{last?.islands[p] ?? 0}</td>
-							<td>{st.attacksWon} / {st.attacksLost}</td>
-							<td>{st.territoriesCaptured}</td>
-							<td>{st.territoriesLost}</td>
-							<td>{st.cardsDrawn}</td>
-						</tr>
-					{/each}
-				</tbody>
-			</table>
+			<div class="debug-options">
+				<label class="toggle-card" class:on={debugDisableSave}>
+					<input type="checkbox" checked={debugDisableSave} onchange={toggleDebugDisableSave} />
+					<div class="toggle-slot"><div class="toggle-thumb"></div></div>
+					<div class="toggle-text">
+						<div class="toggle-title">Disable local save</div>
+						<div class="toggle-desc">Wipes the current save and skips future saves so a reload always gives you a fresh map.</div>
+					</div>
+				</label>
+				<label class="toggle-card" class:on={debugStarterCards}>
+					<input type="checkbox" checked={debugStarterCards} onchange={toggleDebugStarterCards} />
+					<div class="toggle-slot"><div class="toggle-thumb"></div></div>
+					<div class="toggle-text">
+						<div class="toggle-title">Blue starts with every card</div>
+						<div class="toggle-desc">Deals one of each card type to Blue's hand at the start of every new game for testing.</div>
+					</div>
+				</label>
+			</div>
+			<div class="debug-footer">Settings apply to the next game you start.</div>
 		</section>
 	{/if}
+
 
 	{#if $game.phase === 'game_over'}
 		<section class="banner {$game.winner === HUMAN ? 'win' : 'lose'}">
@@ -460,7 +497,19 @@
 		</section>
 	{/if}
 
-	<div class="msg">{$game.message}</div>
+	{#if $game.gameStarted}
+		<div class="msg">{$game.message}</div>
+	{/if}
+
+	{#if !$game.gameStarted && $game.phase !== 'game_over'}
+		<div class="start-prompt">
+			<div>
+				<h2>Ready to play?</h2>
+				<p>Take a look at the map, then hit <strong>Start Game</strong> to let the opponents make their moves.</p>
+			</div>
+			<button class="primary big" onclick={startGamePlaying}>Start Game →</button>
+		</div>
+	{/if}
 
 	<div class="grid">
 		<div class="mapwrap">
@@ -483,14 +532,22 @@
 					<!-- Forest pattern: sparse trees (crown + long trunk). Two trees
 					     per tile at low opacity so it reads as texture, not noise. -->
 					<pattern id="forest-pattern" width="48" height="48" patternUnits="userSpaceOnUse">
-						<!-- Tree 1: trunk + crown -->
 						<rect x="10.5" y="20" width="3" height="16" fill="#4a2d18" opacity="0.6" />
 						<circle cx="12" cy="16" r="10" fill="#000" opacity="0.28" />
 						<circle cx="12" cy="14" r="3" fill="#5cb85c" opacity="0.32" />
-						<!-- Tree 2: trunk + crown -->
 						<rect x="32.5" y="34" width="3" height="14" fill="#4a2d18" opacity="0.6" />
 						<circle cx="34" cy="30" r="11" fill="#000" opacity="0.28" />
 						<circle cx="34" cy="28" r="3.2" fill="#5cb85c" opacity="0.32" />
+					</pattern>
+					<!-- Marsh pattern: horizontal reed strokes suggesting wet ground. -->
+					<pattern id="marsh-pattern" width="40" height="34" patternUnits="userSpaceOnUse">
+						<path d="M4 10 Q10 5 16 10 T28 10" fill="none" stroke="#000" stroke-width="1.6" opacity="0.35" stroke-linecap="round" />
+						<path d="M12 22 Q18 17 24 22 T36 22" fill="none" stroke="#000" stroke-width="1.6" opacity="0.35" stroke-linecap="round" />
+						<!-- reed tufts -->
+						<line x1="6" y1="16" x2="6" y2="8" stroke="#3a5a3a" stroke-width="1.4" opacity="0.55" />
+						<line x1="9" y1="15" x2="9" y2="7" stroke="#3a5a3a" stroke-width="1.4" opacity="0.55" />
+						<line x1="22" y1="28" x2="22" y2="20" stroke="#3a5a3a" stroke-width="1.4" opacity="0.55" />
+						<line x1="25" y1="28" x2="25" y2="20" stroke="#3a5a3a" stroke-width="1.4" opacity="0.55" />
 					</pattern>
 				</defs>
 				<!-- Water -->
@@ -502,7 +559,7 @@
 				<!-- Sea lanes -->
 				{#each $game.map.seaLanes as [a, b]}
 					{@const l = seaLaneLine(a, b, $game)}
-					<line x1={l.x1} y1={l.y1} x2={l.x2} y2={l.y2} stroke="#4a6a7a" stroke-width="1.5" stroke-dasharray="4 3" pointer-events="none" />
+					<line x1={l.x1} y1={l.y1} x2={l.x2} y2={l.y2} stroke="#a0d8ff" stroke-width="2.5" stroke-dasharray="6 4" stroke-opacity="0.85" pointer-events="none" />
 				{/each}
 				<!-- Territory polygons (Voronoi cells clipped to island hulls) -->
 				{#each $game.map.grids as g}
@@ -529,18 +586,20 @@
 						stroke-width="2"
 						onclick={() => handleGridClick(g.id)}
 						onpointerdown={(e) => onPolyPointerDown(g.id, e)}
-						onpointerenter={() => (hoveredGrid = g.id)}
-						onpointerleave={() => { if (hoveredGrid === g.id) hoveredGrid = null; }}
+						onpointerenter={(e) => onHexPointerEnter(g.id, e)}
+						onpointerleave={() => onHexPointerLeave(g.id)}
 						role="button"
 						tabindex="0"
 					/>
 				{/each}
-				<!-- Terrain overlays: mountains + forests -->
+				<!-- Terrain overlays: mountains + forests + marshes -->
 				{#each $game.map.grids as g}
 					{#if g.terrain === 'mountain'}
 						<polygon points={polygonPoints(g.cell)} fill="url(#mountain-pattern)" pointer-events="none" />
 					{:else if g.terrain === 'forest'}
 						<polygon points={polygonPoints(g.cell)} fill="url(#forest-pattern)" pointer-events="none" />
+					{:else if g.terrain === 'marsh'}
+						<polygon points={polygonPoints(g.cell)} fill="url(#marsh-pattern)" pointer-events="none" />
 					{/if}
 				{/each}
 				<!-- Army count badges, production stars, and city names -->
@@ -718,24 +777,31 @@
 			</section>
 
 			<section class="panel">
-				<h3>Your cards</h3>
+				<h3>Your cards ({$game.hands[HUMAN].length})</h3>
 				{#if $game.hands[HUMAN].length === 0}
 					<p class="hint">No cards.</p>
 				{:else}
-					<ul class="cards">
+					<div class="card-grid">
 						{#each $game.hands[HUMAN] as c, i}
-							<li>
-								<label>
-									<input type="checkbox" checked={selectedCardIdxs.includes(i)} onchange={() => toggleCard(i)} />
-									{CARD_LABELS[c]}
-								</label>
-								<button class="tiny" onclick={() => playCard(i)}>Play</button>
-							</li>
+							{@const meta = CARD_META[c]}
+							{@const disabled = $game.cardPlayedThisTurn && c !== 'antibomb'}
+							<button
+								class="card-tile kind-{meta.kind}"
+								class:disabled
+								disabled={disabled}
+								onclick={() => playCard(i)}
+								onpointerenter={(e) => onCardHoverEnter(c, e)}
+								onpointerleave={onCardHoverLeave}
+								onpointermove={(e) => onCardHoverMove(e)}
+							>
+								<div class="card-icon">{meta.icon}</div>
+								<div class="card-name">{CARD_LABELS[c]}</div>
+							</button>
 						{/each}
-					</ul>
-					<div class="row">
-						<button disabled={selectedCardIdxs.length !== 3} onclick={doTrade}>Trade set (+5)</button>
 					</div>
+					{#if $game.cardPlayedThisTurn}
+						<p class="hint">Only one card this turn — already played.</p>
+					{/if}
 				{/if}
 			</section>
 
@@ -753,7 +819,117 @@
 			</section>
 		</aside>
 	</div>
+
+	{#if $game.history}
+	{@const hist = $game.history}
+	{@const maxTerr = Math.max(1, ...hist.flatMap((h) => PLAYERS.map((p) => h.territories[p])))}
+	{@const maxArm = Math.max(1, ...hist.flatMap((h) => PLAYERS.map((p) => h.armies[p])))}
+	{@const chartW = 560}
+	{@const chartH = 180}
+	{@const xStep = hist.length > 1 ? chartW / (hist.length - 1) : 0}
+	<section class="analytics">
+		<div class="charts">
+			<div class="chart">
+				<h3>Territories owned</h3>
+				<svg viewBox="0 0 {chartW + 40} {chartH + 30}">
+					<line x1="30" y1={chartH + 5} x2={chartW + 35} y2={chartH + 5} stroke="#345" />
+					<line x1="30" y1="5" x2="30" y2={chartH + 5} stroke="#345" />
+					<text x="26" y="10" text-anchor="end" class="axis">{maxTerr}</text>
+					<text x="26" y={chartH + 8} text-anchor="end" class="axis">0</text>
+					{#each PLAYERS as p}
+						{#if hist.length > 0}
+							<polyline
+								fill="none"
+								stroke={PLAYER_COLORS[p]}
+								stroke-width="2"
+								points={hist.map((h, i) => `${30 + i * xStep},${5 + (chartH - (h.territories[p] / maxTerr) * chartH)}`).join(' ')}
+							/>
+						{/if}
+					{/each}
+				</svg>
+			</div>
+			<div class="chart">
+				<h3>Total armies</h3>
+				<svg viewBox="0 0 {chartW + 40} {chartH + 30}">
+					<line x1="30" y1={chartH + 5} x2={chartW + 35} y2={chartH + 5} stroke="#345" />
+					<line x1="30" y1="5" x2="30" y2={chartH + 5} stroke="#345" />
+					<text x="26" y="10" text-anchor="end" class="axis">{maxArm}</text>
+					<text x="26" y={chartH + 8} text-anchor="end" class="axis">0</text>
+					{#each PLAYERS as p}
+						{#if hist.length > 0}
+							<polyline
+								fill="none"
+								stroke={PLAYER_COLORS[p]}
+								stroke-width="2"
+								points={hist.map((h, i) => `${30 + i * xStep},${5 + (chartH - (h.armies[p] / maxArm) * chartH)}`).join(' ')}
+							/>
+						{/if}
+					{/each}
+				</svg>
+			</div>
+			<div class="chart stat-table">
+				<h3>Stats</h3>
+				<table class="stats-table">
+					<thead>
+						<tr>
+							<th></th><th>T</th><th>A</th><th>W/L</th><th>+/−</th><th>Cards</th>
+						</tr>
+					</thead>
+					<tbody>
+						{#each PLAYERS as p}
+							{@const last = hist[hist.length - 1]}
+							{@const st = $game.stats[p]}
+							<tr>
+								<td><span class="dot" style="background:{PLAYER_COLORS[p]}"></span> {PLAYER_NAMES[p]}</td>
+								<td>{last?.territories[p] ?? 0}</td>
+								<td>{last?.armies[p] ?? 0}</td>
+								<td>{st.attacksWon}/{st.attacksLost}</td>
+								<td>{st.territoriesCaptured}/{st.territoriesLost}</td>
+								<td>{st.cardsDrawn}</td>
+							</tr>
+						{/each}
+					</tbody>
+				</table>
+			</div>
+		</div>
+	</section>
+	{/if}
 </main>
+
+{#if hoveredCard != null && cardTipPos}
+	{@const cm = CARD_META[hoveredCard]}
+	{@const cp = clampTip(cardTipPos.x, cardTipPos.y, 280, 140)}
+	<div class="card-tooltip kind-{cm.kind}" style="left:{cp.x}px; top:{cp.y}px">
+		<div class="ct-header">
+			<span class="ct-icon">{cm.icon}</span>
+			<strong>{CARD_LABELS[hoveredCard]}</strong>
+			<span class="ct-kind">{cm.kind}</span>
+		</div>
+		<div class="ct-desc">{cm.desc}</div>
+		<div class="ct-when">Playable: {cm.when}</div>
+	</div>
+{/if}
+
+{#if hoveredGrid != null && tooltipPos}
+	{@const info = hexInfo(hoveredGrid)}
+	{@const hp = clampTip(tooltipPos.x, tooltipPos.y, 280, 180)}
+	<div class="hex-tooltip" style="left:{hp.x}px; top:{hp.y}px">
+		<div class="tt-title">
+			<span class="tt-owner-dot" style="background:{info.ownerColor}"></span>
+			<strong>{info.title}</strong>
+			<span class="tt-armies">{info.armies}</span>
+		</div>
+		<div class="tt-owner">{info.owner}</div>
+		{#if info.city}<div class="tt-city">★ {info.city}</div>{/if}
+		<div class="tt-terrain">
+			<div class="tt-terrain-name">{info.terrainName}</div>
+			{#if info.terrainDesc}<div class="tt-terrain-desc">{info.terrainDesc}</div>{/if}
+		</div>
+		{#if info.fortified}
+			<div class="tt-fort">🛡 Fortified — +2 defense (lost when hex is captured).</div>
+		{/if}
+	</div>
+{/if}
 
 <style>
 	:global(body) {
@@ -769,39 +945,53 @@
 	}
 	header {
 		border: 1px solid #1a3040;
-		padding: 0.5rem 0.75rem;
+		padding: 0.35rem 0.6rem;
 		background: #0f2035;
-		margin-bottom: 0.75rem;
+		margin-bottom: 0.5rem;
 	}
-	h1 {
-		margin: 0;
-		font-size: 1.5rem;
-		letter-spacing: 0.3rem;
-		color: #7fcfff;
+	.header-row {
+		display: flex;
+		align-items: center;
+		gap: 0.6rem;
+		flex-wrap: wrap;
 	}
 	.scoreboard {
 		display: flex;
-		gap: 0.75rem;
-		margin-top: 0.5rem;
+		gap: 0.4rem;
 		flex-wrap: wrap;
+		flex: 1 1 auto;
 	}
 	.score {
 		display: flex;
 		align-items: center;
-		gap: 0.4rem;
-		padding: 0.25rem 0.5rem;
+		gap: 0.35rem;
+		padding: 0.15rem 0.45rem;
 		border: 1px solid #1a3040;
 		background: #081826;
-		font-size: 0.9rem;
+		font-size: 0.82rem;
+		border-radius: 4px;
 	}
-	.score.current { border-color: #7fcfff; box-shadow: 0 0 8px #4a9fcf; }
+	.score.current { border-color: #7fcfff; box-shadow: 0 0 6px #4a9fcf; }
 	.score.dead { opacity: 0.4; text-decoration: line-through; }
-	.dot { width: 12px; height: 12px; border-radius: 50%; display: inline-block; }
-	.bonus { color: #ffe14a; }
-	.actions { margin-top: 0.5rem; display: flex; gap: 0.5rem; align-items: center; flex-wrap: wrap; }
-	.speed { display: flex; align-items: center; gap: 0.35rem; color: #6a9abf; font-size: 0.85rem; }
-	.speed select { width: auto; }
-	.turn { color: #7fcfff; font-family: monospace; }
+	.dot { width: 10px; height: 10px; border-radius: 50%; display: inline-block; flex: none; }
+	.score-nums { font-family: monospace; }
+	.score-nums .dim { color: #6a9abf; }
+	.bonus { color: #ffe14a; font-family: monospace; font-size: 0.78rem; }
+	.actions { display: flex; gap: 0.35rem; align-items: center; margin-left: auto; }
+	.speed { display: flex; align-items: center; }
+	.speed select { width: auto; padding: 0.1rem 0.25rem; font-size: 0.8rem; }
+	.turn {
+		color: #7fcfff;
+		font-family: monospace;
+		font-size: 0.85rem;
+		padding: 0.15rem 0.4rem;
+		border: 1px solid #1a3040;
+		border-radius: 4px;
+	}
+	.icon-btn {
+		padding: 0.2rem 0.55rem;
+		font-size: 0.8rem;
+	}
 
 	.menu {
 		padding: 1rem;
@@ -964,8 +1154,86 @@
 		paint-order: stroke;
 	}
 
-	.cards { list-style: none; padding: 0; margin: 0; }
-	.cards li { display: flex; justify-content: space-between; align-items: center; padding: 0.15rem 0; }
+	.card-grid {
+		display: grid;
+		grid-template-columns: repeat(3, 1fr);
+		gap: 0.4rem;
+	}
+	.card-tile {
+		display: flex;
+		flex-direction: column;
+		align-items: center;
+		justify-content: space-between;
+		padding: 0.5rem 0.25rem;
+		border-radius: 6px;
+		background: linear-gradient(180deg, #0e2a48, #081826);
+		border: 1px solid #2a4a6a;
+		box-shadow: inset 0 0 0 1px rgba(255, 255, 255, 0.03), 0 2px 4px rgba(0, 0, 0, 0.35);
+		cursor: pointer;
+		min-height: 74px;
+		transition: transform 0.1s, box-shadow 0.1s;
+		color: #d0e6f5;
+		font-family: inherit;
+	}
+	.card-tile:hover:not(.disabled) {
+		transform: translateY(-2px);
+		box-shadow: 0 4px 12px rgba(74, 159, 207, 0.35);
+	}
+	.card-tile.disabled { opacity: 0.35; cursor: not-allowed; }
+	.card-tile .card-icon {
+		font-size: 1.6rem;
+		line-height: 1;
+		margin-bottom: 0.3rem;
+	}
+	.card-tile .card-name {
+		font-size: 0.7rem;
+		text-align: center;
+		font-weight: bold;
+		letter-spacing: 0.03em;
+		color: #e0f0ff;
+		line-height: 1.15;
+	}
+	/* Category tints */
+	.card-tile.kind-attack { border-top: 3px solid #ff6a6a; }
+	.card-tile.kind-defense { border-top: 3px solid #7fcfff; }
+	.card-tile.kind-boost { border-top: 3px solid #ffe14a; }
+	.card-tile.kind-movement { border-top: 3px solid #c68fff; }
+	.card-tile.kind-terrain { border-top: 3px solid #7fff7f; }
+
+	.card-tooltip {
+		position: fixed;
+		z-index: 1000;
+		background: #0a1420;
+		border: 1px solid #2a4a6a;
+		border-radius: 6px;
+		padding: 0.6rem 0.75rem;
+		box-shadow: 0 4px 14px rgba(0, 0, 0, 0.6);
+		color: #d0e6f5;
+		font-size: 0.82rem;
+		min-width: 220px;
+		max-width: 280px;
+		pointer-events: none;
+	}
+	.card-tooltip.kind-attack { border-top: 3px solid #ff6a6a; }
+	.card-tooltip.kind-defense { border-top: 3px solid #7fcfff; }
+	.card-tooltip.kind-boost { border-top: 3px solid #ffe14a; }
+	.card-tooltip.kind-movement { border-top: 3px solid #c68fff; }
+	.card-tooltip.kind-terrain { border-top: 3px solid #7fff7f; }
+	.ct-header { display: flex; align-items: center; gap: 0.4rem; margin-bottom: 0.35rem; }
+	.ct-header strong { color: #e0f0ff; font-size: 0.95rem; }
+	.ct-icon { font-size: 1.3rem; line-height: 1; }
+	.ct-kind {
+		margin-left: auto;
+		font-size: 0.65rem;
+		text-transform: uppercase;
+		letter-spacing: 0.1em;
+		color: #7fcfff;
+		background: #10304a;
+		padding: 2px 6px;
+		border-radius: 3px;
+	}
+	.ct-desc { color: #d0e6f5; line-height: 1.4; margin-bottom: 0.35rem; }
+	.ct-when { color: #7fcfff; font-size: 0.72rem; }
 	.log {
 		list-style: none;
 		padding: 0;
@@ -992,19 +1260,162 @@
 		border: 1px solid #1a3040;
 		background: #0f2035;
 		padding: 0.75rem 1rem;
-		margin-bottom: 0.75rem;
-	}
-	.analytics h2 {
-		margin: 0 0 0.5rem;
-		color: #7fcfff;
-		font-size: 1rem;
-		letter-spacing: 0.1rem;
+		margin-top: 0.75rem;
 	}
 	.charts {
 		display: grid;
-		grid-template-columns: 1fr 1fr;
+		grid-template-columns: 1fr 1fr 1fr;
 		gap: 1rem;
 	}
+	.chart.stat-table { min-width: 0; }
+	.chart.stat-table table { font-size: 0.75rem; }
+	.dbg-row { display: flex; align-items: center; gap: 0.5rem; margin: 0.35rem 0; }
+
+	.debug-panel {
+		border: 1px solid #4a3a1a;
+		background: linear-gradient(180deg, #1a1a20, #12121a);
+		border-radius: 8px;
+		padding: 1rem 1.25rem 0.85rem;
+		margin: 0 0 0.75rem;
+		box-shadow: 0 4px 14px rgba(0, 0, 0, 0.4), inset 0 0 20px rgba(255, 190, 60, 0.03);
+	}
+	.debug-header {
+		display: flex;
+		align-items: center;
+		gap: 0.6rem;
+		margin-bottom: 0.75rem;
+	}
+	.debug-header h2 {
+		margin: 0;
+		color: #e0e0ea;
+		font-size: 1.05rem;
+		letter-spacing: 0.05em;
+		font-weight: 500;
+	}
+	.debug-badge {
+		background: repeating-linear-gradient(45deg, #ffbe3c, #ffbe3c 5px, #1a1a20 5px, #1a1a20 10px);
+		color: #1a1a20;
+		font-family: monospace;
+		font-size: 0.7rem;
+		font-weight: bold;
+		padding: 0.2rem 0.55rem;
+		border-radius: 3px;
+		letter-spacing: 0.15em;
+	}
+	.close-x {
+		margin-left: auto;
+		background: transparent;
+		border: none;
+		color: #7a7a85;
+		font-size: 1rem;
+		cursor: pointer;
+		padding: 0.25rem 0.5rem;
+	}
+	.close-x:hover { color: #e0e0ea; background: rgba(255, 255, 255, 0.05); }
+
+	.debug-options {
+		display: grid;
+		grid-template-columns: 1fr 1fr;
+		gap: 0.7rem;
+	}
+	@media (max-width: 800px) {
+		.debug-options { grid-template-columns: 1fr; }
+	}
+	.toggle-card {
+		display: flex;
+		align-items: flex-start;
+		gap: 0.75rem;
+		padding: 0.75rem 0.85rem;
+		background: #0f1218;
+		border: 1px solid #2a2a35;
+		border-radius: 6px;
+		cursor: pointer;
+		transition: border-color 0.15s, background 0.15s;
+	}
+	.toggle-card:hover { border-color: #4a4a5a; background: #14171f; }
+	.toggle-card.on { border-color: #ffbe3c; background: #1a1712; }
+	.toggle-card input[type='checkbox'] {
+		position: absolute;
+		opacity: 0;
+		pointer-events: none;
+	}
+	.toggle-slot {
+		width: 34px;
+		height: 20px;
+		border-radius: 10px;
+		background: #2a2a35;
+		position: relative;
+		flex: none;
+		margin-top: 2px;
+		transition: background 0.15s;
+	}
+	.toggle-card.on .toggle-slot { background: #ffbe3c; }
+	.toggle-thumb {
+		position: absolute;
+		top: 2px;
+		left: 2px;
+		width: 16px;
+		height: 16px;
+		background: #e0e0ea;
+		border-radius: 50%;
+		transition: left 0.15s;
+	}
+	.toggle-card.on .toggle-thumb { left: 16px; background: #1a1a20; }
+	.toggle-text { flex: 1; }
+	.toggle-title { color: #e0e0ea; font-weight: bold; font-size: 0.9rem; margin-bottom: 0.15rem; }
+	.toggle-desc { color: #8a8a95; font-size: 0.78rem; line-height: 1.35; }
+
+	.debug-footer {
+		margin-top: 0.65rem;
+		color: #7a7a85;
+		font-size: 0.75rem;
+		font-style: italic;
+		text-align: right;
+	}
+
+	.hex-tooltip {
+		position: fixed;
+		z-index: 1000;
+		background: #0a1420;
+		border: 1px solid #2a4a6a;
+		border-radius: 6px;
+		padding: 0.5rem 0.75rem;
+		box-shadow: 0 4px 14px rgba(0, 0, 0, 0.6);
+		color: #d0e6f5;
+		font-size: 0.85rem;
+		min-width: 200px;
+		max-width: 280px;
+		pointer-events: none;
+	}
+	.tt-title { display: flex; align-items: center; gap: 0.4rem; }
+	.tt-title strong { color: #e0f0ff; font-size: 0.95rem; }
+	.tt-owner-dot { width: 10px; height: 10px; border-radius: 50%; display: inline-block; flex: none; }
+	.tt-armies { margin-left: auto; color: #ffe14a; font-family: monospace; font-weight: bold; }
+	.tt-owner { color: #7fcfff; font-size: 0.75rem; margin-top: 2px; }
+	.tt-city { color: #ffe14a; font-style: italic; font-size: 0.8rem; margin-top: 3px; }
+	.tt-terrain { margin-top: 6px; padding-top: 6px; border-top: 1px solid #1a3040; }
+	.tt-terrain-name { color: #ffbb99; font-weight: bold; font-size: 0.85rem; }
+	.tt-terrain-desc { color: #a8bfd4; font-size: 0.78rem; margin-top: 2px; line-height: 1.35; }
+	.tt-fort { color: #7fcfff; font-size: 0.78rem; margin-top: 6px; }
+
+	.start-prompt {
+		display: flex;
+		align-items: center;
+		gap: 1rem;
+		background: linear-gradient(135deg, #10304a, #0a2540);
+		border: 2px solid #4a9fcf;
+		border-radius: 8px;
+		padding: 1rem 1.25rem;
+		margin: 0.75rem 0;
+		box-shadow: 0 0 20px rgba(74, 159, 207, 0.35);
+	}
+	.start-prompt h2 { margin: 0 0 0.15rem; color: #e0f0ff; font-size: 1.15rem; }
+	.start-prompt p { margin: 0; color: #a8bfd4; font-size: 0.9rem; }
+	.start-prompt > div:first-child { flex: 1 1 auto; }
+	.start-prompt > button { margin-left: auto; }
+	button.big { padding: 0.75rem 1.5rem; font-size: 1rem; font-weight: bold; }
+	button.primary { background: #2a5a8a; border-color: #7fcfff; color: #fff; }
+	button.primary:hover:not(:disabled) { background: #3a6a9a; }
 	.chart {
 		background: #081826;
 		padding: 0.5rem;
@@ -1036,7 +1447,7 @@
 		text-transform: uppercase;
 		font-size: 0.7rem;
 	}
-	@media (max-width: 900px) {
+	@media (max-width: 1100px) {
 		.charts { grid-template-columns: 1fr; }
 	}
 

@@ -10,7 +10,6 @@ import {
 	confirmMoveInAfterConquest,
 	endTurn,
 	playCard,
-	tradeCards,
 	type Player,
 	type CardType,
 	type GameState
@@ -58,8 +57,7 @@ export async function runAiTurn(p: Player, tickMs = 90) {
 		return;
 	}
 
-	// --- Optional card trades / plays during placement phase ---
-	tryTradeSet();
+	// --- Optional card plays during placement phase ---
 	tryPlayBonusCards();
 	tryPlayDouble();
 	await wait();
@@ -167,27 +165,6 @@ function findBestAttack(s: GameState, p: Player): AttackChoice | null {
 		}
 	}
 	return best;
-}
-
-function tryTradeSet() {
-	const s = get(game);
-	const hand = s.hands[s.current];
-	if (hand.length < 3) return;
-	// find any 3 matching (with wilds)
-	const buckets: Record<string, number[]> = {};
-	hand.forEach((c, i) => {
-		if (c === 'wild') return;
-		(buckets[c] ??= []).push(i);
-	});
-	const wildIdxs = hand.map((c, i) => (c === 'wild' ? i : -1)).filter((i) => i >= 0);
-	for (const key of Object.keys(buckets)) {
-		const idxs = buckets[key];
-		if (idxs.length >= 3) { tradeCards(idxs.slice(0, 3)); return; }
-		if (idxs.length + wildIdxs.length >= 3) {
-			const combo = [...idxs, ...wildIdxs].slice(0, 3);
-			if (combo.length === 3) { tradeCards(combo); return; }
-		}
-	}
 }
 
 function tryPlayBonusCards() {

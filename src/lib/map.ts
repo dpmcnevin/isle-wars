@@ -9,7 +9,7 @@ export interface Island {
 	shape: [number, number][]; // outline of the union of member hexes
 }
 
-export type Terrain = 'plain' | 'mountain' | 'forest';
+export type Terrain = 'plain' | 'mountain' | 'forest' | 'marsh';
 
 export interface Grid {
 	id: number;
@@ -48,7 +48,14 @@ export function mulberry32(a: number) {
 const ISLAND_NAMES = [
 	'Iceland', 'Norvalia', 'Ardmark', 'Cordania', 'Vestros', 'Suriath',
 	'Halon', 'Meridian', 'Southaven', 'Thraxos', 'Kell', 'Aramoor',
-	'Braedon', 'Cyrus', 'Drakos', 'Emberly', 'Fjord', 'Grangar', 'Havel'
+	'Braedon', 'Cyrus', 'Drakos', 'Emberly', 'Fjord', 'Grangar', 'Havel',
+	'Ilyria', 'Jorvik', 'Kastros', 'Lyonesse', 'Mordant', 'Nordvale',
+	'Olthar', 'Perendor', 'Quel', 'Rhesk', 'Skalgard', 'Tomarra',
+	'Ulvra', 'Varn', 'Wistmere', 'Xanthos', 'Ymir', 'Zoraya',
+	'Ashenshore', 'Blackreach', 'Coldwater', 'Duskholme', 'Elderfell',
+	'Frostholt', 'Galewind', 'Highmoor', 'Ironvale', 'Jadecoast',
+	'Krayvern', 'Lorewick', 'Mistrend', 'Nightshoal', 'Oakenreach',
+	'Palewater', 'Ravenholt', 'Silvercrest', 'Tidesworn', 'Umbervale'
 ];
 
 const CITY_NAMES = [
@@ -60,7 +67,15 @@ const CITY_NAMES = [
 	'Longbarrow', 'Marshend', 'Northgate', 'Oakenshield', 'Pinehollow',
 	'Quarryhill', 'Riverrun', 'Stonemill', 'Tidewater', 'Umberwood',
 	'Valeholm', 'Winterport', 'Yellowvale', 'Zephyr', 'Amberfield',
-	'Bleakstone', 'Cedarhold', 'Dawnfort', 'Ebonvale', 'Farhaven'
+	'Bleakstone', 'Cedarhold', 'Dawnfort', 'Ebonvale', 'Farhaven',
+	'Glassford', 'Harrowdeep', 'Ivorygate', 'Jasperfall', 'Kalebridge',
+	'Larkspur', 'Millbrook', 'Newhaven', 'Ostmarsh', 'Pyremouth',
+	'Quicksilver', 'Rathmoor', 'Saltmere', 'Twinbridges', 'Underhill',
+	'Vaultspire', 'Windborne', 'Yewwood', 'Zennora', 'Ambersreach',
+	'Brackenford', 'Cinderhold', 'Dragonspur', 'Everwatch', 'Frostgate',
+	'Grimford', 'Hollowdale', 'Illmoor', 'Jadegate', 'Kestrelfall',
+	'Lightreach', 'Moonvale', 'Nightshade', 'Osprey', 'Pinehaven',
+	'Quinnsport', 'Rooksmere', 'Stormhold', 'Thornfell', 'Ustralia'
 ];
 
 // -----------------------------------------------------------------------------
@@ -241,29 +256,41 @@ export function generateMap(seed: number = Math.floor(Math.random() * 1e9)): Gam
 	const width = 1400;
 	const height = 900;
 
-	// Randomize island count. Fewer islands ⇒ each grows larger.
-	const nIslands = 7 + Math.floor(rnd() * 5); // 7..11 — more islands = fuller map
+	// Total territories per game is roughly fixed. Number of landmasses varies
+	// (3..7); with fewer islands, each one grows much larger.
+	const nIslands = 3 + Math.floor(rnd() * 5); // 3..7
+	const TOTAL_TERRITORIES = 46 + Math.floor(rnd() * 10); // 46..55
+	const MIN_PER_ISLAND = 3;
 
-	// Bonus values (also drives territory count):
-	// 50% small (2..4), 35% medium (5..7), 15% big (8..12).
-	const values: number[] = [];
+	// Distribute TOTAL_TERRITORIES across islands with random weights so some
+	// landmasses become much larger than others. Every island gets at least
+	// MIN_PER_ISLAND hexes.
+	const targets: number[] = Array(nIslands).fill(MIN_PER_ISLAND);
+	let remaining = TOTAL_TERRITORIES - nIslands * MIN_PER_ISLAND;
+	// Skewed weights: raising rnd() to a power biases toward small values with
+	// occasional large ones, producing a mix of small islets + a couple of huge
+	// landmasses.
+	const weights = Array.from({ length: nIslands }, () => Math.pow(rnd(), 1.8) + 0.15);
+	const totalWeight = weights.reduce((a, b) => a + b, 0);
 	for (let i = 0; i < nIslands; i++) {
-		const r = rnd();
-		if (r < 0.5) values.push(2 + Math.floor(rnd() * 3));
-		else if (r < 0.85) values.push(5 + Math.floor(rnd() * 3));
-		else values.push(8 + Math.floor(rnd() * 5));
+		const share = Math.floor((weights[i] / totalWeight) * remaining);
+		targets[i] += share;
 	}
-	// Guarantee at least one bigger island.
-	if (!values.some((v) => v >= 6)) values[Math.floor(rnd() * nIslands)] = 7 + Math.floor(rnd() * 4);
+	// Fix rounding drift: any leftover tiles go to the biggest-weighted island.
+	let drift = TOTAL_TERRITORIES - targets.reduce((a, b) => a + b, 0);
+	while (drift > 0) {
+		let bestIdx = 0;
+		for (let i = 1; i < nIslands; i++) if (weights[i] > weights[bestIdx]) bestIdx = i;
+		targets[bestIdx]++;
+		weights[bestIdx] -= 0.05; // tiny tiebreak so we spread residual drift a bit
+		drift--;
+	}
+
+	// Derive bonus values from territory counts (bigger islands = bigger bonus).
+	const values = targets.map((c) => Math.max(2, Math.min(15, Math.round(c * 0.65))));
 
 	const namePool = [...ISLAND_NAMES].sort(() => rnd() - 0.5);
-
-	// Territory count per island (≈ value with jitter).
-	function terrCount(v: number) {
-		return Math.max(2, Math.min(14, Math.round(v * 0.95 + 1 + (rnd() - 0.5))));
-	}
-	const targets = values.map(terrCount);
-	const totalTerritories = targets.reduce((a, b) => a + b, 0);
+	const totalTerritories = TOTAL_TERRITORIES;
 
 	// Choose hex size so all territories fit at ~50% land coverage.
 	// Hex area = 3·√3/2 · s². Total land area ≈ totalTerritories · hexArea.
@@ -517,6 +544,31 @@ export function generateMap(seed: number = Math.floor(Math.random() * 1e9)): Gam
 		for (const id of range) grids[id].terrain = 'forest';
 	}
 
+	// Marshes: rarer than forests. 30% chance per island. Marsh hexes can't
+	// launch a second attack in the same turn after being used as a source.
+	for (const isl of islands) {
+		const gs = grids.filter((g) => g.island === isl.id);
+		if (gs.length < 4) continue;
+		if (rnd() >= 0.3) continue;
+		const plains = gs.filter((g) => g.terrain === 'plain');
+		if (plains.length === 0) continue;
+		const start = plains[Math.floor(rnd() * plains.length)];
+		const rangeSize = 1 + Math.floor(rnd() * 3); // 1..3
+		const range = new Set<number>([start.id]);
+		const frontier: number[] = [start.id];
+		while (range.size < rangeSize && frontier.length > 0) {
+			const cur = frontier.shift()!;
+			const neighbors = adj[cur].filter(
+				(n) => grids[n].island === isl.id && !range.has(n) && grids[n].terrain === 'plain'
+			);
+			if (neighbors.length === 0) continue;
+			const pick = neighbors[Math.floor(rnd() * neighbors.length)];
+			range.add(pick);
+			frontier.push(pick);
+		}
+		for (const id of range) grids[id].terrain = 'marsh';
+	}
+
 	// Assign a unique city name to every production-center hex.
 	const cityPool = [...CITY_NAMES].sort(() => rnd() - 0.5);
 	let cityIdx = 0;
@@ -542,8 +594,9 @@ export function generateMap(seed: number = Math.floor(Math.random() * 1e9)): Gam
 		const cx = sx / gs.length;
 		const cy = sy / gs.length;
 		if (gs.length === 1) {
-			// Single-hex island: fall back to the hex center.
-			isl.labelPos = [gs[0].x, gs[0].y];
+			// Single-hex island: put the label at the top of the hex above the
+			// army badge so both are visible.
+			isl.labelPos = [gs[0].x, gs[0].y - 34];
 			continue;
 		}
 		// Group hex vertices by rounded coordinates so shared vertices collapse.
