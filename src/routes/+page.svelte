@@ -305,6 +305,17 @@
 		if (canStartAttackDrag(id)) {
 			pointerDownGrid = id;
 			pointerDownAt = svgPoint(e);
+			// Touch pointers are implicitly captured by the hex under the
+			// finger on pointerdown, which stops pointerenter/pointerleave
+			// from firing on the other hexes the finger drags across —
+			// hoveredGrid would never update and the drag-to-attack drop
+			// target would never be found. Releasing capture restores
+			// normal hover-style dispatch during the drag. No effect on
+			// mouse, which isn't auto-captured this way.
+			const target = e.currentTarget as Element;
+			if (target.hasPointerCapture?.(e.pointerId)) {
+				target.releasePointerCapture(e.pointerId);
+			}
 		}
 	}
 

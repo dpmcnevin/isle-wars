@@ -21,3 +21,9 @@ Thumbs.db
 # Vite
 vite.config.js.timestamp-*
 vite.config.ts.timestamp-*
+
+# iOS (generated; regenerate with `xcodegen generate` in ios/)
+ios/IsleWars.xcodeproj
+ios/IsleWars/Resources/game-bundle.js
+ios/*.xcworkspace
+ios/DerivedData

@@ -1,0 +1,45 @@
+name: IsleWars
+options:
+  bundleIdPrefix: com.isle-wars
+  deploymentTarget:
+    iOS: "17.0"
+  createIntermediateGroups: true
+
+configs:
+  Debug: debug
+  Release: release
+
+targets:
+  IsleWars:
+    type: application
+    platform: iOS
+    sources:
+      - path: IsleWars
+    settings:
+      base:
+        PRODUCT_NAME: IsleWars
+        PRODUCT_BUNDLE_IDENTIFIER: com.isle-wars.ipad
+        TARGETED_DEVICE_FAMILY: "2" # iPad only
+        SUPPORTS_MACCATALYST: false
+        SWIFT_VERSION: "6.0"
+        INFOPLIST_KEY_UILaunchScreen_Generation: true
+        INFOPLIST_KEY_UISupportedInterfaceOrientations: "UIInterfaceOrientationLandscapeLeft UIInterfaceOrientationLandscapeRight"
+        INFOPLIST_KEY_UISupportedInterfaceOrientations~ipad: "UIInterfaceOrientationLandscapeLeft UIInterfaceOrientationLandscapeRight"
+        INFOPLIST_KEY_UIRequiresFullScreen: true
+        GENERATE_INFOPLIST_FILE: true
+        MARKETING_VERSION: "0.1.0"
+        CURRENT_PROJECT_VERSION: "1"
+    preBuildScripts:
+      - name: "Build JS game bundle"
+        script: |
+          set -e
+          # Xcode's build PATH is minimal and omits Homebrew/nvm, so `npm`/`node`
+          # aren't found when building from the Xcode UI. Add the common install
+          # locations (and any nvm default) so the bundle build works there too.
+          export PATH="/opt/homebrew/bin:/usr/local/bin:$HOME/.npm-global/bin:$PATH"
+          if [ -s "$HOME/.nvm/nvm.sh" ]; then
+            . "$HOME/.nvm/nvm.sh" >/dev/null 2>&1 || true
+          fi
+          cd "$SRCROOT/.."
+          npm run build:ios-bridge
+        alwaysOutOfDate: true

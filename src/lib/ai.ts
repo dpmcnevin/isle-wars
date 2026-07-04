@@ -170,9 +170,21 @@ export async function runAiTurn(p: Player, tickMs = 90) {
 	if (get(game).current === p && get(game).phase !== 'action' && get(game).phase !== 'placing') {
 		cancelAction();
 	}
+	// Drain any still-owed placement (e.g. a card played during placement can
+	// bounce us out of the main placement loop, leaving armies unplaced). If we
+	// don't finish placing, the turn can't end and the AI deadlocks.
+	let placeSafety = 0;
+	while (get(game).phase === 'placing' && get(game).current === p && placeSafety++ < 100) {
+		const s = get(game);
+		const target = pickPlacementTarget(s, p);
+		if (target == null) break;
+		placeArmies(target, s.armiesToPlace);
+	}
 	if (get(game).phase === 'action' && get(game).current === p) {
 		endTurn();
-	} else if (get(game).current === p && get(game).phase !== 'game_over' && get(game).phase !== 'placing') {
+	} else if (get(game).current === p && get(game).phase !== 'game_over') {
+		// Last-resort unstick — includes a lingering `placing` phase we couldn't
+		// drain above, which previously left the AI frozen mid-turn.
 		forceEndTurn();
 	}
 }
