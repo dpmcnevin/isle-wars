@@ -31,7 +31,8 @@ export type CardType =
 	| 'ferry'
 	| 'invasion'
 	| 'deforest'
-	| 'storm';
+	| 'storm'
+	| 'artillery';
 
 export const CARD_LABELS: Record<CardType, string> = {
 	air: 'Air Move',
@@ -48,7 +49,8 @@ export const CARD_LABELS: Record<CardType, string> = {
 	ferry: 'Ferry Route',
 	invasion: 'Water Invasion',
 	deforest: 'Deforestation',
-	storm: 'Storm'
+	storm: 'Storm',
+	artillery: 'Artillery'
 };
 
 export interface CardMeta {
@@ -147,6 +149,12 @@ export const CARD_META: Record<CardType, CardMeta> = {
 		kind: 'terrain',
 		when: 'Placement or Action phase',
 		desc: 'Destroy any existing sea lane. Pick both endpoints of the route to sever.'
+	},
+	artillery: {
+		icon: '💥',
+		kind: 'attack',
+		when: 'Action phase (from a city ★)',
+		desc: 'Bombard any hex up to 2 steps away, launched from one of your cities (★). Roll four times — each hit removes one defender. Attackers never lose armies. Terrain and fortification bonuses still count.'
 	}
 };
 
@@ -166,7 +174,8 @@ const CARD_POOL: CardType[] = [
 	'ferry',
 	'invasion',
 	'deforest',
-	'storm'
+	'storm',
+	'artillery'
 ];
 
 export type Phase =
@@ -193,6 +202,8 @@ export type Phase =
 	| 'deforest_select'
 	| 'storm_from'
 	| 'storm_to'
+	| 'artillery_from'
+	| 'artillery_to'
 	| 'discard'
 	| 'game_over';
 
@@ -290,7 +301,7 @@ function emptyStatsMap(): Record<Player, PlayerStats> {
 	return { blue: emptyStats(), green: emptyStats(), red: emptyStats(), brown: emptyStats() };
 }
 
-export const SAVE_KEY = 'isle-wars-save-v11';
+export const SAVE_KEY = 'isle-wars-save-v12';
 export const DEBUG_KEY = 'isle-wars-debug';
 
 export interface DebugSettings {
@@ -496,7 +507,7 @@ function emptyHands(): Record<Player, CardType[]> {
 	const blueStart: CardType[] = debugSettings.starterCards
 		? ['air', 'bonus5', 'bonus8', 'bonus15', 'double', 'bomb', 'antibomb',
 			'reinforce', 'elite', 'sabotage', 'fortify', 'ferry', 'invasion',
-			'deforest', 'storm']
+			'deforest', 'storm', 'artillery']
 		: [];
 	return { blue: blueStart, green: [], red: [], brown: [] };
 }
@@ -514,29 +525,15 @@ export function startGame(difficulty = 2, startingArmies = 3, seed?: number): Ga
 	const map = generateMap(s);
 	const states: GridState[] = map.grids.map(() => ({ owner: null, armies: 0 }));
 
-	// Distribute grids. Human (blue) advantage from difficulty setting.
-	// Difficulty 1 = easiest → blue gets a bigger share of starting countries
-	const shares = { blue: 0.25, green: 0.25, red: 0.25, brown: 0.25 };
-	// Bump blue based on difficulty (1 easy → +extra, 4 hard → -less)
-	const bump = (5 - difficulty) * 0.06; // diff1=+0.24, diff4=+0.06
-	shares.blue += bump;
-	const remaining = 1 - shares.blue;
-	shares.green = remaining / 3;
-	shares.red = remaining / 3;
-	shares.brown = remaining / 3;
-
-	// Shuffle grid ids, assign in proportion
+	// Distribute grids evenly — round-robin over a shuffled order so each
+	// player ends up with (n/4) ± 1 territories and the same starting armies
+	// per hex. Difficulty no longer skews the initial map; it just changes
+	// how aggressively the AI plays (see ai.ts).
 	const rand = mulberry32(s ^ 0xa5a5a5);
 	const ids = map.grids.map((g) => g.id).sort(() => rand() - 0.5);
-	const n = ids.length;
-	const cutBlue = Math.floor(n * shares.blue);
-	const cutGreen = cutBlue + Math.floor(n * shares.green);
-	const cutRed = cutGreen + Math.floor(n * shares.red);
-	for (let i = 0; i < n; i++) {
-		const id = ids[i];
-		const owner: Player =
-			i < cutBlue ? 'blue' : i < cutGreen ? 'green' : i < cutRed ? 'red' : 'brown';
-		states[id] = { owner, armies: startingArmies };
+	for (let i = 0; i < ids.length; i++) {
+		const owner = PLAYERS[i % 4];
+		states[ids[i]] = { owner, armies: startingArmies };
 	}
 
 	const startPlayer: Player = PLAYERS[Math.floor(rand() * 4)];
@@ -816,16 +813,24 @@ function beginTurn(s: GameState): GameState {
 		if (s.winner) return s;
 	}
 
-	// Production centers double at ~10% chance (per manual)
+	// Production centers grow at ~10% chance per turn. To prevent exponential
+	// runaway on long games, the doubling is capped: a hex only doubles up to
+	// the PROD_CAP threshold, beyond which it grows by a fixed additive bonus.
 	if (Math.random() < 0.1) {
+		const PROD_CAP = 40;
+		const PROD_ADD = 8;
 		let touched = 0;
 		for (const g of s.map.grids) {
-			if (g.production && s.states[g.id].owner) {
-				s.states[g.id].armies *= 2;
-				touched++;
+			if (!g.production || !s.states[g.id].owner) continue;
+			const cur = s.states[g.id].armies;
+			if (cur < PROD_CAP) {
+				s.states[g.id].armies = Math.min(PROD_CAP, cur * 2);
+			} else {
+				s.states[g.id].armies = cur + PROD_ADD;
 			}
+			touched++;
 		}
-		if (touched > 0) log(s, `Production centers active! ${touched} grids doubled.`, 'event', null);
+		if (touched > 0) log(s, `Production centers active! ${touched} grids boosted.`, 'event', null);
 	}
 
 	// Reinforcements
@@ -1015,10 +1020,11 @@ export function endTurn() {
 	game.update((s) => {
 		if (s.phase !== 'action') return s;
 		devLogAction(s.current, { kind: 'end_turn' }, s);
-		// Card rule: card unless you attacked this turn and lost every battle.
-		// So: conquered ≥1 hex → card, didn't attack → card, only losses → no card.
-		const attackedAndLostAll = s.lastAttackResult === 'loss' && !s.defeatedThisTurn;
-		const shouldAward = !attackedAndLostAll && !s.turnCardAwarded;
+		// Card rule (per user spec): card at end of every round, UNLESS your
+		// turn ends on a battle loss. i.e. it's the OUTCOME of your final
+		// attack that matters — earlier wins don't rescue a losing finish.
+		const endedOnLoss = s.lastAttackResult === 'loss';
+		const shouldAward = !endedOnLoss && !s.turnCardAwarded;
 		if (shouldAward) {
 			const card = drawCard(s);
 			if (card) {
@@ -1286,6 +1292,73 @@ export function selectGrid(gridId: number): void {
 				s.message = 'Attack, move, or pass.';
 				break;
 			}
+			case 'artillery_from': {
+				if (s.states[gridId].owner !== s.current) { s.message = 'Bombard from one of your territories.'; break; }
+				if (!s.map.grids[gridId].production) { s.message = 'Artillery only fires from a city ★.'; break; }
+				if (s.states[gridId].armies < 2) { s.message = 'Need at least 2 armies to man the guns.'; break; }
+				s.selectedFrom = gridId;
+				s.phase = 'artillery_to';
+				s.message = 'Artillery: click a target within 2 hexes (any owner but yours).';
+				break;
+			}
+			case 'artillery_to': {
+				if (s.selectedFrom == null) break;
+				if (!canArtilleryTarget(s, s.selectedFrom, gridId)) { s.message = 'Target must be an enemy/neutral hex within 2 steps.'; break; }
+				const target = s.states[gridId];
+				const defenderBefore = target.armies;
+				const defBonus = defenseBonus(s, gridId);
+				const forestBonus = attackerBonus(s, gridId); // forest cover helps attacker even here
+				let hits = 0;
+				const ARTILLERY_SHOTS = 4;
+				for (let shot = 1; shot <= ARTILLERY_SHOTS && target.armies > 0; shot++) {
+					const atk = 1 + Math.floor(Math.random() * 6) + forestBonus;
+					const def = 1 + Math.floor(Math.random() * 6) + defBonus;
+					devLog({
+						type: 'artillery_shot',
+						game_id: devLogGameId,
+						turn: s.turn,
+						actor: s.current,
+						from: s.selectedFrom,
+						to: gridId,
+						shot,
+						dice_atk: atk,
+						dice_def: def,
+						atk_bonus: forestBonus,
+						def_bonus: defBonus,
+						hit: atk > def
+					});
+					if (atk > def) {
+						target.armies -= 1;
+						hits++;
+					}
+				}
+				let ownershipMsg = '';
+				if (target.armies <= 0) {
+					// Target reduced to zero — becomes neutral (artillery doesn't
+					// itself take the hex, only damages it).
+					target.owner = null;
+					target.armies = 0;
+					target.fortified = false;
+					ownershipMsg = ' Territory abandoned.';
+				}
+				const idx = (s as any)._pendingCardIdx as number;
+				consumeCard(s, idx);
+				delete (s as any)._pendingCardIdx;
+				const modTxt: string[] = [];
+				if (defBonus > 0) modTxt.push(`+${defBonus} def`);
+				if (forestBonus > 0) modTxt.push(`+${forestBonus} atk`);
+				const modStr = modTxt.length ? ` (${modTxt.join(', ')})` : '';
+				log(s, `${PLAYER_NAMES[s.current]} shelled ${gridLabel(s, gridId)}: ${hits}/${ARTILLERY_SHOTS} hits${modStr}, ${defenderBefore} → ${target.armies} armies.${ownershipMsg}`, 'card');
+				updateAlive(s);
+				const gameOver = checkWin(s);
+				if (!gameOver) {
+					s.phase = 'action';
+					s.selectedFrom = null;
+					s.selectedTo = null;
+					s.message = 'Attack, move, or pass.';
+				}
+				break;
+			}
 		}
 		return s;
 	});
@@ -1514,7 +1587,9 @@ export function playCard(idx: number) {
 				break;
 			}
 			case 'air': {
-				if (s.phase !== 'action') { s.message = 'Air Move during action phase.'; return s; }
+				if (s.phase !== 'action' && s.phase !== 'attack_select_from' && s.phase !== 'attack_select_to') {
+					s.message = 'Air Move during action phase.'; return s;
+				}
 				s.phase = 'air_from';
 				s.selectedFrom = null;
 				s.selectedTo = null;
@@ -1534,7 +1609,12 @@ export function playCard(idx: number) {
 				break;
 			}
 			case 'elite': {
-				if (s.phase !== 'action') { s.message = 'Play Elite Troops in action phase, before attacking.'; return s; }
+				if (s.phase !== 'action' && s.phase !== 'attack_select_from' && s.phase !== 'attack_select_to') {
+					s.message = 'Play Elite Troops in action phase, before attacking.'; return s;
+				}
+				s.phase = 'action'; // exit any pending attack setup
+				s.selectedFrom = null;
+				s.selectedTo = null;
 				s.eliteAttackActive = true;
 				consumeCard(s, idx);
 				log(s, `${PLAYER_NAMES[s.current]} rallied Elite Troops (+2 attack next battle).`, 'card');
@@ -1565,7 +1645,9 @@ export function playCard(idx: number) {
 				break;
 			}
 			case 'invasion': {
-				if (s.phase !== 'action') { s.message = 'Play Water Invasion in the action phase.'; return s; }
+				if (s.phase !== 'action' && s.phase !== 'attack_select_from' && s.phase !== 'attack_select_to') {
+					s.message = 'Play Water Invasion in the action phase.'; return s;
+				}
 				s.phase = 'invasion_from';
 				s.selectedFrom = null;
 				s.selectedTo = null;
@@ -1589,9 +1671,52 @@ export function playCard(idx: number) {
 				s.message = 'Storm: click one endpoint of the sea route you want to destroy.';
 				break;
 			}
+			case 'artillery': {
+				// Allow playing from action or from any of the attack-setup phases
+				// (auto-cancels the pending attack). Not allowed mid-roll.
+				if (s.phase !== 'action' && s.phase !== 'attack_select_from' && s.phase !== 'attack_select_to') {
+					s.message = 'Play Artillery in the action phase.';
+					return s;
+				}
+				s.phase = 'artillery_from';
+				s.selectedFrom = null;
+				s.selectedTo = null;
+				(s as any)._pendingCardIdx = idx;
+				s.message = 'Artillery: click one of your territories to bombard from (2+ armies).';
+				break;
+			}
 		}
 		return s;
 	});
+}
+
+// BFS distance in the current adjacency graph up to `maxSteps`. Returns
+// Infinity if unreachable within the cap.
+function graphDist(s: GameState, from: number, to: number, maxSteps: number): number {
+	if (from === to) return 0;
+	const dist = new Map<number, number>();
+	dist.set(from, 0);
+	const queue: number[] = [from];
+	while (queue.length) {
+		const cur = queue.shift()!;
+		const d = dist.get(cur)!;
+		if (d >= maxSteps) continue;
+		for (const n of s.map.adj[cur]) {
+			if (dist.has(n)) continue;
+			dist.set(n, d + 1);
+			if (n === to) return d + 1;
+			queue.push(n);
+		}
+	}
+	return Infinity;
+}
+
+/** Returns true if `to` is within 2 hops of `from` and eligible as an
+ * artillery target (enemy or neutral, not the source hex). */
+export function canArtilleryTarget(s: GameState, from: number, to: number): boolean {
+	if (from === to) return false;
+	if (s.states[to].owner === s.current) return false;
+	return graphDist(s, from, to, 2) <= 2;
 }
 
 function resolveBomb(s: GameState, targetId: number) {

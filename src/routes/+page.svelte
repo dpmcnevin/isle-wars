@@ -15,6 +15,7 @@
 		confirmAir,
 		endTurn,
 		playCard,
+		discardCard,
 		loadSavedGame,
 		clearSavedGame,
 		getDebugSettings,
@@ -25,6 +26,7 @@
 		attackerBonus,
 		canFerryConnect,
 		canInvasionConnect,
+		canArtilleryTarget,
 		countryCount,
 		fullIslandBonus,
 		PLAYERS,
@@ -41,6 +43,106 @@
 	let moveQty = $state(1);
 	let airQty = $state(1);
 	let moveInQty = $state(0);
+	// The hex the human clicked during placement — opens the qty modal.
+	let placeTargetHex = $state<number | null>(null);
+
+	// Qty modal helpers — covers placement, post-conquest move-in, move, and air.
+	function isQtyPhase(): boolean {
+		if ($game.current !== HUMAN) return false;
+		if ($game.phase === 'placing' && placeTargetHex != null) return true;
+		return $game.phase === 'attack_move_in' || $game.phase === 'move_qty' || $game.phase === 'air_qty';
+	}
+	function qtySourceHex(): number | null {
+		if ($game.phase === 'placing') return placeTargetHex;
+		return $game.selectedFrom;
+	}
+	function qtyInfo(srcArmies: number) {
+		if ($game.phase === 'placing') {
+			return {
+				title: 'Place how many armies?',
+				min: 1,
+				max: Math.max(1, $game.armiesToPlace),
+				confirmLabel: 'Place'
+			};
+		}
+		if ($game.phase === 'attack_move_in') {
+			return {
+				title: 'Move additional armies into the captured hex',
+				min: 0,
+				max: Math.max(0, srcArmies - 1),
+				confirmLabel: 'Move In'
+			};
+		}
+		if ($game.phase === 'move_qty') {
+			return {
+				title: 'Move how many armies?',
+				min: 1,
+				max: Math.max(1, srcArmies - 1),
+				confirmLabel: 'Move'
+			};
+		}
+		return {
+			title: 'Airlift how many armies?',
+			min: 1,
+			max: Math.max(1, srcArmies - 1),
+			confirmLabel: 'Airlift'
+		};
+	}
+	function qtyValue(): number {
+		if ($game.phase === 'placing') return placeQty;
+		return $game.phase === 'attack_move_in' ? moveInQty : $game.phase === 'move_qty' ? moveQty : airQty;
+	}
+	function setQty(n: number) {
+		const src = qtySourceHex();
+		if (!isQtyPhase() || src == null) return;
+		const info = qtyInfo($game.states[src].armies);
+		const v = Math.max(info.min, Math.min(info.max, Math.round(Number.isFinite(n) ? n : 0)));
+		if ($game.phase === 'placing') placeQty = v;
+		else if ($game.phase === 'attack_move_in') moveInQty = v;
+		else if ($game.phase === 'move_qty') moveQty = v;
+		else airQty = v;
+	}
+	function bumpQty(delta: number) { setQty(qtyValue() + delta); }
+	function confirmQty() {
+		const src = qtySourceHex();
+		if (!isQtyPhase() || src == null) return;
+		const info = qtyInfo($game.states[src].armies);
+		const v = Math.max(info.min, Math.min(info.max, Math.round(qtyValue())));
+		if ($game.phase === 'placing') {
+			placeArmies(src, v);
+			placeTargetHex = null;
+			return;
+		}
+		if ($game.phase === 'attack_move_in') confirmMoveInAfterConquest(v);
+		else if ($game.phase === 'move_qty') confirmMove(v);
+		else confirmAir(v);
+	}
+	function cancelQty() {
+		if ($game.phase === 'placing' && placeTargetHex != null) {
+			placeTargetHex = null;
+			return;
+		}
+		cancelAction();
+	}
+	// Whenever we enter a qty phase, clamp the associated variable so it's
+	// always a valid number in range.
+	$effect(() => {
+		if ($game.phase !== 'placing' && placeTargetHex != null) placeTargetHex = null;
+	});
+	$effect(() => {
+		const src = qtySourceHex();
+		if (!isQtyPhase() || src == null) return;
+		const info = qtyInfo($game.states[src].armies);
+		if ($game.phase === 'placing') {
+			placeQty = Math.max(info.min, Math.min(info.max, Math.round(Number.isFinite(placeQty) ? placeQty : 1)));
+		} else if ($game.phase === 'attack_move_in') {
+			moveInQty = Math.max(info.min, Math.min(info.max, Math.round(Number.isFinite(moveInQty) ? moveInQty : 0)));
+		} else if ($game.phase === 'move_qty') {
+			moveQty = Math.max(info.min, Math.min(info.max, Math.round(Number.isFinite(moveQty) ? moveQty : 1)));
+		} else if ($game.phase === 'air_qty') {
+			airQty = Math.max(info.min, Math.min(info.max, Math.round(Number.isFinite(airQty) ? airQty : 1)));
+		}
+	});
 	let difficulty = $state(2);
 	let startingArmies = $state(3);
 	let showMenu = $state(false);
@@ -137,6 +239,9 @@
 		if (s.phase === 'invasion_from') {
 			return s.states[id].owner === HUMAN && s.states[id].armies >= 2;
 		}
+		if (s.phase === 'artillery_from') {
+			return s.states[id].owner === HUMAN && s.states[id].armies >= 2 && s.map.grids[id].production;
+		}
 		return false;
 	}
 
@@ -172,9 +277,16 @@
 		return canInvasionConnect(s, from, to);
 	}
 
+	function isValidArtilleryTarget(from: number, to: number): boolean {
+		const s = $game;
+		if (s.phase !== 'artillery_from' && s.phase !== 'artillery_to') return false;
+		return canArtilleryTarget(s, from, to);
+	}
+
 	function isValidDragTarget(from: number, to: number): boolean {
 		return isValidAttackTarget(from, to) || isValidMoveTarget(from, to)
-			|| isValidFerryTarget(from, to) || isValidInvasionTarget(from, to);
+			|| isValidFerryTarget(from, to) || isValidInvasionTarget(from, to)
+			|| isValidArtilleryTarget(from, to);
 	}
 
 	function svgPoint(e: PointerEvent): { x: number; y: number } | null {
@@ -228,6 +340,9 @@
 			} else if (isValidInvasionTarget(from, to)) {
 				selectGrid(from);
 				selectGrid(to);
+			} else if (isValidArtilleryTarget(from, to)) {
+				selectGrid(from);
+				selectGrid(to);
 			}
 		}
 		dragFrom = null;
@@ -247,7 +362,12 @@
 		if ($game.current !== HUMAN || $game.phase === 'game_over') return;
 		const tag = (e.target as HTMLElement | null)?.tagName;
 		if (tag === 'INPUT' || tag === 'TEXTAREA') return;
-		if (e.key === 'Escape') { cancelAction(); return; }
+		if (e.key === 'Escape') { cancelQty(); return; }
+		if (isQtyPhase()) {
+			if (e.key === 'Enter') { confirmQty(); e.preventDefault(); return; }
+			if (e.key === 'ArrowUp' || e.key === '+') { bumpQty(1); e.preventDefault(); return; }
+			if (e.key === 'ArrowDown' || e.key === '-') { bumpQty(-1); e.preventDefault(); return; }
+		}
 		if ($game.phase === 'action') {
 			if (e.key === 'a' || e.key === 'A') { beginAttack(); e.preventDefault(); }
 			else if (e.key === 'm' || e.key === 'M') { beginMove(); e.preventDefault(); }
@@ -324,6 +444,11 @@
 			case 'invasion_to':
 				if (s.selectedFrom == null) return false;
 				return canInvasionConnect(s, s.selectedFrom, id);
+			case 'artillery_from':
+				return s.states[id].owner === HUMAN && s.states[id].armies >= 2 && s.map.grids[id].production;
+			case 'artillery_to':
+				if (s.selectedFrom == null) return false;
+				return canArtilleryTarget(s, s.selectedFrom, id);
 			default:
 				return false;
 		}
@@ -333,8 +458,12 @@
 		const s = $game;
 		if (s.current !== HUMAN) return;
 		if (s.phase === 'placing') {
-			const q = Math.max(1, Math.min(placeQty, s.armiesToPlace));
-			placeArmies(id, q);
+			if (s.states[id].owner !== HUMAN) return;
+			// Open the placement qty modal; user picks how many armies to drop.
+			placeTargetHex = id;
+			// Default to placing everything remaining unless the user explicitly
+			// prefers a smaller default; the modal will clamp.
+			placeQty = Math.max(1, Math.min(placeQty || 1, s.armiesToPlace));
 			return;
 		}
 		if (!isSelectable(id, s)) return;
@@ -359,10 +488,27 @@
 		return pts.map((p) => p.join(',')).join(' ');
 	}
 
-	function seaLaneLine(a: number, b: number, s: typeof $game) {
+	function seaLanePath(a: number, b: number, s: typeof $game) {
+		// Draw as a quadratic Bezier that arcs perpendicular to the segment.
+		// A slight curve prevents lanes from overlapping straight-through hex
+		// centers and gives them a nautical "sea route" feel.
 		const g1 = s.map.grids[a];
 		const g2 = s.map.grids[b];
-		return { x1: g1.x, y1: g1.y, x2: g2.x, y2: g2.y };
+		const midX = (g1.x + g2.x) / 2;
+		const midY = (g1.y + g2.y) / 2;
+		const dx = g2.x - g1.x;
+		const dy = g2.y - g1.y;
+		const len = Math.hypot(dx, dy) || 1;
+		// Perpendicular unit vector — arc height ~12% of segment length, capped.
+		const perpX = -dy / len;
+		const perpY = dx / len;
+		const arc = Math.min(22, len * 0.06);
+		// Deterministic side based on the endpoint ids so the curve doesn't jitter
+		// between renders.
+		const side = ((a + b) % 2 === 0) ? 1 : -1;
+		const cx = midX + perpX * arc * side;
+		const cy = midY + perpY * arc * side;
+		return `M ${g1.x} ${g1.y} Q ${cx} ${cy} ${g2.x} ${g2.y}`;
 	}
 
 	// Debug menu
@@ -598,10 +744,9 @@
 				{#each $game.map.waterHexes ?? [] as poly}
 					<polygon points={polygonPoints(poly)} fill="#0e2a48" stroke="#26527a" stroke-width="0.8" stroke-opacity="0.55" pointer-events="none" />
 				{/each}
-				<!-- Sea lanes -->
+				<!-- Sea lanes: curved paths arcing through open water -->
 				{#each $game.map.seaLanes as [a, b]}
-					{@const l = seaLaneLine(a, b, $game)}
-					<line x1={l.x1} y1={l.y1} x2={l.x2} y2={l.y2} stroke="#a0d8ff" stroke-width="2.5" stroke-dasharray="6 4" stroke-opacity="0.85" pointer-events="none" />
+					<path d={seaLanePath(a, b, $game)} fill="none" stroke="#a0d8ff" stroke-width="2.5" stroke-dasharray="6 4" stroke-opacity="0.85" pointer-events="none" />
 				{/each}
 				<!-- Territory polygons (Voronoi cells clipped to island hulls) -->
 				{#each $game.map.grids as g}
@@ -623,6 +768,8 @@
 						class:drag-ferry-candidate={dragFrom != null && dragFrom !== g.id && isValidFerryTarget(dragFrom, g.id)}
 						class:drag-invade-target={dragFrom != null && isValidInvasionTarget(dragFrom, g.id) && hoveredGrid === g.id}
 						class:drag-invade-candidate={dragFrom != null && dragFrom !== g.id && isValidInvasionTarget(dragFrom, g.id)}
+						class:drag-artillery-target={dragFrom != null && isValidArtilleryTarget(dragFrom, g.id) && hoveredGrid === g.id}
+						class:drag-artillery-candidate={dragFrom != null && dragFrom !== g.id && isValidArtilleryTarget(dragFrom, g.id)}
 						fill={gridFill(g.id, $game)}
 						stroke="#0a1420"
 						stroke-width="2"
@@ -649,10 +796,14 @@
 					{@const st = $game.states[g.id]}
 					<g pointer-events="none">
 						{#if st.fortified}
-							<circle cx={g.x} cy={g.y} r="24" fill="none" stroke="#7fcfff" stroke-width="2.5" stroke-dasharray="3 2" opacity="0.9" />
+							<circle cx={g.x} cy={g.y} r="30" fill="none" stroke="#7fcfff" stroke-width="3" stroke-dasharray="6 4" opacity="0.95" />
+							<circle cx={g.x} cy={g.y} r="34" fill="none" stroke="#7fcfff" stroke-width="1.5" opacity="0.55" />
 						{/if}
-						<circle cx={g.x} cy={g.y} r="20" fill="#000" fill-opacity="0.6" stroke={g.production ? '#ffe14a' : '#fff'} stroke-width={g.production ? 2.5 : 1.5} />
+						<circle cx={g.x} cy={g.y} r="20" fill="#000" fill-opacity="0.6" stroke={st.fortified ? '#7fcfff' : g.production ? '#ffe14a' : '#fff'} stroke-width={st.fortified ? 3 : g.production ? 2.5 : 1.5} />
 						<text x={g.x} y={g.y + 7} class="node-label" text-anchor="middle">{st.armies}</text>
+						{#if st.fortified}
+							<text x={g.x - 18} y={g.y - 14} class="fort-icon" text-anchor="middle">🛡</text>
+						{/if}
 						{#if g.production}
 							<text x={g.x + 20} y={g.y - 15} class="prod-star" text-anchor="middle">★</text>
 							{#if g.cityName}
@@ -670,6 +821,11 @@
 					<text x={isl.labelPos[0]} y={isl.labelPos[1] + 17} class="isle-value isle-label-outline" text-anchor="middle" pointer-events="none">+{isl.value}</text>
 					<text x={isl.labelPos[0]} y={isl.labelPos[1] + 17} class="isle-value" text-anchor="middle" pointer-events="none">+{isl.value}</text>
 				{/each}
+				<!-- Named water features: bays and lakes -->
+				{#each $game.map.waterFeatures ?? [] as wf}
+					<text x={wf.center[0]} y={wf.center[1] + 4} class="water-label water-label-outline" text-anchor="middle" pointer-events="none">{wf.name}</text>
+					<text x={wf.center[0]} y={wf.center[1] + 4} class="water-label" text-anchor="middle" pointer-events="none">{wf.name}</text>
+				{/each}
 				<!-- Drag arrow (attack = gold, move = cyan, no valid drop = dashed white) -->
 				{#if dragFrom != null && dragPt}
 					{@const src = $game.map.grids[dragFrom]}
@@ -677,7 +833,8 @@
 					{@const overMove = hoveredGrid != null && isValidMoveTarget(dragFrom, hoveredGrid)}
 					{@const overFerry = hoveredGrid != null && isValidFerryTarget(dragFrom, hoveredGrid)}
 					{@const overInvade = hoveredGrid != null && isValidInvasionTarget(dragFrom, hoveredGrid)}
-					{@const arrowColor = overAttack ? '#ffe14a' : overMove ? '#7fcfff' : overFerry ? '#c68fff' : overInvade ? '#ff6a6a' : '#fff'}
+					{@const overArt = hoveredGrid != null && isValidArtilleryTarget(dragFrom, hoveredGrid)}
+					{@const arrowColor = overAttack ? '#ffe14a' : overMove ? '#7fcfff' : overFerry ? '#c68fff' : overInvade ? '#ff6a6a' : overArt ? '#ff8a00' : '#fff'}
 					<defs>
 						<marker id="drag-arrowhead" markerWidth="10" markerHeight="10" refX="8" refY="5" orient="auto">
 							<path d="M0,0 L10,5 L0,10 Z" fill={arrowColor} />
@@ -689,7 +846,7 @@
 						stroke={arrowColor}
 						stroke-width="4"
 						stroke-linecap="round"
-						stroke-dasharray={(overAttack || overMove || overFerry || overInvade) ? 'none' : '8 6'}
+						stroke-dasharray={(overAttack || overMove || overFerry || overInvade || overArt) ? 'none' : '8 6'}
 						marker-end="url(#drag-arrowhead)"
 						pointer-events="none"
 					/>
@@ -701,12 +858,6 @@
 			<section class="panel">
 				<h3>{PLAYER_NAMES[$game.current]}'s turn — {$game.phase}</h3>
 				{#if $game.current === HUMAN && $game.phase === 'placing'}
-					<div class="row">
-						<label>Place qty
-							<input type="number" min="1" max={$game.armiesToPlace} bind:value={placeQty} />
-						</label>
-						<button onclick={() => (placeQty = $game.armiesToPlace)}>All ({$game.armiesToPlace})</button>
-					</div>
 					<p class="hint">Armies remaining: <strong>{$game.armiesToPlace}</strong>. Click one of your territories.</p>
 				{/if}
 
@@ -760,56 +911,9 @@
 					{/if}
 				{/if}
 
-				{#if $game.current === HUMAN && $game.phase === 'attack_move_in' && $game.selectedFrom != null && $game.selectedTo != null}
-					{@const max = $game.states[$game.selectedFrom].armies - 1}
-					<div class="qty-panel">
-						<label class="qty-input">
-							<span>Extra to move in</span>
-							<input type="number" min="0" max={max} bind:value={moveInQty} />
-						</label>
-						<div class="qty-buttons">
-							<button onclick={() => (moveInQty = 0)}>None</button>
-							<button onclick={() => (moveInQty = max)}>All ({max})</button>
-							<button class="primary" onclick={() => confirmMoveInAfterConquest(moveInQty)}>Confirm</button>
-						</div>
-					</div>
-				{/if}
-
-				{#if $game.current === HUMAN && ($game.phase === 'move_select_from' || $game.phase === 'move_select_to' || $game.phase === 'bomb_select' || $game.phase === 'air_from' || $game.phase === 'air_to' || $game.phase === 'reinforce_select' || $game.phase === 'sabotage_select' || $game.phase === 'fortify_select' || $game.phase === 'ferry_from' || $game.phase === 'ferry_to' || $game.phase === 'invasion_from' || $game.phase === 'invasion_to')}
+				{#if $game.current === HUMAN && ($game.phase === 'move_select_from' || $game.phase === 'move_select_to' || $game.phase === 'bomb_select' || $game.phase === 'air_from' || $game.phase === 'air_to' || $game.phase === 'reinforce_select' || $game.phase === 'sabotage_select' || $game.phase === 'fortify_select' || $game.phase === 'ferry_from' || $game.phase === 'ferry_to' || $game.phase === 'invasion_from' || $game.phase === 'invasion_to' || $game.phase === 'artillery_from' || $game.phase === 'artillery_to' || $game.phase === 'deforest_select' || $game.phase === 'storm_from' || $game.phase === 'storm_to')}
 					<div class="row">
 						<button onclick={cancelAction}>Cancel</button>
-					</div>
-				{/if}
-
-				{#if $game.current === HUMAN && $game.phase === 'move_qty' && $game.selectedFrom != null}
-					{@const maxM = $game.states[$game.selectedFrom].armies - 1}
-					<div class="qty-panel">
-						<label class="qty-input">
-							<span>Move qty</span>
-							<input type="number" min="1" max={maxM} bind:value={moveQty} />
-						</label>
-						<div class="qty-buttons">
-							<button onclick={() => (moveQty = 1)}>1</button>
-							<button onclick={() => (moveQty = maxM)}>All ({maxM})</button>
-							<button class="primary" onclick={() => confirmMove(moveQty)}>Confirm</button>
-							<button onclick={cancelAction}>Cancel</button>
-						</div>
-					</div>
-				{/if}
-
-				{#if $game.current === HUMAN && $game.phase === 'air_qty' && $game.selectedFrom != null}
-					{@const maxA = $game.states[$game.selectedFrom].armies - 1}
-					<div class="qty-panel">
-						<label class="qty-input">
-							<span>Airlift qty</span>
-							<input type="number" min="1" max={maxA} bind:value={airQty} />
-						</label>
-						<div class="qty-buttons">
-							<button onclick={() => (airQty = 1)}>1</button>
-							<button onclick={() => (airQty = maxA)}>All ({maxA})</button>
-							<button class="primary" onclick={() => confirmAir(airQty)}>Airlift</button>
-							<button onclick={cancelAction}>Cancel</button>
-						</div>
 					</div>
 				{/if}
 
@@ -819,19 +923,28 @@
 			</section>
 
 			<section class="panel">
-				<h3>Your cards ({$game.hands[HUMAN].length})</h3>
+				{#if $game.current === HUMAN && $game.phase === 'discard'}
+					<h3>Discard a card ({$game.hands[HUMAN].length} — over hand limit)</h3>
+				{:else}
+					<h3>Your cards ({$game.hands[HUMAN].length})</h3>
+				{/if}
 				{#if $game.hands[HUMAN].length === 0}
 					<p class="hint">No cards.</p>
 				{:else}
+					{#if $game.current === HUMAN && $game.phase === 'discard'}
+						<p class="hint">Hand is over the limit — click a card to discard it.</p>
+					{/if}
 					<div class="card-grid">
 						{#each $game.hands[HUMAN] as c, i}
 							{@const meta = CARD_META[c]}
-							{@const disabled = $game.cardPlayedThisTurn && c !== 'antibomb'}
+							{@const isDiscarding = $game.current === HUMAN && $game.phase === 'discard'}
+							{@const disabled = !isDiscarding && $game.cardPlayedThisTurn && c !== 'antibomb'}
 							<button
 								class="card-tile kind-{meta.kind}"
 								class:disabled
+								class:discardable={isDiscarding}
 								disabled={disabled}
-								onclick={() => playCard(i)}
+								onclick={() => (isDiscarding ? discardCard(i) : playCard(i))}
 								onpointerenter={(e) => onCardHoverEnter(c, e)}
 								onpointerleave={onCardHoverLeave}
 								onpointermove={(e) => onCardHoverMove(e)}
@@ -841,7 +954,7 @@
 							</button>
 						{/each}
 					</div>
-					{#if $game.cardPlayedThisTurn}
+					{#if $game.cardPlayedThisTurn && !($game.current === HUMAN && $game.phase === 'discard')}
 						<p class="hint">Only one card this turn — already played.</p>
 					{/if}
 				{/if}
@@ -849,8 +962,24 @@
 
 			<section class="panel">
 				<h3>Log</h3>
+				<!-- Latest 5 entries render expanded as text rows; older ones collapse
+				     to the chip grid. -->
+				{#if $game.log.length > 0}
+					<ul class="log-recent">
+						{#each $game.log.slice(0, 5) as e}
+							<li class="kind-{e.kind ?? 'info'}">
+								<span class="lr-turn">T{e.turn}</span>
+								{#if e.player}
+									<span class="lr-dot" style="background:{PLAYER_COLORS[e.player]}"></span>
+								{/if}
+								<span class="lr-text">{e.text}</span>
+							</li>
+						{/each}
+					</ul>
+				{/if}
 				<div class="log-grid">
-					{#each $game.log as e, i}
+					{#each $game.log.slice(5) as e, j}
+						{@const i = j + 5}
 						<button
 							class="log-chip kind-{e.kind ?? 'info'}"
 							style={e.player ? `--player:${PLAYER_COLORS[e.player]}` : ''}
@@ -867,6 +996,43 @@
 			</section>
 		</aside>
 	</div>
+
+	{#if isQtyPhase() && qtySourceHex() != null}
+		{@const src = qtySourceHex()!}
+		{@const srcArmies = $game.states[src].armies}
+		{@const info = qtyInfo(srcArmies)}
+		<div class="qty-modal-backdrop" onclick={cancelQty} role="presentation">
+			<div class="qty-modal" onclick={(e) => e.stopPropagation()} role="dialog" aria-label={info.title}>
+				<div class="qty-modal-title">{info.title}</div>
+				<div class="qty-modal-sub">
+					{#if $game.phase === 'placing'}
+						On <strong>{gridLabelLocal(src, $game)}</strong>
+						· <strong>{$game.armiesToPlace - qtyValue()}</strong> left to place after
+					{:else}
+						From <strong>{gridLabelLocal(src, $game)}</strong>
+						{#if $game.selectedTo != null} → <strong>{gridLabelLocal($game.selectedTo, $game)}</strong>{/if}
+						· leaves <strong>{srcArmies - qtyValue()}</strong> behind
+					{/if}
+				</div>
+				<div class="qty-modal-value">{qtyValue()}</div>
+				<div class="qty-modal-scale">min {info.min} · max {info.max}</div>
+				<div class="qty-modal-grid">
+					<button onclick={() => bumpQty(-5)} disabled={qtyValue() <= info.min}>−5</button>
+					<button onclick={() => bumpQty(-1)} disabled={qtyValue() <= info.min}>−1</button>
+					<button onclick={() => bumpQty(1)} disabled={qtyValue() >= info.max}>+1</button>
+					<button onclick={() => bumpQty(5)} disabled={qtyValue() >= info.max}>+5</button>
+				</div>
+				<div class="qty-modal-grid two">
+					<button onclick={() => setQty(info.min)}>{info.min === 0 ? 'None' : 'Min (1)'}</button>
+					<button onclick={() => setQty(info.max)}>Max ({info.max})</button>
+				</div>
+				<div class="qty-modal-actions">
+					<button onclick={cancelQty}>Cancel</button>
+					<button class="primary" onclick={confirmQty}>{info.confirmLabel}</button>
+				</div>
+			</div>
+		</div>
+	{/if}
 
 	{#if $game.history}
 	{@const hist = $game.history}
@@ -1145,7 +1311,8 @@
 		width: 70px;
 	}
 
-	.territory { cursor: default; transition: filter 0.15s, stroke 0.15s; }
+	.territory { cursor: default; transition: filter 0.15s, stroke 0.15s; outline: none; }
+	.territory:focus, .territory:focus-visible { outline: none; }
 	/* No custom stroke on mountain hexes — the tiled pattern is enough. */
 	.territory.selectable {
 		cursor: pointer;
@@ -1165,6 +1332,8 @@
 	.territory.drag-ferry-target { stroke: #c68fff !important; stroke-width: 5 !important; filter: drop-shadow(0 0 14px #c68fff) !important; }
 	.territory.drag-invade-candidate { stroke: #ff6a6a !important; stroke-width: 3 !important; filter: drop-shadow(0 0 6px rgba(255, 106, 106, 0.7)); }
 	.territory.drag-invade-target { stroke: #ff6a6a !important; stroke-width: 5 !important; filter: drop-shadow(0 0 14px #ff6a6a) !important; }
+	.territory.drag-artillery-candidate { stroke: #ff8a00 !important; stroke-width: 3 !important; filter: drop-shadow(0 0 6px rgba(255, 138, 0, 0.7)); }
+	.territory.drag-artillery-target { stroke: #ff8a00 !important; stroke-width: 5 !important; filter: drop-shadow(0 0 14px #ff8a00) !important; }
 	.map { touch-action: none; user-select: none; }
 	.node-label {
 		fill: #fff;
@@ -1178,6 +1347,11 @@
 		font-size: 18px;
 		pointer-events: none;
 	}
+	.fort-icon {
+		font-size: 16px;
+		pointer-events: none;
+		filter: drop-shadow(0 0 3px #7fcfff);
+	}
 	.isle-label {
 		fill: #e0f0ff;
 		font-size: 20px;
@@ -1186,6 +1360,22 @@
 		letter-spacing: 0.1em;
 		opacity: 0.98;
 		pointer-events: none;
+	}
+	.water-label {
+		fill: #7aaccc;
+		font-size: 9px;
+		font-family: 'Georgia', 'Times New Roman', serif;
+		font-style: italic;
+		letter-spacing: 0.05em;
+		opacity: 0.85;
+		pointer-events: none;
+	}
+	.water-label-outline {
+		fill: none;
+		stroke: #0a1420;
+		stroke-width: 2.5px;
+		stroke-linejoin: round;
+		paint-order: stroke;
 	}
 	.isle-label-outline {
 		fill: none;
@@ -1244,6 +1434,8 @@
 		box-shadow: 0 4px 12px rgba(74, 159, 207, 0.35);
 	}
 	.card-tile.disabled { opacity: 0.35; cursor: not-allowed; }
+	.card-tile.discardable { outline: 2px dashed #ff8080; outline-offset: -3px; }
+	.card-tile.discardable:hover { background: rgba(255, 90, 90, 0.15); }
 	.card-tile .card-icon {
 		font-size: 1.6rem;
 		line-height: 1;
@@ -1298,6 +1490,28 @@
 	}
 	.ct-desc { color: #d0e6f5; line-height: 1.4; margin-bottom: 0.35rem; }
 	.ct-when { color: #7fcfff; font-size: 0.72rem; }
+	.log-recent {
+		list-style: none;
+		padding: 0;
+		margin: 0 0 0.5rem;
+		font-size: 0.8rem;
+	}
+	.log-recent li {
+		display: flex;
+		align-items: baseline;
+		gap: 0.35rem;
+		padding: 0.25rem 0;
+		border-bottom: 1px solid #1a3040;
+	}
+	.log-recent li:last-child { border-bottom: none; }
+	.log-recent .lr-turn { color: #4a7a9a; font-family: monospace; font-size: 0.7rem; }
+	.log-recent .lr-dot { width: 8px; height: 8px; border-radius: 50%; flex: none; align-self: center; }
+	.log-recent .lr-text { flex: 1; line-height: 1.35; color: #d0e6f5; }
+	.log-recent li.kind-attack .lr-text { color: #ffbb99; }
+	.log-recent li.kind-card .lr-text { color: #ffe14a; }
+	.log-recent li.kind-event .lr-text { color: #ff99ff; }
+	.log-recent li.kind-defeat .lr-text { color: #ff9999; }
+
 	.log-grid {
 		display: flex;
 		flex-wrap: wrap;
@@ -1388,6 +1602,73 @@
 	.chart.stat-table { min-width: 0; }
 	.chart.stat-table table { font-size: 0.75rem; }
 	.dbg-row { display: flex; align-items: center; gap: 0.5rem; margin: 0.35rem 0; }
+
+	.qty-modal-backdrop {
+		position: fixed;
+		inset: 0;
+		background: rgba(4, 10, 20, 0.65);
+		backdrop-filter: blur(2px);
+		display: flex;
+		align-items: center;
+		justify-content: center;
+		z-index: 1500;
+	}
+	.qty-modal {
+		background: linear-gradient(180deg, #10304a, #0a1a2c);
+		border: 2px solid #4a9fcf;
+		border-radius: 10px;
+		padding: 1.5rem 1.75rem;
+		min-width: 340px;
+		max-width: 440px;
+		box-shadow: 0 12px 40px rgba(0, 0, 0, 0.5), 0 0 30px rgba(74, 159, 207, 0.3);
+	}
+	.qty-modal-title {
+		color: #e0f0ff;
+		font-size: 1.05rem;
+		font-weight: bold;
+		text-align: center;
+	}
+	.qty-modal-sub {
+		color: #a8bfd4;
+		font-size: 0.82rem;
+		text-align: center;
+		margin: 0.25rem 0 0.85rem;
+	}
+	.qty-modal-value {
+		font-size: 3rem;
+		font-family: monospace;
+		font-weight: bold;
+		color: #ffe14a;
+		text-align: center;
+		line-height: 1;
+	}
+	.qty-modal-scale {
+		color: #6a9abf;
+		font-size: 0.72rem;
+		font-family: monospace;
+		text-align: center;
+		margin: 0.2rem 0 1rem;
+	}
+	.qty-modal-grid {
+		display: grid;
+		grid-template-columns: repeat(4, 1fr);
+		gap: 0.4rem;
+		margin-bottom: 0.5rem;
+	}
+	.qty-modal-grid.two { grid-template-columns: repeat(2, 1fr); }
+	.qty-modal-grid button {
+		padding: 0.55rem 0.4rem;
+		font-family: monospace;
+		font-weight: bold;
+		font-size: 0.95rem;
+	}
+	.qty-modal-actions {
+		display: grid;
+		grid-template-columns: 1fr 2fr;
+		gap: 0.5rem;
+		margin-top: 0.75rem;
+	}
+	.qty-modal-actions button { padding: 0.7rem 0.5rem; font-size: 0.95rem; font-weight: bold; }
 
 	.debug-panel {
 		border: 1px solid #4a3a1a;

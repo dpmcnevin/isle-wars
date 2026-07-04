@@ -22,12 +22,20 @@ export interface Grid {
 	cell: [number, number][]; // hex polygon (6 vertices)
 }
 
+export interface WaterFeature {
+	kind: 'lake' | 'bay';
+	name: string;
+	center: [number, number];
+	hexes: [number, number][][]; // polygons of the constituent hexes (for optional shading)
+}
+
 export interface GameMap {
 	islands: Island[];
 	grids: Grid[];
 	adj: number[][];
 	seaLanes: [number, number][];
 	waterHexes: [number, number][][]; // hex polygons for unassigned (water) cells
+	waterFeatures: WaterFeature[]; // named lakes and bays
 	width: number;
 	height: number;
 	viewBox: { x: number; y: number; w: number; h: number }; // tight bbox around land
@@ -55,7 +63,31 @@ const ISLAND_NAMES = [
 	'Ashenshore', 'Blackreach', 'Coldwater', 'Duskholme', 'Elderfell',
 	'Frostholt', 'Galewind', 'Highmoor', 'Ironvale', 'Jadecoast',
 	'Krayvern', 'Lorewick', 'Mistrend', 'Nightshoal', 'Oakenreach',
-	'Palewater', 'Ravenholt', 'Silvercrest', 'Tidesworn', 'Umbervale'
+	'Palewater', 'Ravenholt', 'Silvercrest', 'Tidesworn', 'Umbervale',
+	// Bloodborne locales
+	'Yharnam', 'Cainhurst', 'Hemwick', 'Byrgenwerth', 'Yahargul',
+	'Loran', 'Pthumeru', 'Isz', 'Mensis',
+	// Elden Ring / Lands Between
+	'Limgrave', 'Liurnia', 'Caelid', 'Altus', 'Gelmir', 'Farum',
+	'Nokron', 'Nokstella', 'Mohgwyn', 'Miquella', 'Belurat',
+	'Enir', 'Rauh', 'Scadu', 'Shaded', 'Consecrated', 'Weeping'
+];
+
+const LAKE_NAMES = [
+	'Lake Windemere', 'Lake Arannor', 'Lake Braxis', 'Lake Corvain', 'Lake Duskwater',
+	'Lake Elandra', 'Lake Fenweald', 'Lake Glasspool', 'Lake Havenreach', 'Lake Illuvar',
+	'Lake Jaydeep', 'Lake Kelvor', 'Lake Loriath', 'Lake Miremere', 'Lake Nyxholm',
+	'Lake Ozryn', 'Lake Palewinds', 'Lake Quivenmoor', 'Lake Ravensmere', 'Lake Sildereth',
+	'Lake Tolvaris', 'Lake Umbra', 'Lake Vellum', 'Lake Wysprith', 'Lake Yshiro'
+];
+
+const BAY_NAMES = [
+	'Amber Bay', 'Blackfin Bay', 'Coral Cove', 'Driftwood Bay', 'Emberfin Cove',
+	'Falcon Bay', 'Gullhaven', 'Harborlight', 'Iron Bay', 'Jasper Cove',
+	'Kelpline Bay', 'Longshore Bay', 'Moonwater Bay', 'Netherbay', 'Osprey Cove',
+	'Pearl Bay', 'Quaystone Bay', 'Ravenwater', 'Silver Bay', 'Tempest Cove',
+	'Umberbay', 'Voidwater Bay', 'Whalers\' Cove', 'Xebec Bay', 'Yellowsail Bay',
+	'Zephyr Cove', 'Bay of Storms', 'Bay of Reeds', 'Bay of Whispers', 'Bay of Ashes'
 ];
 
 const CITY_NAMES = [
@@ -75,7 +107,17 @@ const CITY_NAMES = [
 	'Brackenford', 'Cinderhold', 'Dragonspur', 'Everwatch', 'Frostgate',
 	'Grimford', 'Hollowdale', 'Illmoor', 'Jadegate', 'Kestrelfall',
 	'Lightreach', 'Moonvale', 'Nightshade', 'Osprey', 'Pinehaven',
-	'Quinnsport', 'Rooksmere', 'Stormhold', 'Thornfell', 'Ustralia'
+	'Quinnsport', 'Rooksmere', 'Stormhold', 'Thornfell', 'Ustralia',
+	// Bloodborne
+	'Oedon Chapel', 'Old Yharnam', 'Hypogean Gaol', 'Iosefka Clinic',
+	'Nightmare Frontier', 'Upper Cathedral', 'Hunter\'s Dream',
+	'Forbidden Woods', 'Lecture Building', 'Fishing Hamlet',
+	// Elden Ring
+	'Stormveil', 'Raya Lucaria', 'Volcano Manor', 'Leyndell', 'Farum Azula',
+	'Elphael', 'Haligtree', 'Sellia', 'Sofria', 'Redmane',
+	'Roundtable Hold', 'Church of Marika', 'Bellum', 'Deeproot',
+	'Mountaintops', 'Nokstella', 'Ainsel', 'Siofra', 'Rold', 'Ordina',
+	'Belurat', 'Enir-Ilim', 'Rauh Base', 'Ancient Ruins', 'Bonny Village'
 ];
 
 // -----------------------------------------------------------------------------
@@ -432,17 +474,49 @@ export function generateMap(seed: number = Math.floor(Math.random() * 1e9)): Gam
 		if (!adj[a].includes(b)) adj[a].push(b);
 		if (!adj[b].includes(a)) adj[b].push(a);
 	}
-	function nearestCross(iA: Island, iB: Island): [number, number] | null {
+	function pathInPoly(px: number, py: number, poly: [number, number][]): boolean {
+		let inside = false;
+		for (let i = 0, j = poly.length - 1; i < poly.length; j = i++) {
+			const xi = poly[i][0], yi = poly[i][1];
+			const xj = poly[j][0], yj = poly[j][1];
+			if (((yi > py) !== (yj > py)) &&
+				(px < ((xj - xi) * (py - yi)) / (yj - yi) + xi)) inside = !inside;
+		}
+		return inside;
+	}
+	function pathClearsOtherIslands(aId: number, bId: number): boolean {
+		const a = grids[aId], b = grids[bId];
+		const dx = b.x - a.x, dy = b.y - a.y;
+		const dist = Math.hypot(dx, dy);
+		const steps = Math.max(6, Math.ceil(dist / 15));
+		const startT = 0.08, endT = 0.92;
+		for (let i = 0; i <= steps; i++) {
+			const t = startT + (endT - startT) * (i / steps);
+			const px = a.x + dx * t;
+			const py = a.y + dy * t;
+			for (const g of grids) {
+				if (g.id === aId || g.id === bId) continue;
+				if (pathInPoly(px, py, g.cell)) return false;
+			}
+		}
+		return true;
+	}
+	function nearestCross(iA: Island, iB: Island, allowThroughLand = false): [number, number] | null {
 		const gsA = grids.filter((g) => g.island === iA.id);
 		const gsB = grids.filter((g) => g.island === iB.id);
 		if (gsA.length === 0 || gsB.length === 0) return null;
-		let best: [number, number] = [gsA[0].id, gsB[0].id];
-		let bestD = Infinity;
+		const pairs: Array<{ a: number; b: number; d: number }> = [];
 		for (const a of gsA) for (const b of gsB) {
-			const d = Math.hypot(a.x - b.x, a.y - b.y);
-			if (d < bestD) { bestD = d; best = [a.id, b.id]; }
+			pairs.push({ a: a.id, b: b.id, d: Math.hypot(a.x - b.x, a.y - b.y) });
 		}
-		return best;
+		pairs.sort((p, q) => p.d - q.d);
+		for (const p of pairs) {
+			if (pathClearsOtherIslands(p.a, p.b)) return [p.a, p.b];
+		}
+		// No clear-water pair. Only fall back when the caller says land is OK
+		// (used by the last-ditch connectivity guarantee).
+		if (allowThroughLand && pairs.length) return [pairs[0].a, pairs[0].b];
+		return null;
 	}
 	for (const isl of islands) {
 		const others = islands
@@ -490,7 +564,9 @@ export function generateMap(seed: number = Math.floor(Math.random() * 1e9)): Gam
 			const d = Math.hypot(a.center[0] - b.center[0], a.center[1] - b.center[1]);
 			if (d < bestPair[2]) bestPair = [a, b, d];
 		}
-		const cross = nearestCross(bestPair[0], bestPair[1]);
+		// Connectivity fallback — allow through-land as a last resort so no
+		// island becomes totally unreachable.
+		const cross = nearestCross(bestPair[0], bestPair[1], true);
 		if (!cross) break;
 		addLane(cross[0], cross[1]);
 	}
@@ -636,6 +712,46 @@ export function generateMap(seed: number = Math.floor(Math.random() * 1e9)): Gam
 		}
 	}
 
+	// Named water features. Classification is per water hex:
+	//   6 land neighbors → lake (fully enclosed)
+	//   4-5 land neighbors → bay
+	// Any hex touching the map border or lacking in-bounds neighbors is skipped.
+	const waterFeatures: WaterFeature[] = [];
+	const lakeNames = [...LAKE_NAMES].sort(() => rnd() - 0.5);
+	const bayNames = [...BAY_NAMES].sort(() => rnd() - 0.5);
+	let lakeIdx = 0;
+	let bayIdx = 0;
+	for (let r = 0; r < hexGrid.length; r++) {
+		for (let c = 0; c < hexGrid[r].length; c++) {
+			const k = hexKey(c, r);
+			if (claimedBy.has(k)) continue;
+			// Skip hexes right on the map edge — not truly enclosed.
+			if (c === 0 || r === 0 || c === nCols - 1 || r === nRows - 1) continue;
+			let landN = 0, oob = 0;
+			for (const [nc, nr] of hexNeighbors(c, r)) {
+				if (!inBounds(hexGrid, nc, nr)) { oob++; continue; }
+				if (claimedBy.has(hexKey(nc, nr))) landN++;
+			}
+			if (oob > 0) continue;
+			const h = hexGrid[r][c];
+			if (landN === 6) {
+				waterFeatures.push({
+					kind: 'lake',
+					name: lakeNames[lakeIdx++ % lakeNames.length],
+					center: [h.x, h.y],
+					hexes: [h.poly]
+				});
+			} else if (landN === 5) {
+				waterFeatures.push({
+					kind: 'bay',
+					name: bayNames[bayIdx++ % bayNames.length],
+					center: [h.x, h.y],
+					hexes: [h.poly]
+				});
+			}
+		}
+	}
+
 	// Compute a tight viewBox around the actual land, plus a small water margin,
 	// so the SVG doesn't render huge empty regions where no island grew.
 	let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity;
@@ -663,6 +779,7 @@ export function generateMap(seed: number = Math.floor(Math.random() * 1e9)): Gam
 		adj,
 		seaLanes,
 		waterHexes,
+		waterFeatures,
 		width,
 		height,
 		viewBox: { x: vbX, y: vbY, w: vbW, h: vbH },
