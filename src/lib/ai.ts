@@ -3,11 +3,13 @@ import {
 	game,
 	placeArmies,
 	beginAttack,
+	beginMove,
 	selectGrid,
 	rollAttack,
 	quitAttack,
 	cancelAction,
 	confirmMoveInAfterConquest,
+	confirmMove,
 	discardCard,
 	endTurn,
 	forceEndTurn,
@@ -153,6 +155,16 @@ export async function runAiTurn(p: Player, tickMs = 90) {
 	tryPlayCardAction(p);
 	await wait();
 
+	// --- Out of attacks: shift an idle rear stack toward the front rather
+	// than leaving it stranded in a corner. Moving ends the turn, so this
+	// replaces the plain "pass" below when it fires. ---
+	if (get(game).phase === 'action' && get(game).current === p) {
+		if (tryRepositionStack(p)) {
+			await wait();
+			return;
+		}
+	}
+
 	// --- End turn. If we're stuck in a mid-action phase, cancel back to
 	// action first. If we still can't reach action, force-advance the turn. ---
 	if (get(game).current === p && get(game).phase !== 'action' && get(game).phase !== 'placing') {
@@ -163,6 +175,73 @@ export async function runAiTurn(p: Player, tickMs = 90) {
 	} else if (get(game).current === p && get(game).phase !== 'game_over' && get(game).phase !== 'placing') {
 		forceEndTurn();
 	}
+}
+
+// Move a stranded rear stack one hop toward the nearest front-line hex
+// (one of our own territories that borders an enemy or neutral hex). Only
+// fires when there's a meaningfully large stack sitting idle away from the
+// front — small garrisons are left alone. Returns true if a move was made
+// (which ends the turn).
+function tryRepositionStack(p: Player): boolean {
+	const s = get(game);
+	const frontline: number[] = [];
+	for (const g of s.map.grids) {
+		if (s.states[g.id].owner !== p) continue;
+		if (s.map.adj[g.id].some((n) => s.states[n].owner !== p)) frontline.push(g.id);
+	}
+	if (frontline.length === 0) return false;
+
+	// BFS from every front-line hex simultaneously, over our own territory
+	// only, to get each owned hex's distance to the nearest front.
+	const dist = new Map<number, number>();
+	const queue: number[] = [];
+	for (const id of frontline) { dist.set(id, 0); queue.push(id); }
+	let qi = 0;
+	while (qi < queue.length) {
+		const cur = queue[qi++];
+		const d = dist.get(cur)!;
+		for (const n of s.map.adj[cur]) {
+			if (s.states[n].owner !== p || dist.has(n)) continue;
+			dist.set(n, d + 1);
+			queue.push(n);
+		}
+	}
+
+	// Find the rear hex (distance ≥ 1 from any front-line hex) with the
+	// biggest army count weighted by how far it is from the action.
+	let bestFrom = -1;
+	let bestScore = -Infinity;
+	for (const g of s.map.grids) {
+		if (s.states[g.id].owner !== p) continue;
+		const d = dist.get(g.id);
+		if (!d) continue; // d undefined (unreachable) or 0 (already front-line)
+		const armies = s.states[g.id].armies;
+		if (armies < 4) continue;
+		const score = armies * d;
+		if (score > bestScore) { bestScore = score; bestFrom = g.id; }
+	}
+	if (bestFrom < 0) return false;
+
+	// Step one hop toward the front: the friendly neighbor with the smallest
+	// distance value.
+	const fromDist = dist.get(bestFrom)!;
+	let bestNeighbor = -1;
+	let bestNeighborDist = fromDist;
+	for (const n of s.map.adj[bestFrom]) {
+		if (s.states[n].owner !== p) continue;
+		const nd = dist.get(n);
+		if (nd != null && nd < bestNeighborDist) { bestNeighborDist = nd; bestNeighbor = n; }
+	}
+	if (bestNeighbor < 0) return false;
+
+	const qty = Math.max(1, s.states[bestFrom].armies - 1); // leave a token garrison
+	beginMove();
+	selectGrid(bestFrom);
+	if (get(game).phase !== 'move_select_to') { cancelAction(); return false; }
+	selectGrid(bestNeighbor);
+	if (get(game).phase !== 'move_qty') { cancelAction(); return false; }
+	confirmMove(qty); // ends the turn
+	return true;
 }
 
 function pickPlacementTarget(s: GameState, p: Player): number | null {
