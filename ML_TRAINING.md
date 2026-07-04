@@ -10,22 +10,34 @@ reinforcement learning, or plain analytics.
 ### Location
 
 ```
-/tmp/isle-wars-events.jsonl
+$(node -e "console.log(require('os').tmpdir())")/isle-wars-events.jsonl
 ```
 
-The Vite dev server exposes three HTTP endpoints for managing it (dev only —
-these do not exist in the static production build):
+On Linux this is usually `/tmp/isle-wars-events.jsonl`. **On macOS it is NOT
+`/tmp`** — `os.tmpdir()` resolves to a per-session directory under
+`/var/folders/...` (driven by the `TMPDIR` env var). Don't guess the path —
+use one of the npm scripts below, which resolve it for you:
+
+```bash
+npm run log:path    # print the full path to the log file
+npm run log:tail    # tail -f it live
+npm run log:clear   # delete it (clean slate for the next run)
+```
+
+The Vite dev server also exposes three HTTP endpoints for managing it (dev
+only — these do not exist in the static production build), if you'd rather
+hit it directly (e.g. from a script that needs the exact path back):
 
 | Method | URL | Effect |
 |---|---|---|
-| `POST` | `/api/log` | Append a JSON body as a line (the game itself calls this) |
+| `POST` | `/api/log` | Append a JSON body as a line (the game itself calls this); response body includes `path` |
 | `GET` | `/api/log` | Stream the file contents |
 | `DELETE` | `/api/log` | Truncate the log |
 
 ### Clean-slate a run
 
 ```bash
-curl -X DELETE http://localhost:5173/api/log
+npm run log:clear
 npm run dev            # or however you launch it
 # ... play a game / turn on auto-play in the Debug menu ...
 ```
@@ -33,7 +45,7 @@ npm run dev            # or however you launch it
 ### Watch live
 
 ```bash
-tail -f /tmp/isle-wars-events.jsonl | jq -c '{type, turn, actor, kind: .action.kind}'
+npm run log:tail | jq -c '{type, turn, actor, kind: .action.kind}'
 ```
 
 ## Event schema
@@ -196,6 +208,10 @@ snapshot to know the full connectivity graph at that point in time.
 
 ## Recipes
 
+The commands below use the literal path `/tmp/isle-wars-events.jsonl` for
+brevity — substitute the real path from `npm run log:path` (e.g. via
+`LOG=$(npm run log:path --silent)`) if you're on macOS.
+
 ### Extract (state, action) pairs for imitation learning
 
 ```bash
@@ -303,10 +319,10 @@ tool like Playwright) that reloads the page after each `game_end`.
   `vite dev`. Static production builds ship without the endpoint, and
   `import.meta.env.DEV` is inlined as `false` — the client-side `devLog(...)`
   calls are dead-code eliminated.
-- **Persistence.** The log accumulates across runs. `DELETE /api/log` clears it.
-  The file is at `os.tmpdir() + '/isle-wars-events.jsonl'` — on macOS that
-  resolves to `/tmp/isle-wars-events.jsonl` but you can confirm the exact
-  path via `POST` response body.
+- **Persistence.** The log accumulates across runs. `npm run log:clear`
+  (or `DELETE /api/log`) clears it. The file is at
+  `os.tmpdir() + '/isle-wars-events.jsonl'` — run `npm run log:path` to get
+  the exact path for your machine (macOS and Linux differ here).
 - **File writes are not atomic** across concurrent tabs. If you spin up
   parallel auto-play instances, use separate ports or interleave — the file
   is written line-by-line but with no locking.

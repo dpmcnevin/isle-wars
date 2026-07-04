@@ -61,6 +61,22 @@ export function mulberry32(a: number) {
 	};
 }
 
+/**
+ * Fisher-Yates shuffle. `Array.prototype.sort(() => rnd() - 0.5)` is NOT a
+ * uniform shuffle — it's biased by the sort algorithm's implementation
+ * (V8's TimSort keeps runs of already-sorted elements more often than chance
+ * would predict), which matters here because ownership/order assignment is
+ * done by index over the shuffled array. Always use this instead.
+ */
+export function shuffle<T>(arr: T[], rnd: () => number): T[] {
+	const a = arr.slice();
+	for (let i = a.length - 1; i > 0; i--) {
+		const j = Math.floor(rnd() * (i + 1));
+		[a[i], a[j]] = [a[j], a[i]];
+	}
+	return a;
+}
+
 const ISLAND_NAMES = [
 	'Iceland', 'Norvalia', 'Ardmark', 'Cordania', 'Vestros', 'Suriath',
 	'Halon', 'Meridian', 'Southaven', 'Thraxos', 'Kell', 'Aramoor',
@@ -339,7 +355,7 @@ export function generateMap(seed: number = Math.floor(Math.random() * 1e9)): Gam
 	// Derive bonus values from territory counts (bigger islands = bigger bonus).
 	const values = targets.map((c) => Math.max(2, Math.min(15, Math.round(c * 0.65))));
 
-	const namePool = [...ISLAND_NAMES].sort(() => rnd() - 0.5);
+	const namePool = shuffle(ISLAND_NAMES, rnd);
 
 	// Fixed hex size → the underlying hex grid is always the same dimensions,
 	// regardless of how many territories a given seed asks for. Sized so an
@@ -360,7 +376,7 @@ export function generateMap(seed: number = Math.floor(Math.random() * 1e9)): Gam
 	const tileCols = Math.max(1, Math.round(Math.sqrt(nIslands * (nCols / nRows))));
 	const tileRows = Math.max(1, Math.ceil(nIslands / tileCols));
 	// Shuffle tile indices so island-to-tile assignment is random.
-	const tileOrder = Array.from({ length: tileCols * tileRows }, (_, i) => i).sort(() => rnd() - 0.5);
+	const tileOrder = shuffle(Array.from({ length: tileCols * tileRows }, (_, i) => i), rnd);
 	const seeds: Seed[] = [];
 	for (let idx = 0; idx < orderedIslands.length; idx++) {
 		const isl = orderedIslands[idx];
@@ -788,7 +804,7 @@ export function generateMap(seed: number = Math.floor(Math.random() * 1e9)): Gam
 	}
 
 	// Assign a unique city name to every production-center hex.
-	const cityPool = [...CITY_NAMES].sort(() => rnd() - 0.5);
+	const cityPool = shuffle(CITY_NAMES, rnd);
 	let cityIdx = 0;
 	for (const g of grids) {
 		if (g.production) {
@@ -859,8 +875,8 @@ export function generateMap(seed: number = Math.floor(Math.random() * 1e9)): Gam
 	//   4-5 land neighbors → bay
 	// Any hex touching the map border or lacking in-bounds neighbors is skipped.
 	const waterFeatures: WaterFeature[] = [];
-	const lakeNames = [...LAKE_NAMES].sort(() => rnd() - 0.5);
-	const bayNames = [...BAY_NAMES].sort(() => rnd() - 0.5);
+	const lakeNames = shuffle(LAKE_NAMES, rnd);
+	const bayNames = shuffle(BAY_NAMES, rnd);
 	let lakeIdx = 0;
 	let bayIdx = 0;
 	for (let r = 0; r < hexGrid.length; r++) {

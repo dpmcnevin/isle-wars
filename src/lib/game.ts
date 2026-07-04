@@ -1,5 +1,5 @@
 import { writable, derived, get } from 'svelte/store';
-import { generateMap, crossesRiver, type GameMap } from './map';
+import { generateMap, crossesRiver, shuffle, type GameMap } from './map';
 
 export type Player = 'blue' | 'green' | 'red' | 'brown';
 export const PLAYERS: Player[] = ['blue', 'green', 'red', 'brown'];
@@ -582,7 +582,7 @@ export function startGame(difficulty = 2, startingArmies = 3, seed?: number): Ga
 	// longer skews the initial map; it just changes how aggressively the
 	// AI plays (see ai.ts).
 	const rand = mulberry32(s ^ 0xa5a5a5);
-	const ids = map.grids.map((g) => g.id).sort(() => rand() - 0.5);
+	const ids = shuffle(map.grids.map((g) => g.id), rand);
 	const perPlayer = Math.floor(ids.length / PLAYERS.length);
 	const claimed = perPlayer * PLAYERS.length;
 	for (let i = 0; i < claimed; i++) {
@@ -1004,7 +1004,7 @@ function applyRandomEvent(s: GameState) {
 }
 
 function pickRandomGrids(s: GameState, count: number): number[] {
-	const shuffled = [...s.map.grids].map((g) => g.id).sort(() => Math.random() - 0.5);
+	const shuffled = shuffle(s.map.grids.map((g) => g.id), Math.random);
 	return shuffled.slice(0, count);
 }
 
@@ -1678,6 +1678,7 @@ export function confirmMove(qty: number) {
 function consumeCard(s: GameState, idx: number) {
 	s.hands[s.current] = s.hands[s.current].filter((_, i) => i !== idx);
 	s.cardPlayedThisTurn = true;
+	s.stats[s.current].cardsPlayed++;
 }
 
 export function playCard(idx: number) {

@@ -9,7 +9,10 @@
 		"preview": "vite preview",
 		"prepare": "svelte-kit sync || echo ''",
 		"check": "svelte-kit sync && svelte-check --tsconfig ./tsconfig.json",
-		"check:watch": "svelte-kit sync && svelte-check --tsconfig ./tsconfig.json --watch"
+		"check:watch": "svelte-kit sync && svelte-check --tsconfig ./tsconfig.json --watch",
+		"log:path": "node -e \"console.log(require('os').tmpdir() + '/isle-wars-events.jsonl')\"",
+		"log:tail": "node -e \"require('child_process').spawn('tail', ['-f', require('os').tmpdir() + '/isle-wars-events.jsonl'], {stdio:'inherit'})\"",
+		"log:clear": "node -e \"require('fs').rmSync(require('os').tmpdir() + '/isle-wars-events.jsonl', {force:true})\""
 	},
 	"devDependencies": {
 		"@sveltejs/adapter-static": "^3.0.10",
