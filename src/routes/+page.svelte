@@ -76,10 +76,10 @@
 		}
 		if ($game.phase === 'move_qty') {
 			return {
-				title: 'Move how many armies?',
+				title: 'Move how many armies? (ends your turn)',
 				min: 1,
 				max: Math.max(1, srcArmies - 1),
-				confirmLabel: 'Move'
+				confirmLabel: 'Move & End Turn'
 			};
 		}
 		return {
@@ -781,9 +781,10 @@
 		<polygon points={polyPts} fill="url(#desert-pattern)" pointer-events="none" />
 	{/if}
 {/snippet}
-{#snippet hexBadge(gridId: number, cx: number, cy: number, scale: number, showCityLabel: boolean)}
+{#snippet hexBadge(gridId: number, cx: number, cy: number, scale: number, showCityLabel: boolean, armiesOverride: number | null)}
 	{@const g = $game.map.grids[gridId]}
 	{@const st = $game.states[gridId]}
+	{@const shownArmies = armiesOverride ?? st.armies}
 	{@const badgeR = 20 * scale}
 	{@const fortR1 = 30 * scale}
 	{@const fortR2 = 34 * scale}
@@ -797,7 +798,7 @@
 			stroke-width={(st.fortified ? 3 : g.production ? 2.5 : 1.5) * scale} />
 		<text x={cx} y={cy + 7 * scale} text-anchor="middle"
 			font-family="monospace" font-weight="bold"
-			font-size={20 * scale} fill="#fff">{st.armies}</text>
+			font-size={20 * scale} fill="#fff">{shownArmies}</text>
 		{#if st.fortified}
 			<text x={cx - 18 * scale} y={cy - 14 * scale} text-anchor="middle"
 				font-size={16 * scale} style="filter: drop-shadow(0 0 {3 * scale}px #7fcfff);">🛡</text>
@@ -1067,8 +1068,8 @@
 					</g>
 				{/each}
 				<!-- Army count badges, production stars, and city names -->
-				{#each $game.map.grids as g}
-					{@render hexBadge(g.id, g.x, g.y, 1, true)}
+				{#each $game.map.grids as g (g.id)}
+					{@render hexBadge(g.id, g.x, g.y, 1, true, $game.states[g.id].armies)}
 				{/each}
 				<!-- Island name labels centered on the island's centroid, with a
 				     dark stroked outline so they read on any hex color. -->
@@ -1120,10 +1121,7 @@
 
 				{#if $game.current === HUMAN && $game.phase === 'action'}
 					<div class="row">
-						<button onclick={beginAttack}>Attack</button>
-						<button onclick={beginMove}>Move</button>
-						<button onclick={endTurn}>Pass</button>
-						<button onclick={cancelAction}>Cancel</button>
+						<button class="primary" onclick={endTurn}>End Turn</button>
 					</div>
 				{/if}
 
@@ -1251,33 +1249,42 @@
 		<div class="qty-modal-backdrop" onclick={cancelQty} role="presentation">
 			<div class="qty-modal" onclick={(e) => e.stopPropagation()} role="dialog" aria-label={info.title}>
 				<div class="qty-modal-title">{info.title}</div>
-				{#snippet qtyHex(gridId: number)}
+				{#snippet qtyHex(gridId: number, armiesOverride: number | null, fillOverride: string | null)}
 					{@const g = $game.map.grids[gridId]}
 					{@const owner = $game.states[gridId].owner}
-					{@const color = owner ? PLAYER_COLORS[owner] : '#556'}
+					{@const color = fillOverride ?? (owner ? PLAYER_COLORS[owner] : '#556')}
 					<svg class="side-hex" viewBox="0 0 200 180" xmlns="http://www.w3.org/2000/svg">
 						<polygon points={qtyHexPts} fill={color} stroke="#0a1420" stroke-width="2" />
 						{@render hexTerrain(qtyHexPts, g.terrain)}
-						{@render hexBadge(gridId, 100, 90, 1.4, false)}
+						{@render hexBadge(gridId, 100, 90, 1.4, false, armiesOverride)}
 					</svg>
 				{/snippet}
 				{#if dstId != null}
-					<div class="qty-hex-row">
-						{@render qtyHex(src)}
-						<div class="qty-arrow" aria-hidden="true">→</div>
-						{@render qtyHex(dstId)}
-					</div>
 					{@const dstG = $game.map.grids[dstId]}
+					{@const q = qtyValue()}
+					{@const desertApplies = $game.phase === 'move_qty' || $game.phase === 'air_qty'}
+					{@const desertLoss = desertApplies && dstG.terrain === 'desert' && q > 0 ? 1 : 0}
+					{@const dstOwner = $game.states[dstId].owner}
+					{@const srcOwner = $game.states[src].owner}
+					{@const dstAfter = Math.max(0, $game.states[dstId].armies + q - desertLoss)}
+					{@const srcAfter = Math.max(0, srcArmies - q)}
+					{@const dstFillOverride = dstOwner == null && q > 0 && srcOwner ? PLAYER_COLORS[srcOwner] : null}
+					<div class="qty-hex-row">
+						{@render qtyHex(src, srcAfter, null)}
+						<div class="qty-arrow" aria-hidden="true">→</div>
+						{@render qtyHex(dstId, dstAfter, dstFillOverride)}
+					</div>
 					{#if dstG.terrain === 'desert' || dstG.terrain === 'mountain' || dstG.terrain === 'forest' || dstG.terrain === 'marsh'}
 						<ul class="qty-mods">
-							{#if dstG.terrain === 'desert'}<li class="warn">🏜 Desert — 1 army lost to heat on arrival</li>{/if}
+							{#if dstG.terrain === 'desert' && desertApplies}<li class="warn">🏜 Desert — 1 army lost to heat on arrival</li>{/if}
+							{#if dstG.terrain === 'desert' && !desertApplies}<li>🏜 Desert — heat toll already paid on conquest</li>{/if}
 							{#if dstG.terrain === 'mountain'}<li>⛰ Mountain — defender bonus if attacked from here</li>{/if}
 							{#if dstG.terrain === 'forest'}<li>🌲 Forest — attackers get cover on approach</li>{/if}
 							{#if dstG.terrain === 'marsh'}<li class="warn">💧 Marsh — can't launch a second attack after using this as a source</li>{/if}
 						</ul>
 					{/if}
 				{:else}
-					{@render qtyHex(src)}
+					{@render qtyHex(src, srcArmies + qtyValue(), null)}
 				{/if}
 				<div class="qty-modal-sub">
 					{#if $game.phase === 'placing'}
@@ -1289,6 +1296,9 @@
 						· leaves <strong>{srcArmies - qtyValue()}</strong> behind
 					{/if}
 				</div>
+				{#if $game.phase === 'move_qty'}
+					<div class="qty-modal-warn">⚠ Confirming this move ends your turn.</div>
+				{/if}
 				<div class="qty-modal-value">{qtyValue()}</div>
 				<div class="qty-modal-scale">min {info.min} · max {info.max}</div>
 				<div class="qty-modal-grid">
@@ -1351,7 +1361,7 @@
 							<svg class="side-hex" viewBox="0 0 200 180" xmlns="http://www.w3.org/2000/svg">
 								<polygon points={hexPts} fill={color} stroke="#0a1420" stroke-width="2" />
 								{@render hexTerrain(hexPts, g.terrain)}
-								{@render hexBadge(gridId, cx, cy, 1.4, false)}
+								{@render hexBadge(gridId, cx, cy, 1.4, false, $game.states[gridId].armies)}
 							</svg>
 							<ul class="side-mods">
 								<li>Base die 1–{debugDieSides}</li>
@@ -1503,7 +1513,7 @@
 			<strong>{info.title}</strong>
 			<span class="tt-armies">{info.armies}</span>
 		</div>
-		<div class="tt-owner">{info.owner}</div>
+		<div class="tt-owner" style="color:{info.ownerColor}">{info.owner}</div>
 		{#if info.city}<div class="tt-city">★ {info.city}</div>{/if}
 		{#each info.modifiers as m}
 			<div class="tt-terrain">
@@ -2045,6 +2055,13 @@
 	.qty-mods li { padding: 0.15rem 0; }
 	.qty-mods li.pos { color: #7fff9f; }
 	.qty-mods li.warn { color: #ffb37f; }
+	.qty-modal-warn {
+		text-align: center;
+		color: #ffb37f;
+		font-size: 0.82rem;
+		margin-top: 0.35rem;
+		font-weight: bold;
+	}
 
 	.attack-modal-backdrop {
 		position: fixed;

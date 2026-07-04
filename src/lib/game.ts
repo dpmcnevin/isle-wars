@@ -576,15 +576,21 @@ export function startGame(difficulty = 2, startingArmies = 3, seed?: number): Ga
 	const map = generateMap(s);
 	const states: GridState[] = map.grids.map(() => ({ owner: null, armies: 0 }));
 
-	// Distribute grids evenly — round-robin over a shuffled order so each
-	// player ends up with (n/4) ± 1 territories and the same starting armies
-	// per hex. Difficulty no longer skews the initial map; it just changes
-	// how aggressively the AI plays (see ai.ts).
+	// Distribute grids evenly — every player gets exactly floor(n/4)
+	// territories with the same starting armies. Any leftover hexes stay
+	// neutral so no player has a size advantage on turn 1. Difficulty no
+	// longer skews the initial map; it just changes how aggressively the
+	// AI plays (see ai.ts).
 	const rand = mulberry32(s ^ 0xa5a5a5);
 	const ids = map.grids.map((g) => g.id).sort(() => rand() - 0.5);
-	for (let i = 0; i < ids.length; i++) {
-		const owner = PLAYERS[i % 4];
+	const perPlayer = Math.floor(ids.length / PLAYERS.length);
+	const claimed = perPlayer * PLAYERS.length;
+	for (let i = 0; i < claimed; i++) {
+		const owner = PLAYERS[i % PLAYERS.length];
 		states[ids[i]] = { owner, armies: startingArmies };
+	}
+	for (let i = claimed; i < ids.length; i++) {
+		states[ids[i]] = { owner: null, armies: 0 };
 	}
 
 	const startPlayer: Player = PLAYERS[Math.floor(rand() * 4)];
@@ -851,7 +857,6 @@ function beginTurn(s: GameState): GameState {
 	s.lastAttackResult = null;
 	s.pendingDiscard = false;
 	s.eliteAttackActive = false;
-			s.bridgeAttackActive = false;
 	s.bridgeAttackActive = false;
 	s.pendingInvasionLane = null;
 	s.cardPlayedThisTurn = false;
@@ -1168,6 +1173,12 @@ export function selectGrid(gridId: number): void {
 				if (s.states[gridId].owner === s.current) { s.message = 'Choose an enemy or neutral territory.'; break; }
 				devLogAction(s.current, { kind: 'attack_begin', from: s.selectedFrom, to: gridId }, s);
 				s.selectedTo = gridId;
+				// Empty target (typically neutral, 0 armies): walk right in, no
+				// dice roll. Jumps straight to the move-in modal.
+				if (s.states[gridId].armies <= 0) {
+					autoConquer(s, s.selectedFrom, gridId);
+					break;
+				}
 				s.phase = 'attack_rolling';
 				s.message = 'Rolling…';
 				break;
@@ -1181,7 +1192,7 @@ export function selectGrid(gridId: number): void {
 				if (s.states[gridId].armies < 2) { s.message = 'Need at least 2 armies to move (1 must stay).'; break; }
 				s.selectedFrom = gridId;
 				s.phase = 'move_select_to';
-				s.message = 'Choose an adjacent friendly territory.';
+				s.message = 'Choose an adjacent friendly territory. Moving ends your turn.';
 				break;
 			}
 			case 'move_select_to': {
@@ -1191,7 +1202,7 @@ export function selectGrid(gridId: number): void {
 				s.selectedTo = gridId;
 				s.pendingArmies = 1;
 				s.phase = 'move_qty';
-				s.message = 'Choose how many to move, then confirm.';
+				s.message = 'Choose how many to move, then confirm. Moving ends your turn.';
 				break;
 			}
 			case 'bomb_select': {
@@ -1430,6 +1441,48 @@ export function selectGrid(gridId: number): void {
 	});
 }
 
+// Walk into an undefended target with no dice roll. Handles the same book-
+// keeping the rollAttack conquest branch does (ownership, stats, elite/bridge
+// consumption, desert attrition, move-in phase).
+function autoConquer(s: GameState, fromId: number, toId: number): void {
+	const from = s.states[fromId];
+	const to = s.states[toId];
+	const attacker = from.owner!;
+	const defender = to.owner; // typically null
+	to.owner = attacker;
+	to.fortified = false;
+	s.stats[attacker].territoriesCaptured++;
+	if (defender) s.stats[defender].territoriesLost++;
+	s.defeatedThisTurn = true;
+	s.lastAttackResult = 'win';
+	s.eliteAttackActive = false;
+	s.bridgeAttackActive = false;
+	s.pendingInvasionLane = null;
+	log(s, `${PLAYER_NAMES[attacker]} walked into ${gridLabel(s, toId)} unopposed.`, 'defeat');
+	// Walking in unopposed still counts as launching an attack from a marsh.
+	if (s.map.grids[fromId].terrain === 'marsh' && !s.usedMarshHexes.includes(fromId)) {
+		s.usedMarshHexes.push(fromId);
+	}
+	from.armies -= 1;
+	to.armies = 1;
+	if (s.map.grids[toId].terrain === 'desert' && from.armies > 1) {
+		from.armies -= 1;
+		log(s, `Desert heat cost ${PLAYER_NAMES[attacker]} 1 army entering ${gridLabel(s, toId)}.`, 'attack');
+	}
+	updateAlive(s);
+	if (checkWin(s)) return;
+	if (from.armies > 0) {
+		s.phase = 'attack_move_in';
+		s.pendingArmies = 0;
+		s.message = `Move additional armies from ${gridLabel(s, fromId)} to ${gridLabel(s, toId)}? (0 to ${from.armies})`;
+	} else {
+		s.phase = 'action';
+		s.selectedFrom = null;
+		s.selectedTo = null;
+		s.message = 'Attack, move, or pass.';
+	}
+}
+
 // Perform an attack roll.
 export function rollAttack(): void {
 	game.update((s) => {
@@ -1502,8 +1555,9 @@ export function rollAttack(): void {
 			from.armies -= 1;
 			to.armies = 1;
 			// Desert attrition: attackers moving into a desert lose 1 more army
-			// to the heat. Applied against the source (follow-on force).
-			if (s.map.grids[s.selectedTo].terrain === 'desert' && from.armies > 0) {
+			// to the heat. Applied against the source (follow-on force), but
+			// never below 1 — a hex must always keep a garrison.
+			if (s.map.grids[s.selectedTo].terrain === 'desert' && from.armies > 1) {
 				from.armies -= 1;
 				log(s, `Desert heat cost ${PLAYER_NAMES[from.owner!]} 1 army entering ${gridLabel(s, s.selectedTo)}.`, 'attack');
 			}
