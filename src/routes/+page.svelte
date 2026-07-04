@@ -354,7 +354,18 @@
 
 	onMount(() => {
 		loadDebugUi();
-		loadSavedGame();
+		// A shared map link (?seed=...) always wins over any saved game — the
+		// whole point is to reproduce that exact map, not resume old progress.
+		const url = new URL(window.location.href);
+		const sharedSeed = url.searchParams.get('seed');
+		if (sharedSeed != null && Number.isFinite(Number(sharedSeed))) {
+			loadSavedGame(); // still registers the auto-save subscription
+			newGame(difficulty, startingArmies, Math.floor(Number(sharedSeed)));
+			url.searchParams.delete('seed');
+			window.history.replaceState({}, '', url.toString());
+		} else {
+			loadSavedGame();
+		}
 		window.addEventListener('keydown', onKey);
 		return () => window.removeEventListener('keydown', onKey);
 	});
@@ -482,8 +493,17 @@
 		selectGrid(id);
 	}
 
+	let seedInput = $state('');
+
+	function parseSeedInput(): number | undefined {
+		const trimmed = seedInput.trim();
+		if (trimmed === '') return undefined;
+		const n = Number(trimmed);
+		return Number.isFinite(n) ? Math.floor(n) : undefined;
+	}
+
 	function startNewGame() {
-		newGame(difficulty, startingArmies);
+		newGame(difficulty, startingArmies, parseSeedInput());
 		showMenu = false;
 	}
 
@@ -493,7 +513,18 @@
 		);
 		if (!ok) return;
 		clearSavedGame();
-		newGame(difficulty, startingArmies);
+		newGame(difficulty, startingArmies, parseSeedInput());
+	}
+
+	let seedCopied = $state(false);
+	function copyShareLink() {
+		const url = new URL(window.location.href);
+		url.search = '';
+		url.searchParams.set('seed', String($game.seed));
+		navigator.clipboard.writeText(url.toString()).then(() => {
+			seedCopied = true;
+			setTimeout(() => (seedCopied = false), 1500);
+		});
 	}
 
 	function polygonPoints(pts: [number, number][]): string {
@@ -837,6 +868,7 @@
 					</select>
 				</label>
 				<button class="icon-btn" title="New Game" onclick={() => (showMenu = !showMenu)}>{showMenu ? '✕' : 'New'}</button>
+				<button class="icon-btn" title="Copy a link to this exact map (seed {$game.seed})" onclick={copyShareLink}>{seedCopied ? 'Copied!' : 'Share'}</button>
 				<button class="icon-btn debug-btn" title="Debug" onclick={() => (showDebug = !showDebug)}>Debug</button>
 				<button class="icon-btn danger" title="Clear Save" onclick={confirmClearSave}>Clear</button>
 			</div>
@@ -857,7 +889,11 @@
 			<label>Starting armies per country
 				<input type="number" min="1" max="10" bind:value={startingArmies} />
 			</label>
+			<label>Map seed <span class="menu-hint">(optional — same seed = same map)</span>
+				<input type="text" inputmode="numeric" placeholder="random" bind:value={seedInput} />
+			</label>
 			<button onclick={startNewGame}>Start</button>
+			<span class="share-label">Current map's seed: <strong>{$game.seed}</strong></span>
 		</section>
 	{/if}
 
@@ -1607,6 +1643,9 @@
 		flex-wrap: wrap;
 	}
 	.menu label { display: flex; flex-direction: column; gap: 0.25rem; }
+	.menu-hint { font-weight: normal; color: #7a8fa8; font-size: 0.75rem; }
+	.share-label { font-size: 0.85rem; color: #b8c8da; }
+	.share-label strong { font-family: monospace; color: #ffe14a; }
 
 	.msg {
 		padding: 0.5rem;

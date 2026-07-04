@@ -412,7 +412,10 @@ export function loadSavedGame(): boolean {
 			const raw = localStorage.getItem(SAVE_KEY);
 			if (raw) {
 				const parsed = JSON.parse(raw) as GameState;
-				if (parsed && parsed.map && Array.isArray(parsed.map.grids)) {
+				// A save from before "Start Game" was pressed is just the initial
+				// map preview — reloading at that point should regenerate a fresh
+				// map instead of restoring the same one.
+				if (parsed && parsed.map && Array.isArray(parsed.map.grids) && parsed.gameStarted) {
 					game.set(parsed);
 					loaded = true;
 				}
@@ -1941,8 +1944,8 @@ export function forceEndTurn() {
 	});
 }
 
-export function newGame(difficulty: number, startingArmies: number) {
-	game.set(startGame(difficulty, startingArmies));
+export function newGame(difficulty: number, startingArmies: number, seed?: number) {
+	game.set(startGame(difficulty, startingArmies, seed));
 }
 
 // Derived
