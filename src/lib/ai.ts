@@ -107,7 +107,15 @@ export async function runAiTurn(p: Player, tickMs = 90) {
 			break;
 		}
 		selectGrid(opp.to);
-		if (get(game).phase !== 'attack_rolling') {
+		// Attacking an empty (neutral, 0-army) hex auto-conquers immediately —
+		// selectGrid jumps straight to 'attack_move_in' (or back to 'action' if
+		// the source was drained) with no dice roll. Only bail if we land
+		// somewhere else unexpected.
+		if (
+			get(game).phase !== 'attack_rolling' &&
+			get(game).phase !== 'attack_move_in' &&
+			get(game).phase !== 'action'
+		) {
 			// Target selection failed — bail cleanly.
 			cancelAction();
 			break;
@@ -195,10 +203,14 @@ function findBestAttack(s: GameState, p: Player): AttackChoice | null {
 		if (myArmies < 3) continue;
 		for (const n of s.map.adj[g.id]) {
 			const st = s.states[n];
-			if (!st.owner || st.owner === p) continue;
+			// Neutral (owner === null) hexes are valid targets too — only skip
+			// our own territory.
+			if (st.owner === p) continue;
 			const margin = myArmies - st.armies;
 			if (margin < 2) continue;
-			const score = margin * 4 - st.armies;
+			// Neutrals are effectively free real estate; weight them so the AI
+			// prefers scooping up an empty hex over grinding an enemy.
+			const score = st.owner ? margin * 4 - st.armies : margin * 4 + 20;
 			if (score > bestScore) { bestScore = score; best = { from: g.id, to: n }; }
 		}
 	}
