@@ -332,12 +332,12 @@ export function generateMap(seed: number = Math.floor(Math.random() * 1e9)): Gam
 	const values = targets.map((c) => Math.max(2, Math.min(15, Math.round(c * 0.65))));
 
 	const namePool = [...ISLAND_NAMES].sort(() => rnd() - 0.5);
-	const totalTerritories = TOTAL_TERRITORIES;
 
-	// Choose hex size so all territories fit at ~50% land coverage.
-	// Hex area = 3·√3/2 · s². Total land area ≈ totalTerritories · hexArea.
-	// Aim for landArea ≈ 0.55 · canvasArea → s = √(0.55 · W·H / (totalT · 2.6))
-	const s = Math.max(30, Math.min(75, Math.sqrt((0.55 * width * height) / (totalTerritories * 2.6))));
+	// Fixed hex size → the underlying hex grid is always the same dimensions,
+	// regardless of how many territories a given seed asks for. Sized so an
+	// 8×11 (~88 hex) grid comfortably fits the 46..55 land-territory range
+	// plus surrounding water.
+	const s = 70;
 	const hexGrid = buildHexGrid(width, height, s);
 	const nRows = hexGrid.length;
 	const nCols = hexGrid[0].length;
