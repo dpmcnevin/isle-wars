@@ -18,7 +18,7 @@ import {
 	type CardType,
 	type GameState
 } from './game';
-import { crossesRiver } from './map';
+import { crossesRiver, wallBetween } from './map';
 
 /**
  * When true, `runAiTurn` skips every cosmetic `await wait()` pause, so its
@@ -229,6 +229,7 @@ function tryRepositionStack(p: Player): boolean {
 		const d = dist.get(cur)!;
 		for (const n of s.map.adj[cur]) {
 			if (s.states[n].owner !== p || dist.has(n)) continue;
+			if (wallBetween(s.map, cur, n)) continue; // can't reposition across a wall
 			dist.set(n, d + 1);
 			queue.push(n);
 		}
@@ -256,6 +257,7 @@ function tryRepositionStack(p: Player): boolean {
 	let bestNeighborDist = fromDist;
 	for (const n of s.map.adj[bestFrom]) {
 		if (s.states[n].owner !== p) continue;
+		if (wallBetween(s.map, bestFrom, n)) continue;
 		const nd = dist.get(n);
 		if (nd != null && nd < bestNeighborDist) { bestNeighborDist = nd; bestNeighbor = n; }
 	}
@@ -312,6 +314,8 @@ function findBestAttack(s: GameState, p: Player): AttackChoice | null {
 			// Neutral (owner === null) hexes are valid targets too — only skip
 			// our own territory.
 			if (st.owner === p) continue;
+			// A wall on this edge blocks the attack entirely.
+			if (wallBetween(s.map, g.id, n)) continue;
 			const margin = myArmies - st.armies;
 			if (margin < 2) continue;
 			// Neutrals are effectively free real estate; weight them so the AI
@@ -348,6 +352,28 @@ function findWeakestBorder(s: GameState, p: Player): number | null {
 		if (s.states[g.id].armies < bestArm) { bestArm = s.states[g.id].armies; best = g.id; }
 	}
 	return best >= 0 ? best : null;
+}
+// Pick a wall placement: seal off the edge where a weak border hex of ours
+// faces its strongest adjacent enemy. Returns the {from: owned, to: enemy}
+// pair, skipping river edges and edges already walled.
+interface WallChoice { from: number; to: number; }
+function findWallPlacement(s: GameState, p: Player): WallChoice | null {
+	let best: WallChoice | null = null;
+	let bestScore = -Infinity;
+	for (const g of s.map.grids) {
+		if (s.states[g.id].owner !== p) continue;
+		for (const n of s.map.adj[g.id]) {
+			const nt = s.states[n];
+			if (!nt.owner || nt.owner === p) continue; // only wall off enemies
+			if (s.map.grids[n].island !== s.map.grids[g.id].island) continue; // needs a shared edge
+			if (crossesRiver(s.map, g.id, n)) continue; // rivers can't be walled
+			if (wallBetween(s.map, g.id, n)) continue; // already walled
+			// Wall off the biggest threat relative to how thin our garrison is.
+			const score = nt.armies * 2 - s.states[g.id].armies;
+			if (score > bestScore) { bestScore = score; best = { from: g.id, to: n }; }
+		}
+	}
+	return best;
 }
 // Pick an adjacent enemy forest hex to clear.
 function findForestNeighbor(s: GameState, p: Player): number | null {
@@ -412,6 +438,18 @@ function tryPlayCardPlacement(p: Player) {
 		if (idx >= 0 && target != null && !s.cardPlayedThisTurn) {
 			playCard(idx);
 			if (get(game).phase === 'rampart_select') selectGrid(target);
+			return;
+		}
+	}
+	// Wall off a threatening enemy edge.
+	s = get(game);
+	{
+		const idx = s.hands[p].findIndex((c) => c === 'wall');
+		const target = findWallPlacement(s, p);
+		if (idx >= 0 && target != null && !s.cardPlayedThisTurn) {
+			playCard(idx);
+			if (get(game).phase === 'wall_from') selectGrid(target.from);
+			if (get(game).phase === 'wall_to') selectGrid(target.to);
 			return;
 		}
 	}
@@ -526,6 +564,18 @@ function tryPlayCardAction(p: Player) {
 		if (idx >= 0 && target != null) {
 			playCard(idx);
 			if (get(game).phase === 'rampart_select') selectGrid(target);
+			return;
+		}
+	}
+	// Wall off a threatening enemy edge if nothing else applies.
+	s = get(game);
+	{
+		const idx = s.hands[p].findIndex((c) => c === 'wall');
+		const target = findWallPlacement(s, p);
+		if (idx >= 0 && target != null) {
+			playCard(idx);
+			if (get(game).phase === 'wall_from') selectGrid(target.from);
+			if (get(game).phase === 'wall_to') selectGrid(target.to);
 			return;
 		}
 	}

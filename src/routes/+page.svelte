@@ -30,6 +30,7 @@
 		canArtilleryTarget,
 		countryCount,
 		fullIslandBonus,
+		isSelectableHex,
 		PLAYERS,
 		PLAYER_COLORS,
 		PLAYER_NAMES,
@@ -38,6 +39,7 @@
 		type Player,
 		type CardType
 	} from '$lib/game';
+	import { wallBetween } from '$lib/map';
 	import { runAiTurn } from '$lib/ai';
 
 	let placeQty = $state(1);
@@ -251,6 +253,7 @@
 		if (s.phase !== 'action') return false;
 		if (from === to) return false;
 		if (!s.map.adj[from].includes(to)) return false;
+		if (wallBetween(s.map, from, to)) return false;
 		if (s.states[to].owner === HUMAN) return false;
 		return true;
 	}
@@ -260,6 +263,7 @@
 		if (s.phase !== 'action') return false;
 		if (from === to) return false;
 		if (!s.map.adj[from].includes(to)) return false;
+		if (wallBetween(s.map, from, to)) return false;
 		if (s.states[to].owner !== HUMAN) return false;
 		return true;
 	}
@@ -431,62 +435,12 @@
 		return st.owner ? PLAYER_COLORS[st.owner] : '#334';
 	}
 
+	// Highlighting shares the engine's single selection authority (which covers
+	// both core attack/move phases and every card's targeting rules) instead of
+	// re-deriving per-phase logic here.
 	function isSelectable(id: number, s: typeof $game): boolean {
 		if (s.current !== HUMAN) return false;
-		switch (s.phase) {
-			case 'placing':
-				return s.states[id].owner === HUMAN;
-			case 'attack_select_from':
-				return s.states[id].owner === HUMAN && s.states[id].armies >= 2;
-			case 'attack_select_to':
-				if (s.selectedFrom == null) return false;
-				return s.map.adj[s.selectedFrom].includes(id) && s.states[id].owner !== HUMAN;
-			case 'move_select_from':
-				return s.states[id].owner === HUMAN && s.states[id].armies >= 2;
-			case 'move_select_to':
-				if (s.selectedFrom == null) return false;
-				return s.map.adj[s.selectedFrom].includes(id) && s.states[id].owner === HUMAN;
-			case 'bomb_select':
-				return s.states[id].owner !== HUMAN && !!s.states[id].owner;
-			case 'air_from':
-				return s.states[id].owner === HUMAN && s.states[id].armies >= 2;
-			case 'air_to':
-				return s.states[id].owner === HUMAN && id !== s.selectedFrom;
-			case 'reinforce_select':
-			case 'fortify_select':
-			case 'rampart_select':
-				return s.states[id].owner === HUMAN;
-			case 'sabotage_select':
-				return s.states[id].owner !== HUMAN && !!s.states[id].owner;
-			case 'ferry_from':
-				return s.states[id].owner === HUMAN;
-			case 'ferry_to':
-				if (s.selectedFrom == null) return false;
-				return s.states[id].owner === HUMAN && canFerryConnect(s, s.selectedFrom, id);
-			case 'invasion_from':
-				return s.states[id].owner === HUMAN && s.states[id].armies >= 2;
-			case 'invasion_to':
-				if (s.selectedFrom == null) return false;
-				return canInvasionConnect(s, s.selectedFrom, id);
-			case 'artillery_from':
-				return s.states[id].owner === HUMAN && s.states[id].armies >= 2 && s.map.grids[id].production;
-			case 'artillery_to':
-				if (s.selectedFrom == null) return false;
-				return canArtilleryTarget(s, s.selectedFrom, id);
-			case 'deforest_select':
-				return s.map.grids[id].terrain === 'forest';
-			case 'oasis_select':
-				return s.map.grids[id].terrain === 'desert' && s.states[id].owner === s.current;
-			case 'storm_from':
-				return s.map.seaLanes.some(([a, b]) => a === id || b === id);
-			case 'storm_to':
-				if (s.selectedFrom == null) return false;
-				return s.map.seaLanes.some(
-					([a, b]) => (a === s.selectedFrom && b === id) || (a === id && b === s.selectedFrom)
-				);
-			default:
-				return false;
-		}
+		return isSelectableHex(s, id);
 	}
 
 	function handleGridClick(id: number) {
@@ -687,6 +641,24 @@
 		return paths;
 	});
 
+	// Wall barriers: a short thick segment straddling the shared edge between
+	// the two walled hexes. We use the two vertices the hexes have in common.
+	const wallSegments = $derived.by(() => {
+		const walls = $game.map.walls ?? [];
+		if (walls.length === 0) return [] as { a: [number, number]; b: [number, number] }[];
+		const grids = $game.map.grids;
+		const vkey = (v: [number, number]) => `${Math.round(v[0] * 10)},${Math.round(v[1] * 10)}`;
+		const segs: { a: [number, number]; b: [number, number] }[] = [];
+		for (const [g1, g2] of walls) {
+			if (!grids[g1] || !grids[g2]) continue;
+			const cb = new Set(grids[g2].cell.map(vkey));
+			const shared = grids[g1].cell.filter((v) => cb.has(vkey(v)));
+			if (shared.length !== 2) continue;
+			segs.push({ a: shared[0], b: shared[1] });
+		}
+		return segs;
+	});
+
 	function seaLanePath(a: number, b: number, s: typeof $game) {
 		// Draw as a quadratic Bezier that arcs perpendicular to the segment.
 		// A slight curve prevents lanes from overlapping straight-through hex
@@ -857,7 +829,7 @@
 		{/if}
 		{#if st.rampart}
 			<text x={cx - 18 * scale} y={cy + 24 * scale} text-anchor="middle"
-				font-size={14 * scale} style="filter: drop-shadow(0 0 {3 * scale}px #4fcf7f);">🧱</text>
+				font-size={14 * scale} style="filter: drop-shadow(0 0 {3 * scale}px #4fcf7f);">🏰</text>
 		{/if}
 		{#if g.production}
 			<text x={cx + 20 * scale} y={cy - 15 * scale} text-anchor="middle"
@@ -1128,6 +1100,25 @@
 						/>
 					</g>
 				{/each}
+				<!-- Wall barriers: stone slab on the shared hex edge that fully
+				     blocks movement and attacks across it. -->
+				{#each wallSegments as w}
+					<g pointer-events="none">
+						<line
+							x1={w.a[0]} y1={w.a[1]} x2={w.b[0]} y2={w.b[1]}
+							stroke="#2b2622" stroke-width="13" stroke-linecap="round"
+						/>
+						<line
+							x1={w.a[0]} y1={w.a[1]} x2={w.b[0]} y2={w.b[1]}
+							stroke="#9a8f83" stroke-width="9" stroke-linecap="round"
+						/>
+						<line
+							x1={w.a[0]} y1={w.a[1]} x2={w.b[0]} y2={w.b[1]}
+							stroke="#4a423b" stroke-width="9" stroke-linecap="butt"
+							stroke-dasharray="2 9"
+						/>
+					</g>
+				{/each}
 				<!-- Army count badges, production stars, and city names -->
 				{#each $game.map.grids as g (g.id)}
 					{@render hexBadge(g.id, g.x, g.y, 1, true, $game.states[g.id].armies)}
@@ -1210,7 +1201,7 @@
 					<p class="hint">Roll the dice in the attack modal.</p>
 				{/if}
 
-				{#if $game.current === HUMAN && ($game.phase === 'move_select_from' || $game.phase === 'move_select_to' || $game.phase === 'bomb_select' || $game.phase === 'air_from' || $game.phase === 'air_to' || $game.phase === 'reinforce_select' || $game.phase === 'sabotage_select' || $game.phase === 'fortify_select' || $game.phase === 'rampart_select' || $game.phase === 'ferry_from' || $game.phase === 'ferry_to' || $game.phase === 'invasion_from' || $game.phase === 'invasion_to' || $game.phase === 'artillery_from' || $game.phase === 'artillery_to' || $game.phase === 'deforest_select' || $game.phase === 'oasis_select' || $game.phase === 'storm_from' || $game.phase === 'storm_to')}
+				{#if $game.current === HUMAN && ($game.phase === 'move_select_from' || $game.phase === 'move_select_to' || $game.phase === 'bomb_select' || $game.phase === 'air_from' || $game.phase === 'air_to' || $game.phase === 'reinforce_select' || $game.phase === 'sabotage_select' || $game.phase === 'fortify_select' || $game.phase === 'rampart_select' || $game.phase === 'ferry_from' || $game.phase === 'ferry_to' || $game.phase === 'invasion_from' || $game.phase === 'invasion_to' || $game.phase === 'artillery_from' || $game.phase === 'artillery_to' || $game.phase === 'deforest_select' || $game.phase === 'oasis_select' || $game.phase === 'storm_from' || $game.phase === 'storm_to' || $game.phase === 'wall_from' || $game.phase === 'wall_to')}
 					<div class="row">
 						<button onclick={cancelAction}>Cancel</button>
 					</div>
@@ -1434,7 +1425,7 @@
 								{:else}
 									{#if g.terrain === 'mountain'}<li class="pos">+1 ⛰ mountain</li>{/if}
 									{#if st.fortified}<li class="pos">+2 🛡 fortified</li>{/if}
-									{#if st.rampart}<li class="pos">+1 🧱 rampart</li>{/if}
+									{#if st.rampart}<li class="pos">+1 🏰 rampart</li>{/if}
 									{#if isInvasion}<li class="pos">+1 ⚓ sea invasion</li>
 									{:else if xBonus === 2}<li class="pos">+2 ⚓ sea-lane crossing</li>
 									{:else if xBonus === 1}<li class="pos">+1 💧 river crossing</li>{/if}

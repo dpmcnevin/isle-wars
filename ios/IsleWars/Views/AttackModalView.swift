@@ -75,7 +75,7 @@ struct AttackModalView: View {
         } else {
             if mountainBonus > 0 { mods.append(.init(text: "+1 ⛰ mountain", style: .bonus)) }
             if fortifiedBonus > 0 { mods.append(.init(text: "+2 🛡 fortified", style: .bonus)) }
-            if rampartBonus > 0 { mods.append(.init(text: "+1 🧱 rampart", style: .bonus)) }
+            if rampartBonus > 0 { mods.append(.init(text: "+1 🏰 rampart", style: .bonus)) }
             if isInvasionCrossing { mods.append(.init(text: "+1 ⚓ sea invasion", style: .bonus)) }
             else if crossingBonus == 2 { mods.append(.init(text: "+2 ⚓ sea-lane crossing", style: .bonus)) }
             else if crossingBonus == 1 { mods.append(.init(text: "+1 💧 river crossing", style: .bonus)) }

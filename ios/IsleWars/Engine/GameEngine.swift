@@ -220,6 +220,18 @@ final class GameEngine {
         Int(try rawCall("countryCount", args: [player.rawValue]).toInt32())
     }
 
+    /// Every card's display metadata, straight from the engine registry, so the
+    /// native client never re-declares labels/icons in Swift (Tier 3).
+    func cardCatalog() throws -> [CardInfo] {
+        try call("cardCatalog", as: [CardInfo].self)
+    }
+
+    /// Grid ids the active player can select right now — drives the map's
+    /// selection highlight without reimplementing per-phase rules in Swift.
+    func selectableHexes() throws -> [Int] {
+        try call("selectableHexes", as: [Int].self)
+    }
+
     func fullIslandBonus(player: Player) throws -> Int {
         Int(try rawCall("fullIslandBonus", args: [player.rawValue]).toInt32())
     }

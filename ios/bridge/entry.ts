@@ -35,6 +35,8 @@ import {
 	canArtilleryTarget,
 	countryCount,
 	fullIslandBonus,
+	selectableHexes,
+	cardCatalog,
 	type GameState,
 	type Player
 } from '../../src/lib/game';
@@ -110,6 +112,11 @@ function withState<Args extends unknown[]>(fn: (...args: Args) => void) {
 	canArtilleryTarget: (fromId: number, toId: number) => canArtilleryTarget(latestState, fromId, toId),
 	countryCount: (player: Player) => countryCount(latestState, player),
 	fullIslandBonus: (player: Player) => fullIslandBonus(latestState, player),
+
+	// Tier 3 additions: let Swift drive card display and hex-selection
+	// highlighting straight from the engine instead of re-declaring the rules.
+	selectableHexes: () => JSON.stringify(selectableHexes(latestState)),
+	cardCatalog: () => JSON.stringify(cardCatalog()),
 
 	// Fire-and-forget: `runAiTurn` is async purely for cosmetic pacing. The
 	// host installs a synchronous setTimeout shim, so by the time this

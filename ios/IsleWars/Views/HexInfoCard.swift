@@ -53,7 +53,7 @@ struct HexInfo {
             modifiers.append(Modifier(name: "🛡 Fortified", desc: "+2 defense on this hex. Lost when the hex is captured."))
         }
         if st.rampart == true {
-            modifiers.append(Modifier(name: "🧱 Rampart", desc: "+1 defense on this hex. Lost when the hex is captured."))
+            modifiers.append(Modifier(name: "🏰 Rampart", desc: "+1 defense on this hex. Lost when the hex is captured."))
         }
 
         return HexInfo(

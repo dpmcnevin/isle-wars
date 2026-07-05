@@ -37,6 +37,7 @@ export interface GameMap {
 	waterHexes: [number, number][][]; // hex polygons for unassigned (water) cells
 	waterFeatures: WaterFeature[]; // named lakes and bays
 	rivers: [number, number][]; // unordered land-land edge pairs (a < b)
+	walls: [number, number][]; // Wall-card barriers on shared hex edges (a < b); block movement/attack across that edge
 	width: number;
 	height: number;
 	viewBox: { x: number; y: number; w: number; h: number }; // tight bbox around land
@@ -47,6 +48,15 @@ export interface GameMap {
 export function crossesRiver(map: GameMap, a: number, b: number): boolean {
 	const lo = Math.min(a, b), hi = Math.max(a, b);
 	for (const [x, y] of map.rivers) if (x === lo && y === hi) return true;
+	return false;
+}
+
+/** True if a Wall barrier sits on the shared edge between two hexes, blocking
+ *  all movement and attacks across it. Symmetric in a/b. */
+export function wallBetween(map: GameMap, a: number, b: number): boolean {
+	const walls = map.walls ?? [];
+	const lo = Math.min(a, b), hi = Math.max(a, b);
+	for (const [x, y] of walls) if (x === lo && y === hi) return true;
 	return false;
 }
 
@@ -939,6 +949,7 @@ export function generateMap(seed: number = Math.floor(Math.random() * 1e9)): Gam
 		waterHexes,
 		waterFeatures,
 		rivers,
+		walls: [],
 		width,
 		height,
 		viewBox: { x: vbX, y: vbY, w: vbW, h: vbH },

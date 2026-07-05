@@ -2,7 +2,12 @@ import Foundation
 
 @MainActor
 final class GameViewModel: ObservableObject {
-    @Published private(set) var state: GameState?
+    @Published private(set) var state: GameState? {
+        didSet { refreshSelectableHexes() }
+    }
+    /// Grid ids the human can currently select, sourced from the engine so the
+    /// map never reimplements per-phase/per-card selection rules (Tier 3).
+    @Published private(set) var selectableHexes: Set<Int> = []
     @Published var errorMessage: String?
     @Published private(set) var isAiThinking = false
     @Published private(set) var debugSettings: DebugSettings?
@@ -21,6 +26,7 @@ final class GameViewModel: ObservableObject {
         } catch {
             fatalError("Failed to initialize GameEngine: \(error)")
         }
+        CardCatalog.load(from: engine)
         debugSettings = try? engine.getDebugSettings()
         if let seedString = ProcessInfo.processInfo.environment["ISLEWARS_AUTOSTART_SEED"], let seed = Int(seedString) {
             startNewGame(seed: seed)
@@ -158,6 +164,14 @@ final class GameViewModel: ObservableObject {
     }
 
     // MARK: - Plumbing
+
+    /// Refresh the engine-computed selection set for the current state. Kept in
+    /// sync via `state`'s didSet so every code path (actions, AI turns, load)
+    /// updates it. Cheap: a single JSC call returning a small id array.
+    private func refreshSelectableHexes() {
+        guard state != nil else { selectableHexes = []; return }
+        selectableHexes = Set((try? engine.selectableHexes()) ?? [])
+    }
 
     private func run(_ action: (GameEngine) throws -> GameState) {
         do {

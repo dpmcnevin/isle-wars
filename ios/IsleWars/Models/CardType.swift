@@ -1,54 +1,34 @@
 import Foundation
 
-enum CardType: String, Codable, CaseIterable {
-    case air, bonus5, bonus8, bonus15, double, bomb, antibomb, reinforce, elite
-    case sabotage, fortify, ferry, invasion, deforest, storm, artillery, bridge, oasis, rampart
+/// A card id as it appears in the engine's `hands`. Backed by the raw string so
+/// unknown/newly-added cards decode without crashing; all display metadata
+/// (label/icon/kind/when/desc) comes from the engine-provided `CardCatalog`.
+/// Nothing in the native layer branches on specific card ids — the engine owns
+/// all card behaviour — so a plain string wrapper is sufficient.
+struct CardType: RawRepresentable, Codable, Hashable {
+    let rawValue: String
 
-    var label: String {
-        switch self {
-        case .air: "Air Move"
-        case .bonus5: "+5 Armies"
-        case .bonus8: "+8 Armies"
-        case .bonus15: "+15 Armies"
-        case .double: "Double"
-        case .bomb: "Bomb"
-        case .antibomb: "Anti-Bomb"
-        case .reinforce: "Reinforce (+3)"
-        case .elite: "Elite Troops"
-        case .sabotage: "Sabotage"
-        case .fortify: "Fortify"
-        case .ferry: "Ferry Route"
-        case .invasion: "Water Invasion"
-        case .deforest: "Deforestation"
-        case .storm: "Storm"
-        case .artillery: "Artillery"
-        case .bridge: "Bridge"
-        case .oasis: "Oasis"
-        case .rampart: "Rampart (+1)"
-        }
+    init(rawValue: String) { self.rawValue = rawValue }
+
+    init(from decoder: Decoder) throws {
+        rawValue = try decoder.singleValueContainer().decode(String.self)
     }
 
-    var icon: String {
-        switch self {
-        case .air: "✈"
-        case .bonus5: "+5"
-        case .bonus8: "+8"
-        case .bonus15: "+15"
-        case .double: "×2"
-        case .bomb: "💣"
-        case .antibomb: "🛡"
-        case .reinforce: "➕"
-        case .elite: "⚔"
-        case .sabotage: "☠"
-        case .fortify: "⛩"
-        case .ferry: "⚓"
-        case .invasion: "🚢"
-        case .deforest: "🪓"
-        case .storm: "🌩"
-        case .artillery: "💥"
-        case .bridge: "🌉"
-        case .oasis: "🌴"
-        case .rampart: "🧱"
-        }
+    func encode(to encoder: Encoder) throws {
+        var container = encoder.singleValueContainer()
+        try container.encode(rawValue)
+    }
+
+    private var info: CardInfo? { CardCatalog.info(for: rawValue) }
+
+    var label: String { info?.label ?? rawValue.capitalized }
+    var icon: String { info?.icon ?? "🎴" }
+
+    var meta: CardMeta {
+        CardMeta(
+            kind: CardKind(rawValue: info?.kind ?? "") ?? .boost,
+            when: info?.when ?? "",
+            desc: info?.desc ?? ""
+        )
     }
 }

@@ -43,6 +43,7 @@ private struct GameView: View {
         ZStack {
             MapView(
                 state: state,
+                selectableHexes: vm.selectableHexes,
                 onTapHex: handleTap,
                 onDragAttack: vm.dragAttack,
                 onDragMove: vm.dragMove,

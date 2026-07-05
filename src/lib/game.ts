@@ -1,5 +1,5 @@
 import { writable, derived, get } from 'svelte/store';
-import { generateMap, crossesRiver, shuffle, type GameMap } from './map';
+import { generateMap, crossesRiver, wallBetween, shuffle, type GameMap } from './map';
 
 export type Player = 'blue' | 'green' | 'red' | 'brown';
 export const PLAYERS: Player[] = ['blue', 'green', 'red', 'brown'];
@@ -35,29 +35,8 @@ export type CardType =
 	| 'artillery'
 	| 'bridge'
 	| 'oasis'
-	| 'rampart';
-
-export const CARD_LABELS: Record<CardType, string> = {
-	air: 'Air Move',
-	bonus5: '+5 Armies',
-	bonus8: '+8 Armies',
-	bonus15: '+15 Armies',
-	double: 'Double',
-	bomb: 'Bomb',
-	antibomb: 'Anti-Bomb',
-	reinforce: 'Reinforce (+3)',
-	elite: 'Elite Troops',
-	sabotage: 'Sabotage',
-	fortify: 'Fortify',
-	ferry: 'Ferry Route',
-	invasion: 'Water Invasion',
-	deforest: 'Deforestation',
-	storm: 'Storm',
-	artillery: 'Artillery',
-	bridge: 'Bridge',
-	oasis: 'Oasis',
-	rampart: 'Rampart (+1)'
-};
+	| 'rampart'
+	| 'wall';
 
 export interface CardMeta {
 	icon: string;
@@ -65,145 +44,399 @@ export interface CardMeta {
 	when: string;
 	desc: string;
 }
-export const CARD_META: Record<CardType, CardMeta> = {
-	air: {
-		icon: '✈',
-		kind: 'movement',
+
+// One selection step in a card's targeting flow. `check` returns an error
+// message when `id` is not a legal pick, or null when it is — this single
+// predicate drives BOTH engine validation (selectGrid) and UI highlighting
+// (web isSelectable / the bridge's selectableHexes), so a card's targeting
+// rules live in exactly one place.
+export interface SelectStep {
+	phase: Phase;
+	prompt: string;
+	check: (s: GameState, id: number, from: number | null) => string | null;
+}
+
+// The single source of truth for a card: display metadata, draw-pool weight,
+// and behaviour. Immediate cards implement `onPlay`; targeting cards declare
+// 1–2 `steps` plus `onResolve`, which applies the effect after the final pick.
+// Adding a card = one entry here (+ its name in the CardType union).
+export interface CardDef {
+	id: CardType;
+	label: string;
+	icon: string;
+	kind: CardMeta['kind'];
+	when: string;
+	desc: string;
+	weight: number; // number of copies in the draw pool
+	passive?: boolean; // never actively played (antibomb)
+	playableIn: Phase[]; // phases the card may be started from
+	onPlay?: (s: GameState, idx: number) => void; // immediate cards
+	steps?: SelectStep[]; // targeting cards
+	onResolve?: (s: GameState, picks: number[], idx: number) => void;
+}
+
+// Phase groups reused across cards.
+const PLACE_ONLY: Phase[] = ['placing'];
+const TURN: Phase[] = ['placing', 'action'];
+// Action phase, or while an attack is being set up (playing auto-cancels it).
+const ACTION_OR_ATTACK: Phase[] = ['action', 'attack_select_from', 'attack_select_to'];
+
+export const CARD_DEFS: CardDef[] = [
+	{
+		id: 'air', label: 'Air Move', icon: '✈', kind: 'movement', weight: 2,
 		when: 'Action phase',
-		desc: 'Move armies between any two of your territories, ignoring adjacency. Ends the turn.'
+		desc: 'Move armies between any two of your territories, ignoring adjacency. Ends the turn.',
+		playableIn: ACTION_OR_ATTACK,
+		steps: [
+			{ phase: 'air_from', prompt: 'Air Move: choose source (your territory, 2+ armies).',
+				check: (s, id) => s.states[id].owner !== s.current ? 'Choose your own territory.'
+					: s.states[id].armies < 2 ? 'Need 2+ armies (1 must stay).' : null },
+			{ phase: 'air_to', prompt: 'Choose ANY of your territories as destination.',
+				check: (s, id, from) => (s.states[id].owner !== s.current || id === from) ? 'Must be your territory.' : null }
+		],
+		// Air ends in a quantity picker; confirmAir() consumes the card.
+		onResolve: (s, [, to]) => {
+			s.selectedTo = to;
+			s.pendingArmies = 1;
+			s.phase = 'air_qty';
+			s.message = 'Choose how many to airlift, then confirm.';
+		}
 	},
-	bonus5: {
-		icon: '+5',
-		kind: 'boost',
-		when: 'Placement phase',
-		desc: 'Add 5 armies to your placement pool this turn.'
+	{
+		id: 'bonus5', label: '+5 Armies', icon: '+5', kind: 'boost', weight: 3,
+		when: 'Placement phase', desc: 'Add 5 armies to your placement pool this turn.',
+		playableIn: PLACE_ONLY,
+		onPlay: (s, idx) => {
+			s.armiesToPlace += 5; consumeCard(s, idx);
+			log(s, `${PLAYER_NAMES[s.current]} played +5 Armies (+5).`, 'card');
+			s.message = `Place ${s.armiesToPlace} armies.`;
+		}
 	},
-	bonus8: {
-		icon: '+8',
-		kind: 'boost',
-		when: 'Placement phase',
-		desc: 'Add 8 armies to your placement pool this turn.'
+	{
+		id: 'bonus8', label: '+8 Armies', icon: '+8', kind: 'boost', weight: 2,
+		when: 'Placement phase', desc: 'Add 8 armies to your placement pool this turn.',
+		playableIn: PLACE_ONLY,
+		onPlay: (s, idx) => {
+			s.armiesToPlace += 8; consumeCard(s, idx);
+			log(s, `${PLAYER_NAMES[s.current]} played +8 Armies (+8).`, 'card');
+			s.message = `Place ${s.armiesToPlace} armies.`;
+		}
 	},
-	bonus15: {
-		icon: '+15',
-		kind: 'boost',
-		when: 'Placement phase',
-		desc: 'Add 15 armies to your placement pool this turn.'
+	{
+		id: 'bonus15', label: '+15 Armies', icon: '+15', kind: 'boost', weight: 1,
+		when: 'Placement phase', desc: 'Add 15 armies to your placement pool this turn.',
+		playableIn: PLACE_ONLY,
+		onPlay: (s, idx) => {
+			s.armiesToPlace += 15; consumeCard(s, idx);
+			log(s, `${PLAYER_NAMES[s.current]} played +15 Armies (+15).`, 'card');
+			s.message = `Place ${s.armiesToPlace} armies.`;
+		}
 	},
-	double: {
-		icon: '×2',
-		kind: 'boost',
-		when: 'Placement phase',
-		desc: 'Double the number of armies you place this turn.'
+	{
+		id: 'double', label: 'Double', icon: '×2', kind: 'boost', weight: 2,
+		when: 'Placement phase', desc: 'Double the number of armies you place this turn.',
+		playableIn: PLACE_ONLY,
+		onPlay: (s, idx) => {
+			if (s.doubleActive) { s.message = 'Play Double during placement (once).'; return; }
+			s.armiesToPlace *= 2; s.doubleActive = true; consumeCard(s, idx);
+			log(s, `${PLAYER_NAMES[s.current]} played Double! Placement doubled to ${s.armiesToPlace}.`, 'card');
+			s.message = `Place ${s.armiesToPlace} armies.`;
+		}
 	},
-	bomb: {
-		icon: '💣',
-		kind: 'attack',
+	{
+		id: 'bomb', label: 'Bomb', icon: '💣', kind: 'attack', weight: 2,
 		when: 'Placement or Action phase',
-		desc: 'Detonate on any enemy territory to destroy 3–7 of their armies.'
+		desc: 'Detonate on any enemy territory to destroy 3–7 of their armies.',
+		playableIn: TURN,
+		steps: [{ phase: 'bomb_select', prompt: 'Bomb: click any enemy territory.',
+			check: (s, id) => (!s.states[id].owner || s.states[id].owner === s.current) ? 'Bomb an enemy territory.' : null }],
+		onResolve: (s, [id], idx) => resolveBomb(s, id, idx)
 	},
-	antibomb: {
-		icon: '🛡',
-		kind: 'defense',
-		when: 'Passive',
+	{
+		id: 'antibomb', label: 'Anti-Bomb', icon: '🛡', kind: 'defense', weight: 2,
+		when: 'Passive', passive: true, playableIn: [],
 		desc: 'Automatically absorbs the next bomb targeting one of your hexes. No action needed.'
 	},
-	reinforce: {
-		icon: '➕',
-		kind: 'boost',
-		when: 'Placement or Action phase',
-		desc: 'Add 3 armies to any one of your territories immediately.'
+	{
+		id: 'reinforce', label: 'Reinforce (+3)', icon: '➕', kind: 'boost', weight: 2,
+		when: 'Placement or Action phase', desc: 'Add 3 armies to any one of your territories immediately.',
+		playableIn: TURN,
+		steps: [{ phase: 'reinforce_select', prompt: 'Reinforce: click one of your territories to add 3 armies.',
+			check: (s, id) => s.states[id].owner !== s.current ? 'Pick one of your territories.' : null }],
+		onResolve: (s, [id], idx) => {
+			s.states[id].armies += 3; consumeCard(s, idx);
+			log(s, `${PLAYER_NAMES[s.current]} reinforced ${gridLabel(s, id)} (+3 armies).`, 'card');
+			s.phase = 'action'; s.message = 'Attack, move, or pass.';
+		}
 	},
-	elite: {
-		icon: '⚔',
-		kind: 'attack',
+	{
+		id: 'elite', label: 'Elite Troops', icon: '⚔', kind: 'attack', weight: 2,
 		when: 'Action phase, before attacking',
-		desc: 'Your next attack sequence rolls +2 on every die. Consumed by the first attack.'
+		desc: 'Your next attack sequence rolls +2 on every die. Consumed by the first attack.',
+		playableIn: ACTION_OR_ATTACK,
+		onPlay: (s, idx) => {
+			s.phase = 'action'; s.selectedFrom = null; s.selectedTo = null;
+			s.eliteAttackActive = true; consumeCard(s, idx);
+			log(s, `${PLAYER_NAMES[s.current]} rallied Elite Troops (+2 attack next battle).`, 'card');
+			s.message = 'Elite Troops active. Attack now (+2 to each roll) — consumed by first attack.';
+		}
 	},
-	sabotage: {
-		icon: '☠',
-		kind: 'attack',
+	{
+		id: 'sabotage', label: 'Sabotage', icon: '☠', kind: 'attack', weight: 1,
+		when: 'Placement or Action phase', desc: 'Halve the armies of any enemy territory (rounded down, min 1).',
+		playableIn: TURN,
+		steps: [{ phase: 'sabotage_select', prompt: 'Sabotage: click any enemy territory to halve its armies.',
+			check: (s, id) => (!s.states[id].owner || s.states[id].owner === s.current) ? 'Sabotage an enemy territory.' : null }],
+		onResolve: (s, [id], idx) => {
+			const g = s.states[id]; const before = g.armies;
+			g.armies = Math.max(1, Math.floor(g.armies / 2)); consumeCard(s, idx);
+			log(s, `${PLAYER_NAMES[s.current]} sabotaged ${gridLabel(s, id)}: ${before} → ${g.armies} armies.`, 'card');
+			s.phase = 'action'; s.message = 'Attack, move, or pass.';
+		}
+	},
+	{
+		id: 'fortify', label: 'Fortify', icon: '⛩', kind: 'defense', weight: 1,
 		when: 'Placement or Action phase',
-		desc: 'Halve the armies of any enemy territory (rounded down, min 1).'
+		desc: 'Give one of your hexes a permanent +2 defense bonus. Lost when the hex is captured.',
+		playableIn: TURN,
+		steps: [{ phase: 'fortify_select', prompt: 'Fortify: click one of your territories to fortify it (+2 defense).',
+			check: (s, id) => s.states[id].owner !== s.current ? 'Fortify one of your territories.'
+				: s.states[id].fortified ? 'Already fortified.' : null }],
+		onResolve: (s, [id], idx) => {
+			s.states[id].fortified = true; consumeCard(s, idx);
+			log(s, `${PLAYER_NAMES[s.current]} fortified ${gridLabel(s, id)} (+2 defense).`, 'card');
+			s.phase = 'action'; s.message = 'Attack, move, or pass.';
+		}
 	},
-	fortify: {
-		icon: '⛩',
-		kind: 'defense',
+	{
+		id: 'ferry', label: 'Ferry Route', icon: '⚓', kind: 'movement', weight: 1,
 		when: 'Placement or Action phase',
-		desc: 'Give one of your hexes a permanent +2 defense bonus. Lost when the hex is captured.'
+		desc: 'Open a permanent sea lane between two of your territories over clear water.',
+		playableIn: TURN,
+		steps: [
+			{ phase: 'ferry_from', prompt: 'Ferry: choose the first of your territories to link by sea.',
+				check: (s, id) => s.states[id].owner !== s.current ? 'Choose one of your territories.' : null },
+			{ phase: 'ferry_to', prompt: 'Ferry: choose the second of your territories (must not be already connected).',
+				check: (s, id, from) => {
+					if (s.states[id].owner !== s.current || id === from) return 'Choose a different territory of yours.';
+					if (!canFerryConnect(s, from as number, id)) return 'Ferry needs a straight-line water path — no islands in between.';
+					const laneExists = s.map.seaLanes.some(([x, y]) => (x === from && y === id) || (x === id && y === from));
+					return laneExists ? 'A ferry route already exists there.' : null;
+				} }
+		],
+		onResolve: (s, [from, to], idx) => {
+			s.map.seaLanes.push([from, to]);
+			if (!s.map.adj[from].includes(to)) s.map.adj[from].push(to);
+			if (!s.map.adj[to].includes(from)) s.map.adj[to].push(from);
+			consumeCard(s, idx);
+			log(s, `${PLAYER_NAMES[s.current]} opened a ferry route: ${gridLabel(s, from)} ↔ ${gridLabel(s, to)}.`, 'card');
+			s.phase = 'action'; s.selectedFrom = null; s.selectedTo = null; s.message = 'Attack, move, or pass.';
+		}
 	},
-	ferry: {
-		icon: '⚓',
-		kind: 'movement',
-		when: 'Placement or Action phase',
-		desc: 'Open a permanent sea lane between two of your territories over clear water.'
-	},
-	invasion: {
-		icon: '🚢',
-		kind: 'attack',
+	{
+		id: 'invasion', label: 'Water Invasion', icon: '🚢', kind: 'attack', weight: 1,
 		when: 'Action phase',
-		desc: 'Open a temporary sea lane and launch an attack across it. The lane stays only if you conquer the target.'
+		desc: 'Open a temporary sea lane and launch an attack across it. The lane stays only if you conquer the target.',
+		playableIn: ACTION_OR_ATTACK,
+		steps: [
+			{ phase: 'invasion_from', prompt: 'Water Invasion: choose one of your territories to launch from (2+ armies).',
+				check: (s, id) => s.states[id].owner !== s.current ? 'Launch from one of your territories.'
+					: s.states[id].armies < 2 ? 'Need at least 2 armies to invade.' : null },
+			{ phase: 'invasion_to', prompt: 'Water Invasion: choose an enemy territory with a straight-line water path.',
+				check: (s, id, from) => !canInvasionConnect(s, from as number, id) ? 'No clear water path — invasion needs open sea.' : null }
+		],
+		onResolve: (s, [from, to], idx) => {
+			s.map.seaLanes.push([from, to]);
+			s.map.adj[from].push(to); s.map.adj[to].push(from);
+			s.pendingInvasionLane = [from, to];
+			consumeCard(s, idx);
+			log(s, `${PLAYER_NAMES[s.current]} launched a Water Invasion: ${gridLabel(s, from)} → ${gridLabel(s, to)}.`, 'card');
+			s.selectedTo = to; s.phase = 'attack_rolling'; s.message = 'Invasion — rolling…';
+		}
 	},
-	deforest: {
-		icon: '🪓',
-		kind: 'terrain',
+	{
+		id: 'deforest', label: 'Deforestation', icon: '🪓', kind: 'terrain', weight: 1,
 		when: 'Placement or Action phase',
-		desc: 'Clear any forest hex on the map. Removes the +1 attacker bonus that forests provide.'
+		desc: 'Clear any forest hex on the map. Removes the +1 attacker bonus that forests provide.',
+		playableIn: TURN,
+		steps: [{ phase: 'deforest_select', prompt: 'Deforestation: click any forest hex to clear it.',
+			check: (s, id) => s.map.grids[id].terrain !== 'forest' ? 'Pick a forest hex.' : null }],
+		onResolve: (s, [id], idx) => {
+			s.map.grids[id].terrain = 'plain'; consumeCard(s, idx);
+			log(s, `${PLAYER_NAMES[s.current]} cleared the forest at ${gridLabel(s, id)}.`, 'card');
+			s.phase = 'action'; s.message = 'Attack, move, or pass.';
+		}
 	},
-	storm: {
-		icon: '🌩',
-		kind: 'terrain',
-		when: 'Placement or Action phase',
-		desc: 'Destroy any existing sea lane. Pick both endpoints of the route to sever.'
+	{
+		id: 'storm', label: 'Storm', icon: '🌩', kind: 'terrain', weight: 1,
+		when: 'Placement or Action phase', desc: 'Destroy any existing sea lane. Pick both endpoints of the route to sever.',
+		playableIn: TURN,
+		steps: [
+			{ phase: 'storm_from', prompt: 'Storm: click one endpoint of the sea route you want to destroy.',
+				check: (s, id) => s.map.seaLanes.some(([a, b]) => a === id || b === id) ? null : 'Pick a hex that anchors a sea route.' },
+			{ phase: 'storm_to', prompt: 'Storm: click the other end of the sea route to destroy.',
+				check: (s, id, from) => s.map.seaLanes.some(([a, b]) => (a === from && b === id) || (a === id && b === from)) ? null : 'No sea route between those hexes.' }
+		],
+		onResolve: (s, [from, to], idx) => {
+			const laneIdx = s.map.seaLanes.findIndex(([a, b]) => (a === from && b === to) || (a === to && b === from));
+			if (laneIdx >= 0) s.map.seaLanes.splice(laneIdx, 1);
+			s.map.adj[from] = s.map.adj[from].filter((n) => n !== to);
+			s.map.adj[to] = s.map.adj[to].filter((n) => n !== from);
+			consumeCard(s, idx);
+			log(s, `${PLAYER_NAMES[s.current]} summoned a Storm — sea route ${gridLabel(s, from)} ↔ ${gridLabel(s, to)} destroyed.`, 'card');
+			s.phase = 'action'; s.selectedFrom = null; s.selectedTo = null; s.message = 'Attack, move, or pass.';
+		}
 	},
-	artillery: {
-		icon: '💥',
-		kind: 'attack',
+	{
+		id: 'artillery', label: 'Artillery', icon: '💥', kind: 'attack', weight: 1,
 		when: 'Action phase (from a city ★)',
-		desc: 'Bombard any hex up to 2 steps away, launched from one of your cities (★). Roll four times — each hit removes one defender. Attackers never lose armies. Terrain and fortification bonuses still count.'
+		desc: 'Bombard any hex up to 2 steps away, launched from one of your cities (★). Roll four times — each hit removes one defender. Attackers never lose armies. Terrain and fortification bonuses still count.',
+		playableIn: ACTION_OR_ATTACK,
+		steps: [
+			{ phase: 'artillery_from', prompt: 'Artillery: click one of your territories to bombard from (2+ armies).',
+				check: (s, id) => s.states[id].owner !== s.current ? 'Bombard from one of your territories.'
+					: !s.map.grids[id].production ? 'Artillery only fires from a city ★.'
+					: s.states[id].armies < 2 ? 'Need at least 2 armies to man the guns.' : null },
+			{ phase: 'artillery_to', prompt: 'Artillery: click a target within 2 hexes (any owner but yours).',
+				check: (s, id, from) => !canArtilleryTarget(s, from as number, id) ? 'Target must be an enemy/neutral hex within 2 steps.' : null }
+		],
+		onResolve: (s, [from, to], idx) => resolveArtillery(s, from, to, idx)
 	},
-	bridge: {
-		icon: '🌉',
-		kind: 'attack',
+	{
+		id: 'bridge', label: 'Bridge', icon: '🌉', kind: 'attack', weight: 2,
 		when: 'Action phase, before attacking',
-		desc: 'Bridge a river for your next attack — the defender loses the +1 river-crossing bonus. Consumed by the first attack.'
+		desc: 'Bridge a river for your next attack — the defender loses the +1 river-crossing bonus. Consumed by the first attack.',
+		playableIn: ACTION_OR_ATTACK,
+		onPlay: (s, idx) => {
+			s.phase = 'action'; s.selectedFrom = null; s.selectedTo = null;
+			s.bridgeAttackActive = true; consumeCard(s, idx);
+			log(s, `${PLAYER_NAMES[s.current]} deployed a Bridge (cancels river bonus next attack).`, 'card');
+			s.message = 'Bridge active. Your next attack ignores the river-crossing defender bonus.';
+		}
 	},
-	oasis: {
-		icon: '🌴',
-		kind: 'terrain',
+	{
+		id: 'oasis', label: 'Oasis', icon: '🌴', kind: 'terrain', weight: 1,
 		when: 'Placement or Action phase',
-		desc: 'Irrigate a desert hex you control, turning it back into plains. Removes the heat attrition (1 army lost per move into it).'
+		desc: 'Irrigate a desert hex you control, turning it back into plains. Removes the heat attrition (1 army lost per move into it).',
+		playableIn: TURN,
+		steps: [{ phase: 'oasis_select', prompt: 'Oasis: click one of your desert hexes to convert it to plains.',
+			check: (s, id) => s.map.grids[id].terrain !== 'desert' ? 'Pick a desert hex.'
+				: s.states[id].owner !== s.current ? 'Oasis only works on a desert you control.' : null }],
+		onResolve: (s, [id], idx) => {
+			s.map.grids[id].terrain = 'plain'; consumeCard(s, idx);
+			log(s, `${PLAYER_NAMES[s.current]} irrigated the desert at ${gridLabel(s, id)}.`, 'card');
+			s.phase = 'action'; s.message = 'Attack, move, or pass.';
+		}
 	},
-	rampart: {
-		icon: '🧱',
-		kind: 'defense',
+	{
+		id: 'rampart', label: 'Rampart (+1)', icon: '🏰', kind: 'defense', weight: 2,
 		when: 'Placement or Action phase',
-		desc: 'Give one of your hexes a permanent +1 defense bonus. Stacks with Fortify. Lost when the hex is captured.'
+		desc: 'Give one of your hexes a permanent +1 defense bonus. Stacks with Fortify. Lost when the hex is captured.',
+		playableIn: TURN,
+		steps: [{ phase: 'rampart_select', prompt: 'Rampart: click one of your territories to reinforce it (+1 defense).',
+			check: (s, id) => s.states[id].owner !== s.current ? 'Raise a rampart on one of your territories.'
+				: s.states[id].rampart ? 'Already has a rampart.' : null }],
+		onResolve: (s, [id], idx) => {
+			s.states[id].rampart = true; consumeCard(s, idx);
+			log(s, `${PLAYER_NAMES[s.current]} raised a rampart on ${gridLabel(s, id)} (+1 defense).`, 'card');
+			s.phase = 'action'; s.message = 'Attack, move, or pass.';
+		}
+	},
+	{
+		id: 'wall', label: 'Wall', icon: '🧱', kind: 'defense', weight: 2,
+		when: 'Placement or Action phase',
+		desc: 'Build a wall on one edge of a hex you own. Blocks all movement and attacks across that edge (both ways). Cannot be placed on a river edge. Permanent.',
+		playableIn: TURN,
+		steps: [
+			{ phase: 'wall_from', prompt: 'Wall: click one of your territories to build a wall on its edge.',
+				check: (s, id) => s.states[id].owner !== s.current ? 'Build the wall on a hex you own.' : null },
+			{ phase: 'wall_to', prompt: 'Wall: click an adjacent hex to seal that edge.',
+				check: (s, id, from) => {
+					if (id === from) return 'Pick a neighbouring hex to wall off.';
+					if (!s.map.adj[from as number].includes(id) || s.map.grids[id].island !== s.map.grids[from as number].island)
+						return 'Must be a bordering hex on the same island.';
+					if (crossesRiver(s.map, from as number, id)) return 'That edge already has a river — build the wall elsewhere.';
+					if (wallBetween(s.map, from as number, id)) return 'There is already a wall on that edge.';
+					return null;
+				} }
+		],
+		onResolve: (s, [from, to], idx) => {
+			const lo = Math.min(from, to), hi = Math.max(from, to);
+			if (!s.map.walls) s.map.walls = [];
+			s.map.walls.push([lo, hi]);
+			consumeCard(s, idx);
+			log(s, `${PLAYER_NAMES[s.current]} built a wall between ${gridLabel(s, from)} and ${gridLabel(s, to)}.`, 'card');
+			s.phase = 'action'; s.selectedFrom = null; s.selectedTo = null; s.message = 'Attack, move, or pass.';
+		}
 	}
-};
-
-// Weighted card draw pool
-const CARD_POOL: CardType[] = [
-	'air', 'air',
-	'bonus5', 'bonus5', 'bonus5',
-	'bonus8', 'bonus8',
-	'bonus15',
-	'double', 'double',
-	'bomb', 'bomb',
-	'antibomb', 'antibomb',
-	'reinforce', 'reinforce',
-	'elite', 'elite',
-	'sabotage',
-	'fortify',
-	'ferry',
-	'invasion',
-	'deforest',
-	'storm',
-	'artillery',
-	'bridge', 'bridge',
-	'oasis',
-	'rampart', 'rampart'
 ];
+
+const CARD_BY_ID = Object.fromEntries(CARD_DEFS.map((c) => [c.id, c])) as Record<CardType, CardDef>;
+
+// phase → which card + step index handles it (for the generic selectGrid dispatch).
+const PHASE_TO_STEP = {} as Partial<Record<Phase, { def: CardDef; stepIdx: number }>>;
+for (const def of CARD_DEFS) {
+	def.steps?.forEach((st, i) => { PHASE_TO_STEP[st.phase] = { def, stepIdx: i }; });
+}
+
+// Derived from the registry so there is a single source of truth.
+export const CARD_LABELS = Object.fromEntries(
+	CARD_DEFS.map((c) => [c.id, c.label])
+) as Record<CardType, string>;
+
+export const CARD_META = Object.fromEntries(
+	CARD_DEFS.map((c) => [c.id, { icon: c.icon, kind: c.kind, when: c.when, desc: c.desc }])
+) as Record<CardType, CardMeta>;
+
+// Weighted draw pool expanded from each card's `weight`.
+const CARD_POOL: CardType[] = CARD_DEFS.flatMap((c) => Array<CardType>(c.weight).fill(c.id));
+
+// Display metadata for every card, in a form the native (iOS) client can read
+// over the bridge so it never re-declares card labels/icons in Swift.
+export function cardCatalog(): { id: CardType; label: string; icon: string; kind: string; when: string; desc: string }[] {
+	return CARD_DEFS.map((c) => ({ id: c.id, label: c.label, icon: c.icon, kind: c.kind, when: c.when, desc: c.desc }));
+}
+
+// When the current phase is a card-selection step, whether `gridId` is a legal
+// pick (shares the exact `check` the engine uses to validate). undefined means
+// the current phase isn't a card step — callers fall back to core-phase rules.
+export function cardSelectableAt(s: GameState, gridId: number): boolean | undefined {
+	const step = PHASE_TO_STEP[s.phase];
+	if (!step) return undefined;
+	return step.def.steps![step.stepIdx].check(s, gridId, s.selectedFrom) === null;
+}
+
+// Whether the active player can currently select `gridId`, across BOTH card
+// steps and the core attack/move/placement phases. This is the single authority
+// the UI highlights from (web isSelectable and the bridge's selectableHexes).
+export function isSelectableHex(s: GameState, gridId: number): boolean {
+	const card = cardSelectableAt(s, gridId);
+	if (card !== undefined) return card;
+	const st = s.states[gridId];
+	switch (s.phase) {
+		case 'placing':
+			return st.owner === s.current;
+		case 'attack_select_from':
+		case 'move_select_from':
+			return st.owner === s.current && st.armies >= 2;
+		case 'attack_select_to':
+			return s.selectedFrom != null && s.map.adj[s.selectedFrom].includes(gridId)
+				&& st.owner !== s.current && !wallBetween(s.map, s.selectedFrom, gridId);
+		case 'move_select_to':
+			return s.selectedFrom != null && s.map.adj[s.selectedFrom].includes(gridId)
+				&& st.owner === s.current && !wallBetween(s.map, s.selectedFrom, gridId);
+		default:
+			return false;
+	}
+}
+
+// All hexes the active player can select right now — the native client polls
+// this to drive highlighting instead of reimplementing per-phase rules.
+export function selectableHexes(s: GameState): number[] {
+	const ids: number[] = [];
+	for (const g of s.map.grids) if (isSelectableHex(s, g.id)) ids.push(g.id);
+	return ids;
+}
 
 export type Phase =
 	| 'placing'
@@ -233,6 +466,8 @@ export type Phase =
 	| 'artillery_from'
 	| 'artillery_to'
 	| 'rampart_select'
+	| 'wall_from'
+	| 'wall_to'
 	| 'discard'
 	| 'game_over';
 
@@ -1177,6 +1412,26 @@ function advanceTurn(s: GameState): GameState {
 
 export function selectGrid(gridId: number): void {
 	game.update((s) => {
+		// Registry-driven card-target selection: when the current phase is one of
+		// a card's SelectSteps, validate the pick with that step's `check`, then
+		// advance to the next step or resolve the card. Core attack/move selection
+		// stays in the switch below.
+		const step = PHASE_TO_STEP[s.phase];
+		if (step) {
+			const { def, stepIdx } = step;
+			const err = def.steps![stepIdx].check(s, gridId, s.selectedFrom);
+			if (err) { s.message = err; return s; }
+			if (stepIdx < def.steps!.length - 1) {
+				s.selectedFrom = gridId;
+				const next = def.steps![stepIdx + 1];
+				s.phase = next.phase;
+				s.message = next.prompt;
+				return s;
+			}
+			const picks = def.steps!.length === 1 ? [gridId] : [s.selectedFrom as number, gridId];
+			def.onResolve!(s, picks, (s as any)._pendingCardIdx as number);
+			return s;
+		}
 		switch (s.phase) {
 			case 'attack_select_from': {
 				if (s.states[gridId].owner !== s.current) { s.message = 'Choose your own territory.'; break; }
@@ -1193,6 +1448,7 @@ export function selectGrid(gridId: number): void {
 			case 'attack_select_to': {
 				if (s.selectedFrom == null) break;
 				if (!s.map.adj[s.selectedFrom].includes(gridId)) { s.message = 'Not adjacent.'; break; }
+				if (wallBetween(s.map, s.selectedFrom, gridId)) { s.message = 'A wall blocks that edge.'; break; }
 				if (s.states[gridId].owner === s.current) { s.message = 'Choose an enemy or neutral territory.'; break; }
 				devLogAction(s.current, { kind: 'attack_begin', from: s.selectedFrom, to: gridId }, s);
 				s.selectedTo = gridId;
@@ -1221,255 +1477,12 @@ export function selectGrid(gridId: number): void {
 			case 'move_select_to': {
 				if (s.selectedFrom == null) break;
 				if (!s.map.adj[s.selectedFrom].includes(gridId)) { s.message = 'Not adjacent.'; break; }
+				if (wallBetween(s.map, s.selectedFrom, gridId)) { s.message = 'A wall blocks that edge.'; break; }
 				if (s.states[gridId].owner !== s.current) { s.message = 'Must be your territory.'; break; }
 				s.selectedTo = gridId;
 				s.pendingArmies = 1;
 				s.phase = 'move_qty';
 				s.message = 'Choose how many to move, then confirm. Moving ends your turn.';
-				break;
-			}
-			case 'bomb_select': {
-				const target = s.states[gridId];
-				if (!target.owner || target.owner === s.current) { s.message = 'Bomb an enemy territory.'; break; }
-				resolveBomb(s, gridId);
-				break;
-			}
-			case 'air_from': {
-				if (s.states[gridId].owner !== s.current) { s.message = 'Choose your own territory.'; break; }
-				if (s.states[gridId].armies < 2) { s.message = 'Need 2+ armies (1 must stay).'; break; }
-				s.selectedFrom = gridId;
-				s.phase = 'air_to';
-				s.message = 'Choose ANY of your territories as destination.';
-				break;
-			}
-			case 'air_to': {
-				if (s.selectedFrom == null) break;
-				if (s.states[gridId].owner !== s.current || gridId === s.selectedFrom) { s.message = 'Must be your territory.'; break; }
-				s.selectedTo = gridId;
-				s.pendingArmies = 1;
-				s.phase = 'air_qty';
-				s.message = 'Choose how many to airlift, then confirm.';
-				break;
-			}
-			case 'reinforce_select': {
-				if (s.states[gridId].owner !== s.current) { s.message = 'Pick one of your territories.'; break; }
-				s.states[gridId].armies += 3;
-				const idx = (s as any)._pendingCardIdx as number;
-				consumeCard(s, idx);
-				delete (s as any)._pendingCardIdx;
-				log(s, `${PLAYER_NAMES[s.current]} reinforced ${gridLabel(s, gridId)} (+3 armies).`, 'card');
-				s.phase = 'action';
-				s.message = 'Attack, move, or pass.';
-				break;
-			}
-			case 'sabotage_select': {
-				if (!s.states[gridId].owner || s.states[gridId].owner === s.current) { s.message = 'Sabotage an enemy territory.'; break; }
-				const g = s.states[gridId];
-				const before = g.armies;
-				g.armies = Math.max(1, Math.floor(g.armies / 2));
-				const idx = (s as any)._pendingCardIdx as number;
-				consumeCard(s, idx);
-				delete (s as any)._pendingCardIdx;
-				log(s, `${PLAYER_NAMES[s.current]} sabotaged ${gridLabel(s, gridId)}: ${before} → ${g.armies} armies.`, 'card');
-				s.phase = 'action';
-				s.message = 'Attack, move, or pass.';
-				break;
-			}
-			case 'fortify_select': {
-				if (s.states[gridId].owner !== s.current) { s.message = 'Fortify one of your territories.'; break; }
-				if (s.states[gridId].fortified) { s.message = 'Already fortified.'; break; }
-				s.states[gridId].fortified = true;
-				const idx = (s as any)._pendingCardIdx as number;
-				consumeCard(s, idx);
-				delete (s as any)._pendingCardIdx;
-				log(s, `${PLAYER_NAMES[s.current]} fortified ${gridLabel(s, gridId)} (+2 defense).`, 'card');
-				s.phase = 'action';
-				s.message = 'Attack, move, or pass.';
-				break;
-			}
-			case 'rampart_select': {
-				if (s.states[gridId].owner !== s.current) { s.message = 'Raise a rampart on one of your territories.'; break; }
-				if (s.states[gridId].rampart) { s.message = 'Already has a rampart.'; break; }
-				s.states[gridId].rampart = true;
-				const idx = (s as any)._pendingCardIdx as number;
-				consumeCard(s, idx);
-				delete (s as any)._pendingCardIdx;
-				log(s, `${PLAYER_NAMES[s.current]} raised a rampart on ${gridLabel(s, gridId)} (+1 defense).`, 'card');
-				s.phase = 'action';
-				s.message = 'Attack, move, or pass.';
-				break;
-			}
-			case 'ferry_from': {
-				if (s.states[gridId].owner !== s.current) { s.message = 'Choose one of your territories.'; break; }
-				s.selectedFrom = gridId;
-				s.phase = 'ferry_to';
-				s.message = 'Ferry: choose the second of your territories (must not be already connected).';
-				break;
-			}
-			case 'ferry_to': {
-				if (s.selectedFrom == null) break;
-				if (s.states[gridId].owner !== s.current || gridId === s.selectedFrom) { s.message = 'Choose a different territory of yours.'; break; }
-				if (!canFerryConnect(s, s.selectedFrom, gridId)) { s.message = 'Ferry needs a straight-line water path — no islands in between.'; break; }
-				const laneExists = s.map.seaLanes.some(
-					([x, y]) => (x === s.selectedFrom && y === gridId) || (x === gridId && y === s.selectedFrom)
-				);
-				if (laneExists) { s.message = 'A ferry route already exists there.'; break; }
-				// Establish a permanent sea lane between the two hexes.
-				s.map.seaLanes.push([s.selectedFrom, gridId]);
-				if (!s.map.adj[s.selectedFrom].includes(gridId)) s.map.adj[s.selectedFrom].push(gridId);
-				if (!s.map.adj[gridId].includes(s.selectedFrom)) s.map.adj[gridId].push(s.selectedFrom);
-				const idx = (s as any)._pendingCardIdx as number;
-				consumeCard(s, idx);
-				delete (s as any)._pendingCardIdx;
-				log(s, `${PLAYER_NAMES[s.current]} opened a ferry route: ${gridLabel(s, s.selectedFrom)} ↔ ${gridLabel(s, gridId)}.`, 'card');
-				s.phase = 'action';
-				s.selectedFrom = null;
-				s.selectedTo = null;
-				s.message = 'Attack, move, or pass.';
-				break;
-			}
-			case 'invasion_from': {
-				if (s.states[gridId].owner !== s.current) { s.message = 'Launch from one of your territories.'; break; }
-				if (s.states[gridId].armies < 2) { s.message = 'Need at least 2 armies to invade.'; break; }
-				s.selectedFrom = gridId;
-				s.phase = 'invasion_to';
-				s.message = 'Water Invasion: choose an enemy territory with a straight-line water path.';
-				break;
-			}
-			case 'invasion_to': {
-				if (s.selectedFrom == null) break;
-				if (!canInvasionConnect(s, s.selectedFrom, gridId)) { s.message = 'No clear water path — invasion needs open sea.'; break; }
-				// Open a TEMPORARY sea lane and immediately begin an attack.
-				s.map.seaLanes.push([s.selectedFrom, gridId]);
-				s.map.adj[s.selectedFrom].push(gridId);
-				s.map.adj[gridId].push(s.selectedFrom);
-				s.pendingInvasionLane = [s.selectedFrom, gridId];
-				const idx = (s as any)._pendingCardIdx as number;
-				consumeCard(s, idx);
-				delete (s as any)._pendingCardIdx;
-				log(s, `${PLAYER_NAMES[s.current]} launched a Water Invasion: ${gridLabel(s, s.selectedFrom)} → ${gridLabel(s, gridId)}.`, 'card');
-				// Slip directly into the rolling phase.
-				s.selectedTo = gridId;
-				s.phase = 'attack_rolling';
-				s.message = 'Invasion — rolling…';
-				break;
-			}
-			case 'deforest_select': {
-				if (s.map.grids[gridId].terrain !== 'forest') { s.message = 'Pick a forest hex.'; break; }
-				s.map.grids[gridId].terrain = 'plain';
-				const idx = (s as any)._pendingCardIdx as number;
-				consumeCard(s, idx);
-				delete (s as any)._pendingCardIdx;
-				log(s, `${PLAYER_NAMES[s.current]} cleared the forest at ${gridLabel(s, gridId)}.`, 'card');
-				s.phase = 'action';
-				s.message = 'Attack, move, or pass.';
-				break;
-			}
-			case 'oasis_select': {
-				if (s.map.grids[gridId].terrain !== 'desert') { s.message = 'Pick a desert hex.'; break; }
-				if (s.states[gridId].owner !== s.current) { s.message = 'Oasis only works on a desert you control.'; break; }
-				s.map.grids[gridId].terrain = 'plain';
-				const idx = (s as any)._pendingCardIdx as number;
-				consumeCard(s, idx);
-				delete (s as any)._pendingCardIdx;
-				log(s, `${PLAYER_NAMES[s.current]} irrigated the desert at ${gridLabel(s, gridId)}.`, 'card');
-				s.phase = 'action';
-				s.message = 'Attack, move, or pass.';
-				break;
-			}
-			case 'storm_from': {
-				const hasLane = s.map.seaLanes.some(([a, b]) => a === gridId || b === gridId);
-				if (!hasLane) { s.message = 'Pick a hex that anchors a sea route.'; break; }
-				s.selectedFrom = gridId;
-				s.phase = 'storm_to';
-				s.message = 'Storm: click the other end of the sea route to destroy.';
-				break;
-			}
-			case 'storm_to': {
-				if (s.selectedFrom == null) break;
-				const laneIdx = s.map.seaLanes.findIndex(
-					([a, b]) => (a === s.selectedFrom && b === gridId) || (a === gridId && b === s.selectedFrom)
-				);
-				if (laneIdx < 0) { s.message = 'No sea route between those hexes.'; break; }
-				s.map.seaLanes.splice(laneIdx, 1);
-				s.map.adj[s.selectedFrom] = s.map.adj[s.selectedFrom].filter((n) => n !== gridId);
-				s.map.adj[gridId] = s.map.adj[gridId].filter((n) => n !== s.selectedFrom);
-				const idx = (s as any)._pendingCardIdx as number;
-				consumeCard(s, idx);
-				delete (s as any)._pendingCardIdx;
-				log(s, `${PLAYER_NAMES[s.current]} summoned a Storm — sea route ${gridLabel(s, s.selectedFrom)} ↔ ${gridLabel(s, gridId)} destroyed.`, 'card');
-				s.phase = 'action';
-				s.selectedFrom = null;
-				s.selectedTo = null;
-				s.message = 'Attack, move, or pass.';
-				break;
-			}
-			case 'artillery_from': {
-				if (s.states[gridId].owner !== s.current) { s.message = 'Bombard from one of your territories.'; break; }
-				if (!s.map.grids[gridId].production) { s.message = 'Artillery only fires from a city ★.'; break; }
-				if (s.states[gridId].armies < 2) { s.message = 'Need at least 2 armies to man the guns.'; break; }
-				s.selectedFrom = gridId;
-				s.phase = 'artillery_to';
-				s.message = 'Artillery: click a target within 2 hexes (any owner but yours).';
-				break;
-			}
-			case 'artillery_to': {
-				if (s.selectedFrom == null) break;
-				if (!canArtilleryTarget(s, s.selectedFrom, gridId)) { s.message = 'Target must be an enemy/neutral hex within 2 steps.'; break; }
-				const target = s.states[gridId];
-				const defenderBefore = target.armies;
-				const defBonus = defenseBonus(s, gridId);
-				const forestBonus = attackerBonus(s, gridId); // forest cover helps attacker even here
-				let hits = 0;
-				const ARTILLERY_SHOTS = 4;
-				for (let shot = 1; shot <= ARTILLERY_SHOTS && target.armies > 0; shot++) {
-					const atk = rollDie() + forestBonus;
-					const def = rollDie() + defBonus;
-					devLog({
-						type: 'artillery_shot',
-						game_id: devLogGameId,
-						turn: s.turn,
-						actor: s.current,
-						from: s.selectedFrom,
-						to: gridId,
-						shot,
-						dice_atk: atk,
-						dice_def: def,
-						atk_bonus: forestBonus,
-						def_bonus: defBonus,
-						hit: atk > def
-					});
-					if (atk > def) {
-						target.armies -= 1;
-						hits++;
-					}
-				}
-				let ownershipMsg = '';
-				if (target.armies <= 0) {
-					// Target reduced to zero — becomes neutral (artillery doesn't
-					// itself take the hex, only damages it).
-					target.owner = null;
-					target.armies = 0;
-					target.fortified = false;
-					target.rampart = false;
-					ownershipMsg = ' Territory abandoned.';
-				}
-				const idx = (s as any)._pendingCardIdx as number;
-				consumeCard(s, idx);
-				delete (s as any)._pendingCardIdx;
-				const modTxt: string[] = [];
-				if (defBonus > 0) modTxt.push(`+${defBonus} def`);
-				if (forestBonus > 0) modTxt.push(`+${forestBonus} atk`);
-				const modStr = modTxt.length ? ` (${modTxt.join(', ')})` : '';
-				log(s, `${PLAYER_NAMES[s.current]} shelled ${gridLabel(s, gridId)}: ${hits}/${ARTILLERY_SHOTS} hits${modStr}, ${defenderBefore} → ${target.armies} armies.${ownershipMsg}`, 'card');
-				updateAlive(s);
-				const gameOver = checkWin(s);
-				if (!gameOver) {
-					s.phase = 'action';
-					s.selectedFrom = null;
-					s.selectedTo = null;
-					s.message = 'Attack, move, or pass.';
-				}
 				break;
 			}
 		}
@@ -1718,6 +1731,8 @@ function consumeCard(s: GameState, idx: number) {
 	s.hands[s.current] = s.hands[s.current].filter((_, i) => i !== idx);
 	s.cardPlayedThisTurn = true;
 	s.stats[s.current].cardsPlayed++;
+	// Any pending selection is finished once the card is consumed.
+	delete (s as any)._pendingCardIdx;
 }
 
 export function playCard(idx: number) {
@@ -1731,161 +1746,29 @@ export function playCard(idx: number) {
 			return s;
 		}
 		devLogAction(s.current, { kind: 'play_card', card, index: idx }, s);
-		switch (card) {
-			case 'bonus5':
-			case 'bonus8':
-			case 'bonus15': {
-				if (s.phase !== 'placing') { s.message = 'Play bonus armies during placement.'; return s; }
-				const n = card === 'bonus5' ? 5 : card === 'bonus8' ? 8 : 15;
-				s.armiesToPlace += n;
-				consumeCard(s, idx);
-				log(s, `${PLAYER_NAMES[s.current]} played ${CARD_LABELS[card]} (+${n}).`, 'card');
-				s.message = `Place ${s.armiesToPlace} armies.`;
-				break;
-			}
-			case 'double': {
-				if (s.phase !== 'placing' || s.doubleActive) { s.message = 'Play Double during placement (once).'; return s; }
-				s.armiesToPlace *= 2;
-				s.doubleActive = true;
-				consumeCard(s, idx);
-				log(s, `${PLAYER_NAMES[s.current]} played Double! Placement doubled to ${s.armiesToPlace}.`, 'card');
-				s.message = `Place ${s.armiesToPlace} armies.`;
-				break;
-			}
-			case 'bomb': {
-				if (s.phase !== 'placing' && s.phase !== 'action') { s.message = 'Play Bomb during your turn.'; return s; }
-				s.phase = 'bomb_select';
-				s.selectedFrom = idx; // stash card index in selectedFrom for later
-				s.message = 'Bomb: click any enemy territory.';
-				break;
-			}
-			case 'air': {
-				if (s.phase !== 'action' && s.phase !== 'attack_select_from' && s.phase !== 'attack_select_to') {
-					s.message = 'Air Move during action phase.'; return s;
-				}
-				s.phase = 'air_from';
-				s.selectedFrom = null;
-				s.selectedTo = null;
-				// stash card index by temporarily marking; we'll delete on confirm
-				(s as any)._pendingCardIdx = idx;
-				s.message = 'Air Move: choose source (your territory, 2+ armies).';
-				break;
-			}
-			case 'antibomb':
-				s.message = 'Anti-Bomb is passive — it protects automatically.';
-				break;
-			case 'reinforce': {
-				if (s.phase !== 'placing' && s.phase !== 'action') { s.message = 'Play Reinforce during your turn.'; return s; }
-				s.phase = 'reinforce_select';
-				(s as any)._pendingCardIdx = idx;
-				s.message = 'Reinforce: click one of your territories to add 3 armies.';
-				break;
-			}
-			case 'elite': {
-				if (s.phase !== 'action' && s.phase !== 'attack_select_from' && s.phase !== 'attack_select_to') {
-					s.message = 'Play Elite Troops in action phase, before attacking.'; return s;
-				}
-				s.phase = 'action'; // exit any pending attack setup
-				s.selectedFrom = null;
-				s.selectedTo = null;
-				s.eliteAttackActive = true;
-				consumeCard(s, idx);
-				log(s, `${PLAYER_NAMES[s.current]} rallied Elite Troops (+2 attack next battle).`, 'card');
-				s.message = 'Elite Troops active. Attack now (+2 to each roll) — consumed by first attack.';
-				break;
-			}
-			case 'bridge': {
-				if (s.phase !== 'action' && s.phase !== 'attack_select_from' && s.phase !== 'attack_select_to') {
-					s.message = 'Play Bridge in action phase, before attacking.'; return s;
-				}
-				s.phase = 'action';
-				s.selectedFrom = null;
-				s.selectedTo = null;
-				s.bridgeAttackActive = true;
-				consumeCard(s, idx);
-				log(s, `${PLAYER_NAMES[s.current]} deployed a Bridge (cancels river bonus next attack).`, 'card');
-				s.message = 'Bridge active. Your next attack ignores the river-crossing defender bonus.';
-				break;
-			}
-			case 'sabotage': {
-				if (s.phase !== 'placing' && s.phase !== 'action') { s.message = 'Play Sabotage during your turn.'; return s; }
-				s.phase = 'sabotage_select';
-				(s as any)._pendingCardIdx = idx;
-				s.message = 'Sabotage: click any enemy territory to halve its armies.';
-				break;
-			}
-			case 'fortify': {
-				if (s.phase !== 'placing' && s.phase !== 'action') { s.message = 'Play Fortify during your turn.'; return s; }
-				s.phase = 'fortify_select';
-				(s as any)._pendingCardIdx = idx;
-				s.message = 'Fortify: click one of your territories to fortify it (+2 defense).';
-				break;
-			}
-			case 'rampart': {
-				if (s.phase !== 'placing' && s.phase !== 'action') { s.message = 'Play Rampart during your turn.'; return s; }
-				s.phase = 'rampart_select';
-				(s as any)._pendingCardIdx = idx;
-				s.message = 'Rampart: click one of your territories to reinforce it (+1 defense).';
-				break;
-			}
-			case 'ferry': {
-				if (s.phase !== 'placing' && s.phase !== 'action') { s.message = 'Play Ferry Route during your turn.'; return s; }
-				s.phase = 'ferry_from';
-				s.selectedFrom = null;
-				s.selectedTo = null;
-				(s as any)._pendingCardIdx = idx;
-				s.message = 'Ferry: choose the first of your territories to link by sea.';
-				break;
-			}
-			case 'invasion': {
-				if (s.phase !== 'action' && s.phase !== 'attack_select_from' && s.phase !== 'attack_select_to') {
-					s.message = 'Play Water Invasion in the action phase.'; return s;
-				}
-				s.phase = 'invasion_from';
-				s.selectedFrom = null;
-				s.selectedTo = null;
-				(s as any)._pendingCardIdx = idx;
-				s.message = 'Water Invasion: choose one of your territories to launch from (2+ armies).';
-				break;
-			}
-			case 'deforest': {
-				if (s.phase !== 'placing' && s.phase !== 'action') { s.message = 'Play Deforestation during your turn.'; return s; }
-				s.phase = 'deforest_select';
-				(s as any)._pendingCardIdx = idx;
-				s.message = 'Deforestation: click any forest hex to clear it.';
-				break;
-			}
-			case 'oasis': {
-				if (s.phase !== 'placing' && s.phase !== 'action') { s.message = 'Play Oasis during your turn.'; return s; }
-				s.phase = 'oasis_select';
-				(s as any)._pendingCardIdx = idx;
-				s.message = 'Oasis: click one of your desert hexes to convert it to plains.';
-				break;
-			}
-			case 'storm': {
-				if (s.phase !== 'placing' && s.phase !== 'action') { s.message = 'Play Storm during your turn.'; return s; }
-				s.phase = 'storm_from';
-				s.selectedFrom = null;
-				s.selectedTo = null;
-				(s as any)._pendingCardIdx = idx;
-				s.message = 'Storm: click one endpoint of the sea route you want to destroy.';
-				break;
-			}
-			case 'artillery': {
-				// Allow playing from action or from any of the attack-setup phases
-				// (auto-cancels the pending attack). Not allowed mid-roll.
-				if (s.phase !== 'action' && s.phase !== 'attack_select_from' && s.phase !== 'attack_select_to') {
-					s.message = 'Play Artillery in the action phase.';
-					return s;
-				}
-				s.phase = 'artillery_from';
-				s.selectedFrom = null;
-				s.selectedTo = null;
-				(s as any)._pendingCardIdx = idx;
-				s.message = 'Artillery: click one of your territories to bombard from (2+ armies).';
-				break;
-			}
+		const def = CARD_BY_ID[card];
+		if (def.passive) {
+			// Antibomb and friends work automatically; there's nothing to activate.
+			s.message = 'Anti-Bomb is passive — it protects automatically.';
+			return s;
 		}
+		if (!def.playableIn.includes(s.phase)) {
+			s.message = `You can't play ${def.label} right now.`;
+			return s;
+		}
+		if (def.onPlay) {
+			// Immediate card (boosters, flag-setters) — applies now.
+			def.onPlay(s, idx);
+			return s;
+		}
+		// Targeting card: stash the hand index and enter its first selection step.
+		// selectGrid() drives the rest via the registry (see PHASE_TO_STEP).
+		(s as any)._pendingCardIdx = idx;
+		s.selectedFrom = null;
+		s.selectedTo = null;
+		const first = def.steps![0];
+		s.phase = first.phase;
+		s.message = first.prompt;
 		return s;
 	});
 }
@@ -1919,9 +1802,7 @@ export function canArtilleryTarget(s: GameState, from: number, to: number): bool
 	return graphDist(s, from, to, 2) <= 2;
 }
 
-function resolveBomb(s: GameState, targetId: number) {
-	// The `selectedFrom` field carries the card-hand index we stashed in playCard()
-	const idx = s.selectedFrom!;
+function resolveBomb(s: GameState, targetId: number, idx: number) {
 	// Anti-bomb check on defender
 	const defender = s.states[targetId].owner!;
 	const defHand = s.hands[defender];
@@ -1943,6 +1824,61 @@ function resolveBomb(s: GameState, targetId: number) {
 	s.selectedFrom = null;
 	updateAlive(s);
 	checkWin(s);
+}
+
+function resolveArtillery(s: GameState, fromId: number, toId: number, idx: number) {
+	const target = s.states[toId];
+	const defenderBefore = target.armies;
+	const defBonus = defenseBonus(s, toId);
+	const forestBonus = attackerBonus(s, toId); // forest cover helps attacker even here
+	let hits = 0;
+	const ARTILLERY_SHOTS = 4;
+	for (let shot = 1; shot <= ARTILLERY_SHOTS && target.armies > 0; shot++) {
+		const atk = rollDie() + forestBonus;
+		const def = rollDie() + defBonus;
+		devLog({
+			type: 'artillery_shot',
+			game_id: devLogGameId,
+			turn: s.turn,
+			actor: s.current,
+			from: fromId,
+			to: toId,
+			shot,
+			dice_atk: atk,
+			dice_def: def,
+			atk_bonus: forestBonus,
+			def_bonus: defBonus,
+			hit: atk > def
+		});
+		if (atk > def) {
+			target.armies -= 1;
+			hits++;
+		}
+	}
+	let ownershipMsg = '';
+	if (target.armies <= 0) {
+		// Target reduced to zero — becomes neutral (artillery doesn't itself
+		// take the hex, only damages it).
+		target.owner = null;
+		target.armies = 0;
+		target.fortified = false;
+		target.rampart = false;
+		ownershipMsg = ' Territory abandoned.';
+	}
+	consumeCard(s, idx);
+	const modTxt: string[] = [];
+	if (defBonus > 0) modTxt.push(`+${defBonus} def`);
+	if (forestBonus > 0) modTxt.push(`+${forestBonus} atk`);
+	const modStr = modTxt.length ? ` (${modTxt.join(', ')})` : '';
+	log(s, `${PLAYER_NAMES[s.current]} shelled ${gridLabel(s, toId)}: ${hits}/${ARTILLERY_SHOTS} hits${modStr}, ${defenderBefore} → ${target.armies} armies.${ownershipMsg}`, 'card');
+	updateAlive(s);
+	const gameOver = checkWin(s);
+	if (!gameOver) {
+		s.phase = 'action';
+		s.selectedFrom = null;
+		s.selectedTo = null;
+		s.message = 'Attack, move, or pass.';
+	}
 }
 
 export function confirmAir(qty: number) {

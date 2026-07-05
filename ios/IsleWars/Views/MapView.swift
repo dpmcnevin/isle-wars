@@ -9,6 +9,10 @@ import SwiftUI
 /// trim; those flows are card-triggered and rarer than attack/move.
 struct MapView: View {
     let state: GameState
+    /// Grid ids the human can currently select, computed by the engine (see
+    /// GameViewModel.selectableHexes). Drives the white "selectable" glow so the
+    /// map never reimplements per-phase/per-card selection rules.
+    var selectableHexes: Set<Int> = []
     let onTapHex: (Int) -> Void
     let onDragAttack: (Int, Int) -> Void
     let onDragMove: (Int, Int) -> Void
@@ -49,6 +53,7 @@ struct MapView: View {
                     drawSeaLanes(context: context, transform: transform)
                     drawTerritories(context: context, transform: transform)
                     drawRivers(context: context, transform: transform)
+                    drawWalls(context: context, transform: transform)
                     drawBadgesAndLabels(context: context, transform: transform)
                     drawDragArrowIfNeeded(context: context, transform: transform)
                 }
@@ -183,53 +188,11 @@ struct MapView: View {
         return HexStroke(color: MapColors.outline, width: 2, glow: nil)
     }
 
-    /// Which hexes the current human player can currently act on, matching the
-    /// web app's `isSelectable`. Drives the white "selectable" glow. The rarer
-    /// connect-based card `*_to` phases (ferry/invasion/artillery) fall through
-    /// to no highlight rather than reimplementing their reachability helpers.
+    /// Which hexes the current human player can act on, from the engine's
+    /// single selection authority (covers every core phase and card targeting
+    /// rule). Drives the white "selectable" glow.
     private func isSelectable(_ id: Int) -> Bool {
-        guard state.current == .human,
-              states.indices.contains(id), map.grids.indices.contains(id) else { return false }
-        let st = states[id]
-        let owner = st.owner
-        let armies = st.armies
-        let from = state.selectedFrom
-        let grid = map.grids[id]
-        func adjToFrom() -> Bool {
-            guard let from, map.adj.indices.contains(from) else { return false }
-            return map.adj[from].contains(id)
-        }
-        switch state.phase {
-        case .placing:
-            return owner == .human
-        case .attackSelectFrom, .moveSelectFrom, .airFrom, .invasionFrom:
-            return owner == .human && armies >= 2
-        case .attackSelectTo:
-            return from != nil && adjToFrom() && owner != .human
-        case .moveSelectTo:
-            return from != nil && adjToFrom() && owner == .human
-        case .airTo:
-            return owner == .human && id != from
-        case .bombSelect, .sabotageSelect:
-            return owner != nil && owner != .human
-        case .reinforceSelect, .fortifySelect, .rampartSelect, .ferryFrom:
-            return owner == .human
-        case .ferryTo:
-            return from != nil && owner == .human && id != from
-        case .artilleryFrom:
-            return owner == .human && armies >= 2 && grid.production
-        case .deforestSelect:
-            return grid.terrain == .forest
-        case .oasisSelect:
-            return grid.terrain == .desert && owner == state.current
-        case .stormFrom:
-            return map.seaLanes.contains { $0.contains(id) }
-        case .stormTo:
-            guard let from else { return false }
-            return map.seaLanes.contains { $0.count == 2 && (($0[0] == from && $0[1] == id) || ($0[0] == id && $0[1] == from)) }
-        default:
-            return false
-        }
+        state.current == .human && selectableHexes.contains(id)
     }
 
     private func drawRivers(context: GraphicsContext, transform: MapTransform) {
@@ -255,6 +218,41 @@ struct MapView: View {
             for (color, width) in layers {
                 context.stroke(path, with: .color(color), style: StrokeStyle(lineWidth: width, lineCap: .round, lineJoin: .round))
             }
+        }
+    }
+
+    /// True if a Wall barrier sits on the shared edge between two hexes.
+    private func wallBetween(_ a: Int, _ b: Int) -> Bool {
+        guard let walls = map.walls else { return false }
+        let lo = min(a, b), hi = max(a, b)
+        return walls.contains { $0.count == 2 && $0[0] == lo && $0[1] == hi }
+    }
+
+    /// The two vertices shared by two adjacent hexes — the edge a wall sits on.
+    private func sharedEdge(_ a: Int, _ b: Int) -> (Point, Point)? {
+        guard map.grids.indices.contains(a), map.grids.indices.contains(b) else { return nil }
+        func key(_ p: Point) -> String { "\(Int((p.x * 10).rounded())),\(Int((p.y * 10).rounded()))" }
+        let bKeys = Set(map.grids[b].cell.map(key))
+        let shared = map.grids[a].cell.filter { bKeys.contains(key($0)) }
+        guard shared.count == 2 else { return nil }
+        return (shared[0], shared[1])
+    }
+
+    /// Stone slab straddling the shared hex edge — the visual for a wall that
+    /// blocks movement and attacks across it (mirrors the web `wallSegments`).
+    private func drawWalls(context: GraphicsContext, transform: MapTransform) {
+        guard let walls = map.walls, !walls.isEmpty else { return }
+        for wall in walls where wall.count == 2 {
+            guard let (a, b) = sharedEdge(wall[0], wall[1]) else { continue }
+            var path = Path()
+            path.move(to: transform.point(a))
+            path.addLine(to: transform.point(b))
+            context.stroke(path, with: .color(Color(red: 0.17, green: 0.15, blue: 0.13)),
+                           style: StrokeStyle(lineWidth: 13, lineCap: .round))
+            context.stroke(path, with: .color(Color(red: 0.60, green: 0.56, blue: 0.51)),
+                           style: StrokeStyle(lineWidth: 9, lineCap: .round))
+            context.stroke(path, with: .color(Color(red: 0.29, green: 0.26, blue: 0.23)),
+                           style: StrokeStyle(lineWidth: 9, lineCap: .butt, dash: [2, 9]))
         }
     }
 
@@ -316,7 +314,7 @@ struct MapView: View {
                 context.draw(Text("🛡").font(.system(size: 13 * scale)), at: CGPoint(x: center.x - 24 * scale, y: center.y - 16 * scale))
             }
             if st.rampart == true {
-                context.draw(Text("🧱").font(.system(size: 12 * scale)), at: CGPoint(x: center.x - 24 * scale, y: center.y + 18 * scale))
+                context.draw(Text("🏰").font(.system(size: 12 * scale)), at: CGPoint(x: center.x - 24 * scale, y: center.y + 18 * scale))
             }
             if grid.production {
                 context.draw(Text("★").font(.system(size: 14 * scale)).foregroundStyle(MapColors.cityGold), at: CGPoint(x: center.x + 26 * scale, y: center.y - 17 * scale))
@@ -371,12 +369,12 @@ struct MapView: View {
 
     private var attackCandidateSet: Set<Int> {
         guard let from = dragFrom, map.adj.indices.contains(from) else { return [] }
-        return Set(map.adj[from].filter { states.indices.contains($0) && states[$0].owner != state.current })
+        return Set(map.adj[from].filter { states.indices.contains($0) && states[$0].owner != state.current && !wallBetween(from, $0) })
     }
 
     private var moveCandidateSet: Set<Int> {
         guard let from = dragFrom, map.adj.indices.contains(from) else { return [] }
-        return Set(map.adj[from].filter { $0 != from && states.indices.contains($0) && states[$0].owner == state.current })
+        return Set(map.adj[from].filter { $0 != from && states.indices.contains($0) && states[$0].owner == state.current && !wallBetween(from, $0) })
     }
 
     private func dragActionKind(from: Int, hover: Int?) -> DragActionKind {
@@ -390,6 +388,7 @@ struct MapView: View {
         }
         guard let hover, hover != from, map.adj.indices.contains(from), map.adj[from].contains(hover) else { return .invalid }
         guard states.indices.contains(hover) else { return .invalid }
+        if wallBetween(from, hover) { return .invalid }
         if states[hover].owner == state.current { return .move }
         return .attack
     }
@@ -451,7 +450,7 @@ struct MapView: View {
                     return
                 }
                 guard let to, to != from, map.adj.indices.contains(from), map.adj[from].contains(to),
-                      states.indices.contains(to) else { return }
+                      states.indices.contains(to), !wallBetween(from, to) else { return }
                 if states[to].owner == state.current {
                     onDragMove(from, to)
                 } else {
