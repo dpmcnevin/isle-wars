@@ -354,6 +354,32 @@ export const CARD_DEFS: CardDef[] = [
 			log(s, `${PLAYER_NAMES[s.current]} built a wall between ${gridLabel(s, from)} and ${gridLabel(s, to)}.`, 'card');
 			s.phase = 'action'; s.selectedFrom = null; s.selectedTo = null; s.message = 'Attack, move, or pass.';
 		}
+	},
+	{
+		id: 'breach', label: 'Breach', icon: '🔨', kind: 'attack', weight: 1,
+		when: 'Placement or Action phase',
+		desc: 'Demolish a wall on an edge of a hex you occupy — reopening it to movement and attacks (both ways). You must own one side of the wall.',
+		playableIn: TURN,
+		steps: [
+			{ phase: 'breach_from', prompt: 'Breach: click one of your territories that has a wall on one of its edges.',
+				check: (s, id) => {
+					if (s.states[id].owner !== s.current) return 'Breach a wall from a hex you occupy.';
+					return (s.map.walls ?? []).some(([a, b]) => a === id || b === id)
+						? null : 'None of this hex’s edges has a wall.';
+				} },
+			{ phase: 'breach_to', prompt: 'Breach: click the hex on the other side of the wall to tear it down.',
+				check: (s, id, from) => {
+					if (id === from) return 'Pick the hex on the other side of the wall.';
+					return wallBetween(s.map, from as number, id) ? null : 'There is no wall on that edge.';
+				} }
+		],
+		onResolve: (s, [from, to], idx) => {
+			const lo = Math.min(from, to), hi = Math.max(from, to);
+			s.map.walls = (s.map.walls ?? []).filter(([a, b]) => !(a === lo && b === hi));
+			consumeCard(s, idx);
+			log(s, `${PLAYER_NAMES[s.current]} breached the wall between ${gridLabel(s, from)} and ${gridLabel(s, to)}.`, 'card');
+			s.phase = 'action'; s.selectedFrom = null; s.selectedTo = null; s.message = 'Attack, move, or pass.';
+		}
 	}
 ];
 

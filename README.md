@@ -84,15 +84,16 @@ non-passive card per turn**. Cards come in five flavours:
 | Kind | Cards |
 |---|---|
 | **Boost** | +5 / +8 / +15 Armies, Double (placement pool), Reinforce (+3 to a hex) |
-| **Attack** | Bomb, Sabotage, Elite Troops, Bridge, Water Invasion, Artillery |
+| **Attack** | Bomb, Sabotage, Elite Troops, Bridge, Water Invasion, Artillery, Breach |
 | **Defense** | Fortify (+2), Rampart (+1), Wall (seal an edge), Anti-Bomb (passive) |
 | **Movement** | Air Move (fly armies anywhere you own), Ferry Route |
 | **Terrain** | Deforestation, Oasis, Storm |
 
 A few highlights: **Bomb** destroys 3–7 armies on any enemy hex (**Anti-Bomb**
 auto-absorbs it); **Sabotage** halves a hex; **Artillery** bombards up to 2 hexes
-from a city without risking your own troops; **Air Move** ignores adjacency but
-ends your turn.
+from a city without risking your own troops (and arcs *over* walls); **Breach**
+tears down a wall on an edge you occupy, reopening it; **Air Move** ignores
+adjacency but ends your turn.
 
 See **[docs/CARDS.md](docs/CARDS.md)** for the full card reference and the (very
 short) recipe for adding new cards.

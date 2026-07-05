@@ -55,7 +55,8 @@ export type CardType =
 	| 'bridge'
 	| 'oasis'
 	| 'rampart'
-	| 'wall';
+	| 'wall'
+	| 'breach';
 
 // Re-export the card registry's public surface so consumers keep importing it
 // from '$lib/game'. The definitions themselves live in ./cards.
@@ -100,6 +101,8 @@ export type Phase =
 	| 'rampart_select'
 	| 'wall_from'
 	| 'wall_to'
+	| 'breach_from'
+	| 'breach_to'
 	| 'discard'
 	| 'game_over';
 

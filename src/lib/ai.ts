@@ -14,6 +14,8 @@ import {
 	endTurn,
 	forceEndTurn,
 	playCard,
+	canInvasionConnect,
+	hasClearWaterPath,
 	type Player,
 	type CardType,
 	type GameState
@@ -58,7 +60,7 @@ export async function runAiTurn(p: Player, tickMs = 90) {
 		const phase = get(game).phase;
 		if (phase === 'attack_rolling') {
 			let rolls = 0;
-			while (get(game).phase === 'attack_rolling' && rolls++ < 500) {
+			while (get(game).phase === 'attack_rolling' && rolls++ < 20000) {
 				rollAttack();
 				const s2 = get(game);
 				if (s2.phase === 'attack_rolling' && s2.selectedFrom != null && s2.selectedTo != null) {
@@ -73,15 +75,17 @@ export async function runAiTurn(p: Player, tickMs = 90) {
 			const from = s.states[s.selectedFrom!];
 			confirmMoveInAfterConquest(Math.max(0, Math.floor(from.armies / 2)));
 		}
+		// Cancel ANY leftover card-targeting/selection phase so the turn doesn't
+		// start wedged. Listing individual phases here is a maintenance trap — a
+		// new card's steps (e.g. wall_from, breach_from) would be missed and the
+		// turn would return early below without ever ending, deadlocking the AI.
+		// So we cancel everything except the phases the code above already handled
+		// (roll/move-in) or that runAiTurn proceeds from normally (placing/action)
+		// or that resolve elsewhere (discard/game_over).
 		const p2 = get(game).phase;
 		if (
-			p2 === 'attack_select_from' || p2 === 'attack_select_to' ||
-			p2 === 'move_select_from' || p2 === 'move_select_to' || p2 === 'move_qty' ||
-			p2 === 'bomb_select' || p2 === 'air_from' || p2 === 'air_to' || p2 === 'air_qty' ||
-			p2 === 'reinforce_select' || p2 === 'sabotage_select' || p2 === 'fortify_select' ||
-			p2 === 'rampart_select' ||
-			p2 === 'ferry_from' || p2 === 'ferry_to' || p2 === 'invasion_from' || p2 === 'invasion_to' ||
-			p2 === 'deforest_select' || p2 === 'oasis_select' || p2 === 'storm_from' || p2 === 'storm_to'
+			p2 !== 'placing' && p2 !== 'action' && p2 !== 'discard' && p2 !== 'game_over' &&
+			p2 !== 'attack_rolling' && p2 !== 'attack_move_in'
 		) {
 			cancelAction();
 		}
@@ -96,14 +100,34 @@ export async function runAiTurn(p: Player, tickMs = 90) {
 		return;
 	}
 
-	// --- Card play during placement (one per turn — highest-value wins) ---
-	tryPlayCardPlacement(p);
-	if (!synchronousAi) await wait();
+	// --- Water-invasion planning ---
+	// If the only way to reach a holdout enemy is an amphibious assault, we may
+	// need to hold our card for it and/or funnel armies to the launch hex first.
+	// Compute the plan once up front. `staging` means we're dominant, a plan
+	// exists, and its launch hex isn't yet strong enough to win the assault.
+	const invasionPlan = bestInvasionPlan(get(game), p);
+	const staging = invasionPlan != null && !invasionPlan.ready && isDominant(get(game), p);
 
-	// --- Placement ---
+	// --- Card play during placement (one per turn — highest-value wins) ---
+	// If a Water Invasion is ready (or we're staging toward one), save our one
+	// card for it: a territory capture — often the closing blow against a
+	// water-locked opponent — outranks routine placement/defense cards. Without
+	// this the AI keeps spending its card on fortify/rampart and stalls a hex
+	// short of victory.
+	const holdCardForInvasion =
+		get(game).hands[p].includes('invasion') && invasionPlan != null && (invasionPlan.ready || staging);
+	if (!holdCardForInvasion) {
+		tryPlayCardPlacement(p);
+		if (!synchronousAi) await wait();
+	}
+
+	// --- Placement --- When staging for an invasion, pile every reinforcement
+	// onto the launch hex so it climbs toward a winning force; otherwise reinforce
+	// the front. (Income staging works even across water, since placement only
+	// needs to own the hex — so a launch site on its own islet still fills up.)
 	while (get(game).phase === 'placing' && get(game).current === p) {
 		const s = get(game);
-		const target = pickPlacementTarget(s, p);
+		const target = staging ? invasionPlan!.from : pickPlacementTarget(s, p);
 		if (target == null) break;
 		// Place all remaining on best target (simple but decisive)
 		placeArmies(target, s.armiesToPlace);
@@ -141,7 +165,7 @@ export async function runAiTurn(p: Player, tickMs = 90) {
 		// inside a single attack — otherwise a 100-vs-50 fight can take a
 		// minute of wall-clock time. High cap so the fight actually resolves.
 		let rolls = 0;
-		while (get(game).phase === 'attack_rolling' && rolls++ < 500) {
+		while (get(game).phase === 'attack_rolling' && rolls++ < 20000) {
 			rollAttack();
 			const s2 = get(game);
 			if (s2.phase === 'attack_rolling' && s2.selectedFrom != null && s2.selectedTo != null) {
@@ -165,16 +189,31 @@ export async function runAiTurn(p: Player, tickMs = 90) {
 		if (!synchronousAi) await wait();
 	}
 
+	// --- Water Invasion: reach an enemy hex that shares no land/sea-lane border
+	// with us — e.g. an opponent's last, water-locked territory — by opening a
+	// lane and storming across it. Without this the AI can stall one hex short of
+	// a win forever. It spends our one card for the turn, so it runs before the
+	// other action cards. ---
+	if (get(game).phase === 'action' && get(game).current === p) {
+		if (tryWaterInvasion(p) && !synchronousAi) await wait();
+	}
+
 	// --- Card play during action phase (bomb, elite, etc.) if we didn't
-	// already spend our card on placement.
+	// already spend our card on placement or a Water Invasion.
 	tryPlayCardAction(p);
 	if (!synchronousAi) await wait();
 
-	// --- Out of attacks: shift an idle rear stack toward the front rather
-	// than leaving it stranded in a corner. Moving ends the turn, so this
-	// replaces the plain "pass" below when it fires. ---
+	// --- Out of attacks: shift an idle rear stack forward. When we're staging a
+	// water invasion, march our biggest stack toward the launch hex so the
+	// assault force assembles faster than income alone would manage; otherwise
+	// just pull idle rear stacks toward the general front. Moving ends the turn,
+	// so this replaces the plain "pass" below when it fires. ---
 	if (get(game).phase === 'action' && get(game).current === p) {
-		if (tryRepositionStack(p)) {
+		const plan2 = bestInvasionPlan(get(game), p);
+		const moved = plan2 && !plan2.ready && isDominant(get(game), p)
+			? stageTowardLaunch(p, plan2.from)
+			: tryRepositionStack(p);
+		if (moved) {
 			if (!synchronousAi) await wait();
 			return;
 		}
@@ -202,6 +241,166 @@ export async function runAiTurn(p: Player, tickMs = 90) {
 		// drain above, which previously left the AI frozen mid-turn.
 		forceEndTurn();
 	}
+}
+
+// Roll the current attack (phase === 'attack_rolling') to a conclusion: keep
+// rolling until we conquer, or quit once the attacker no longer holds a clear
+// edge. Mirrors the inline logic in the main attack loop; reused by the
+// Water-Invasion path.
+function rollOutCurrentAttack() {
+	let rolls = 0;
+	while (get(game).phase === 'attack_rolling' && rolls++ < 20000) {
+		rollAttack();
+		const s = get(game);
+		if (s.phase === 'attack_rolling' && s.selectedFrom != null && s.selectedTo != null) {
+			const fromArm = s.states[s.selectedFrom].armies;
+			const toArm = s.states[s.selectedTo].armies;
+			if (fromArm <= toArm + 1 || fromArm < 3) { quitAttack(); break; }
+		}
+	}
+	if (get(game).phase === 'attack_move_in') {
+		const s = get(game);
+		const from = s.states[s.selectedFrom!];
+		confirmMoveInAfterConquest(Math.max(0, Math.floor(from.armies / 2)));
+	}
+}
+
+// How much of an army edge an amphibious assault needs to be worth launching.
+// The temporary invasion lane gives the DEFENDER +1, so the attacker only wins
+// ~36% of rounds and burns ~1.8 armies per defender killed. A ~2:1 stack wins
+// ~99% of the time (verified by simulation); below that it's a coin flip or a
+// loss. We add a small flat buffer so tiny garrisons still get a sane threshold.
+function invasionForceNeeded(defenderArmies: number): number {
+	return Math.ceil(defenderArmies * 2.1) + 5;
+}
+
+interface InvasionPlan { from: number; to: number; needed: number; ready: boolean; }
+// The best amphibious-closeout plan: an enemy hex we can't reach by land/sea-lane
+// at all, plus the strongest of our hexes that has a clear straight-water launch
+// line to it. `needed` is the force that launch hex must reach to win the assault
+// across the invasion lane; `ready` is whether it's already there. Prefer the
+// cheapest target (smallest garrison). Returns null if no enemy hex is reachable
+// only by water. This is how the AI closes out water-locked opponents — and, via
+// `needed`/`ready`, how it knows when to *stage* armies before committing.
+function bestInvasionPlan(s: GameState, p: Player): InvasionPlan | null {
+	let best: InvasionPlan | null = null;
+	let bestScore = -Infinity;
+	for (const t of s.map.grids) {
+		const st = s.states[t.id];
+		if (!st.owner || st.owner === p) continue; // enemy hexes only
+		// Skip anything we can already reach by land or an existing sea lane —
+		// those don't need an invasion, a normal attack will do.
+		if (s.map.adj[t.id].some((n) => s.states[n].owner === p)) continue;
+		// Our strongest hex with a clear straight-water line to the target becomes
+		// the launch (and staging) site.
+		let launch = -1, launchArm = -1;
+		for (const g of s.map.grids) {
+			if (s.states[g.id].owner !== p) continue;
+			if (s.states[g.id].armies < 2) continue;
+			if (s.map.adj[g.id].includes(t.id)) continue;
+			if (!hasClearWaterPath(s, g.id, t.id)) continue;
+			if (s.states[g.id].armies > launchArm) { launchArm = s.states[g.id].armies; launch = g.id; }
+		}
+		if (launch < 0) continue; // unreachable even by water — nothing we can do
+		const needed = invasionForceNeeded(st.armies);
+		const score = -st.armies; // cheapest garrison to crack first
+		if (score > bestScore) {
+			bestScore = score;
+			best = { from: launch, to: t.id, needed, ready: launchArm >= needed };
+		}
+	}
+	return best;
+}
+
+// Are we dominant enough that closing out a water-locked holdout should drive our
+// play? Used to gate *staging* (funnelling armies to a launch hex) so ordinary
+// mid-game maps — where transient water-locked hexes are common — aren't hijacked.
+function isDominant(s: GameState, p: Player): boolean {
+	let mine = 0, foes = 0;
+	for (const g of s.map.grids) {
+		const o = s.states[g.id].owner;
+		if (o === p) mine++;
+		else if (o) foes++;
+	}
+	return foes > 0 && mine >= (mine + foes) * 0.55;
+}
+
+// Play a Water Invasion when we hold the card and a launch hex is already strong
+// enough to win the assault. Returns true if we launched one (which spends our
+// card and resolves the attack). The temporary lane is cleaned up by the engine
+// if the attack fails.
+function tryWaterInvasion(p: Player): boolean {
+	const s = get(game);
+	if (s.cardPlayedThisTurn) return false;
+	const idx = s.hands[p].findIndex((c) => c === 'invasion');
+	if (idx < 0) return false;
+	const plan = bestInvasionPlan(s, p);
+	if (!plan || !plan.ready) return false;
+	playCard(idx);
+	if (get(game).phase !== 'invasion_from') { cancelAction(); return false; }
+	selectGrid(plan.from);
+	if (get(game).phase !== 'invasion_to') { cancelAction(); return false; }
+	selectGrid(plan.to);
+	// A successful launch drops straight into attack_rolling.
+	if (get(game).phase !== 'attack_rolling') { cancelAction(); return false; }
+	rollOutCurrentAttack();
+	return true;
+}
+
+// Stage for a future invasion: move our biggest reachable stack one hop toward
+// the launch hex, over our own territory. Mirrors `tryRepositionStack` but aims
+// at a specific destination (the launch site) instead of the general front. Only
+// used in dominant closeout positions. Returns true if a move was made (which
+// ends the turn).
+function stageTowardLaunch(p: Player, launch: number): boolean {
+	const s = get(game);
+	// BFS outward from the launch hex over our own territory to get each owned
+	// hex's distance to it.
+	const dist = new Map<number, number>();
+	dist.set(launch, 0);
+	const queue: number[] = [launch];
+	let qi = 0;
+	while (qi < queue.length) {
+		const cur = queue[qi++];
+		const d = dist.get(cur)!;
+		for (const n of s.map.adj[cur]) {
+			if (s.states[n].owner !== p || dist.has(n)) continue;
+			if (wallBetween(s.map, cur, n)) continue;
+			dist.set(n, d + 1);
+			queue.push(n);
+		}
+	}
+	// The hex (other than the launch site) whose armies × distance is largest —
+	// the most misplaced mass — is the one worth marching forward.
+	let bestFrom = -1, bestScore = -Infinity;
+	for (const g of s.map.grids) {
+		if (s.states[g.id].owner !== p) continue;
+		const d = dist.get(g.id);
+		if (!d) continue; // undefined (unreachable) or 0 (already the launch hex)
+		const armies = s.states[g.id].armies;
+		if (armies < 4) continue;
+		const score = armies * d;
+		if (score > bestScore) { bestScore = score; bestFrom = g.id; }
+	}
+	if (bestFrom < 0) return false;
+	// Step toward the launch hex: the friendly neighbour with the smallest dist.
+	const fromDist = dist.get(bestFrom)!;
+	let bestNeighbor = -1, bestNeighborDist = fromDist;
+	for (const n of s.map.adj[bestFrom]) {
+		if (s.states[n].owner !== p) continue;
+		if (wallBetween(s.map, bestFrom, n)) continue;
+		const nd = dist.get(n);
+		if (nd != null && nd < bestNeighborDist) { bestNeighborDist = nd; bestNeighbor = n; }
+	}
+	if (bestNeighbor < 0) return false;
+	const qty = Math.max(1, s.states[bestFrom].armies - 1);
+	beginMove();
+	selectGrid(bestFrom);
+	if (get(game).phase !== 'move_select_to') { cancelAction(); return false; }
+	selectGrid(bestNeighbor);
+	if (get(game).phase !== 'move_qty') { cancelAction(); return false; }
+	confirmMove(qty); // ends the turn
+	return true;
 }
 
 // Move a stranded rear stack one hop toward the nearest front-line hex
