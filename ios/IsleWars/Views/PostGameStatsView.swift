@@ -8,6 +8,8 @@ struct PostGameStatsView: View {
     let state: GameState
     let onNewGame: () -> Void
 
+    @State private var seedCopied = false
+
     private struct Point: Identifiable {
         let id = UUID()
         let turn: Int
@@ -43,9 +45,22 @@ struct PostGameStatsView: View {
 
                 statsTable
 
-                Button("New Game") { onNewGame() }
-                    .buttonStyle(.borderedProminent)
-                    .controlSize(.large)
+                HStack(spacing: 16) {
+                    Button {
+                        UIPasteboard.general.string = String(state.seed)
+                        seedCopied = true
+                    } label: {
+                        Label(seedCopied ? "Copied!" : "Copy Seed", systemImage: seedCopied ? "checkmark" : "doc.on.doc")
+                    }
+                    .buttonStyle(GameButtonStyle(kind: .secondary))
+
+                    Button("New Game") { onNewGame() }
+                        .buttonStyle(GameButtonStyle())
+                }
+
+                Text("Seed: \(state.seed)")
+                    .font(.caption).monospacedDigit()
+                    .foregroundStyle(.secondary)
             }
             .padding(32)
         }

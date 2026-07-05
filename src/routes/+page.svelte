@@ -454,6 +454,7 @@
 				return s.states[id].owner === HUMAN && id !== s.selectedFrom;
 			case 'reinforce_select':
 			case 'fortify_select':
+			case 'rampart_select':
 				return s.states[id].owner === HUMAN;
 			case 'sabotage_select':
 				return s.states[id].owner !== HUMAN && !!s.states[id].owner;
@@ -789,6 +790,12 @@
 				desc: '+2 defense on this hex. Lost when the hex is captured.'
 			});
 		}
+		if (st.rampart) {
+			modifiers.push({
+				name: '🧱 Rampart',
+				desc: '+1 defense on this hex. Lost when the hex is captured.'
+			});
+		}
 		return {
 			title,
 			owner,
@@ -835,6 +842,9 @@
 			<circle cx={cx} cy={cy} r={fortR1} fill="none" stroke="#7fcfff" stroke-width={3 * scale} stroke-dasharray="{6 * scale} {4 * scale}" opacity="0.95" />
 			<circle cx={cx} cy={cy} r={fortR2} fill="none" stroke="#7fcfff" stroke-width={1.5 * scale} opacity="0.55" />
 		{/if}
+		{#if st.rampart}
+			<circle cx={cx} cy={cy} r={(st.fortified ? 38 : 30) * scale} fill="none" stroke="#4fcf7f" stroke-width={2 * scale} opacity="0.85" />
+		{/if}
 		<circle cx={cx} cy={cy} r={badgeR} fill="#000" fill-opacity="0.6"
 			stroke={st.fortified ? '#7fcfff' : g.production ? '#ffe14a' : '#fff'}
 			stroke-width={(st.fortified ? 3 : g.production ? 2.5 : 1.5) * scale} />
@@ -844,6 +854,10 @@
 		{#if st.fortified}
 			<text x={cx - 18 * scale} y={cy - 14 * scale} text-anchor="middle"
 				font-size={16 * scale} style="filter: drop-shadow(0 0 {3 * scale}px #7fcfff);">🛡</text>
+		{/if}
+		{#if st.rampart}
+			<text x={cx - 18 * scale} y={cy + 24 * scale} text-anchor="middle"
+				font-size={14 * scale} style="filter: drop-shadow(0 0 {3 * scale}px #4fcf7f);">🧱</text>
 		{/if}
 		{#if g.production}
 			<text x={cx + 20 * scale} y={cy - 15 * scale} text-anchor="middle"
@@ -1196,7 +1210,7 @@
 					<p class="hint">Roll the dice in the attack modal.</p>
 				{/if}
 
-				{#if $game.current === HUMAN && ($game.phase === 'move_select_from' || $game.phase === 'move_select_to' || $game.phase === 'bomb_select' || $game.phase === 'air_from' || $game.phase === 'air_to' || $game.phase === 'reinforce_select' || $game.phase === 'sabotage_select' || $game.phase === 'fortify_select' || $game.phase === 'ferry_from' || $game.phase === 'ferry_to' || $game.phase === 'invasion_from' || $game.phase === 'invasion_to' || $game.phase === 'artillery_from' || $game.phase === 'artillery_to' || $game.phase === 'deforest_select' || $game.phase === 'oasis_select' || $game.phase === 'storm_from' || $game.phase === 'storm_to')}
+				{#if $game.current === HUMAN && ($game.phase === 'move_select_from' || $game.phase === 'move_select_to' || $game.phase === 'bomb_select' || $game.phase === 'air_from' || $game.phase === 'air_to' || $game.phase === 'reinforce_select' || $game.phase === 'sabotage_select' || $game.phase === 'fortify_select' || $game.phase === 'rampart_select' || $game.phase === 'ferry_from' || $game.phase === 'ferry_to' || $game.phase === 'invasion_from' || $game.phase === 'invasion_to' || $game.phase === 'artillery_from' || $game.phase === 'artillery_to' || $game.phase === 'deforest_select' || $game.phase === 'oasis_select' || $game.phase === 'storm_from' || $game.phase === 'storm_to')}
 					<div class="row">
 						<button onclick={cancelAction}>Cancel</button>
 					</div>
@@ -1379,6 +1393,7 @@
 		{@const atkB = attackerBonus($game, tgt)}
 		{@const eliteB = $game.eliteAttackActive ? 2 : 0}
 		{@const xBonus = crossingDefenseBonus($game, src, tgt)}
+		{@const isInvasion = $game.pendingInvasionLane != null && (($game.pendingInvasionLane[0] === src && $game.pendingInvasionLane[1] === tgt) || ($game.pendingInvasionLane[0] === tgt && $game.pendingInvasionLane[1] === src))}
 		{@const bridgeCancels = $game.bridgeAttackActive && $game.map.rivers.some(([a,b]) => (a===src && b===tgt) || (a===tgt && b===src))}
 		{@const wp = Math.round(winProbability(atkA, defA, defB, atkB + eliteB) * 100)}
 		<div class="attack-modal-backdrop" role="presentation">
@@ -1419,8 +1434,10 @@
 								{:else}
 									{#if g.terrain === 'mountain'}<li class="pos">+1 ⛰ mountain</li>{/if}
 									{#if st.fortified}<li class="pos">+2 🛡 fortified</li>{/if}
-									{#if xBonus === 2}<li class="pos">+2 ⚓ sea-lane crossing</li>{/if}
-									{#if xBonus === 1}<li class="pos">+1 💧 river crossing</li>{/if}
+									{#if st.rampart}<li class="pos">+1 🧱 rampart</li>{/if}
+									{#if isInvasion}<li class="pos">+1 ⚓ sea invasion</li>
+									{:else if xBonus === 2}<li class="pos">+2 ⚓ sea-lane crossing</li>
+									{:else if xBonus === 1}<li class="pos">+1 💧 river crossing</li>{/if}
 									{#if bridgeCancels}<li class="warn">🌉 Bridge cancels river bonus</li>{/if}
 									{#if g.terrain === 'forest'}<li class="warn">Forest — attacker gets +1</li>{/if}
 									{#if g.terrain === 'desert'}<li class="warn">Desert — heat burns 1 army when moving in</li>{/if}

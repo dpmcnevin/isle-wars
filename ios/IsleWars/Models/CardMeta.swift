@@ -41,6 +41,7 @@ extension CardType {
         case .artillery: CardMeta(kind: .attack, when: "Action phase (from a city ★)", desc: "Bombard any hex up to 2 steps away, launched from one of your cities. Roll four times — each hit removes one defender. Attackers never lose armies.")
         case .bridge: CardMeta(kind: .attack, when: "Action phase, before attacking", desc: "Bridge a river for your next attack — the defender loses the +1 river-crossing bonus. Consumed by the first attack.")
         case .oasis: CardMeta(kind: .terrain, when: "Placement or Action phase", desc: "Irrigate a desert hex you control, turning it back into plains. Removes the heat attrition.")
+        case .rampart: CardMeta(kind: .defense, when: "Placement or Action phase", desc: "Give one of your hexes a permanent +1 defense bonus. Stacks with Fortify. Lost when the hex is captured.")
         }
     }
 }

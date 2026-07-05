@@ -30,6 +30,62 @@ struct AttackModalView: View {
     private var eliteBonus: Int { state.eliteAttackActive ? 2 : 0 }
     private var totalAttackerBonus: Int { attackerTerrainBonus + eliteBonus }
 
+    // MARK: - Modifier breakdown (mirrors the web attack modal's per-side lists)
+
+    private var dieSides: Int { vm.debugSettings?.dieSides ?? 10 }
+    private var mountainBonus: Int { defenderGrid?.terrain == .mountain ? 1 : 0 }
+    private var fortifiedBonus: Int { defenderState?.fortified == true ? 2 : 0 }
+    private var rampartBonus: Int { defenderState?.rampart == true ? 1 : 0 }
+    /// True when this attack is the in-progress Water Invasion (crossing the
+    /// temporary lane), which grants only +1 defense rather than a sea lane's +2.
+    private var isInvasionCrossing: Bool {
+        guard let f = fromId, let t = toId, let lane = state.pendingInvasionLane, lane.count == 2 else { return false }
+        return (lane[0] == f && lane[1] == t) || (lane[0] == t && lane[1] == f)
+    }
+    /// Sea-lane (2) / river (1) crossing bonus — the same authoritative engine
+    /// call the web modal uses, rather than inferred from the total.
+    private var crossingBonus: Int {
+        guard let f = fromId, let t = toId else { return 0 }
+        return vm.crossingBonus(from: f, to: t)
+    }
+    private var isRiverCrossing: Bool {
+        guard let f = fromId, let t = toId else { return false }
+        return state.map.rivers.contains { $0.count == 2 && (($0[0] == f && $0[1] == t) || ($0[0] == t && $0[1] == f)) }
+    }
+    private var bridgeCancels: Bool { state.bridgeAttackActive && isRiverCrossing }
+
+    private enum ModStyle {
+        case bonus, warn, neutral
+        var color: Color {
+            switch self {
+            case .bonus: .green
+            case .warn: .orange
+            case .neutral: .secondary
+            }
+        }
+    }
+    private struct AttackMod: Identifiable { let id = UUID(); let text: String; let style: ModStyle }
+
+    private func modifiers(attacker: Bool) -> [AttackMod] {
+        var mods: [AttackMod] = [AttackMod(text: "Base die 1–\(dieSides)", style: .neutral)]
+        if attacker {
+            if attackerTerrainBonus > 0 { mods.append(.init(text: "+\(attackerTerrainBonus) 🌲 forest cover on target", style: .bonus)) }
+            if eliteBonus > 0 { mods.append(.init(text: "+\(eliteBonus) 🛡 Elite Troops", style: .bonus)) }
+            if attackerGrid?.terrain == .marsh { mods.append(.init(text: "🥾 Marsh — can't re-attack from here this turn", style: .warn)) }
+        } else {
+            if mountainBonus > 0 { mods.append(.init(text: "+1 ⛰ mountain", style: .bonus)) }
+            if fortifiedBonus > 0 { mods.append(.init(text: "+2 🛡 fortified", style: .bonus)) }
+            if rampartBonus > 0 { mods.append(.init(text: "+1 🧱 rampart", style: .bonus)) }
+            if isInvasionCrossing { mods.append(.init(text: "+1 ⚓ sea invasion", style: .bonus)) }
+            else if crossingBonus == 2 { mods.append(.init(text: "+2 ⚓ sea-lane crossing", style: .bonus)) }
+            else if crossingBonus == 1 { mods.append(.init(text: "+1 💧 river crossing", style: .bonus)) }
+            if bridgeCancels { mods.append(.init(text: "🌉 Bridge cancels river bonus", style: .warn)) }
+            if defenderGrid?.terrain == .forest { mods.append(.init(text: "🌲 Forest — attacker gets +1", style: .warn)) }
+            if defenderGrid?.terrain == .desert { mods.append(.init(text: "🏜 Desert — heat burns 1 army on move-in", style: .warn)) }
+        }
+        return mods
+    }
+
     private var winPct: Double {
         guard let atk = attackerState?.armies, let def = defenderState?.armies else { return 0.5 }
         return vm.winProbability(atkArmies: atk, defArmies: def, defenderBonus: defenderBonus, attackerBonus: totalAttackerBonus)
@@ -48,7 +104,7 @@ struct AttackModalView: View {
                 }
             }
             .padding(24)
-            .frame(maxWidth: 480)
+            .frame(maxWidth: 560)
             .background(RoundedRectangle(cornerRadius: 16).fill(.regularMaterial))
             .shadow(radius: 20)
         }
@@ -73,26 +129,23 @@ struct AttackModalView: View {
         VStack(spacing: 16) {
             Text("Attack").font(.title2).bold()
 
-            HStack(spacing: 24) {
-                hexPreview(title: "Attacker", grid: attackerGrid, gridState: attackerState, owner: attackerState?.owner)
-                Image(systemName: "arrow.right").font(.title)
-                hexPreview(title: "Defender", grid: defenderGrid, gridState: defenderState, owner: defenderState?.owner)
+            HStack(alignment: .top, spacing: 20) {
+                attackSide(title: "Attacker", grid: attackerGrid, gridState: attackerState, mods: modifiers(attacker: true))
+                Image(systemName: "arrow.right").font(.title).padding(.top, 38)
+                attackSide(title: "Defender", grid: defenderGrid, gridState: defenderState, mods: modifiers(attacker: false))
             }
 
             winProbabilityBar
-
-            modifiersList
 
             Text(state.message).font(.callout).foregroundStyle(.secondary).multilineTextAlignment(.center)
 
             HStack {
                 Button("Roll") { vm.rollAttack() }
-                    .buttonStyle(.borderedProminent)
+                    .buttonStyle(GameButtonStyle())
                 Button(autoRolling ? "Stop Auto" : "Auto-Roll") { autoRolling.toggle() }
-                    .buttonStyle(.bordered)
+                    .buttonStyle(GameButtonStyle(kind: .success))
                 Button("Quit Attack") { vm.quitAttack() }
-                    .buttonStyle(.bordered)
-                    .tint(.red)
+                    .buttonStyle(GameButtonStyle(kind: .danger))
             }
         }
     }
@@ -131,8 +184,8 @@ struct AttackModalView: View {
 
             if maxExtra > 0 {
                 HStack(spacing: 12) {
-                    Button("None") { moveInExtra = 0 }.buttonStyle(.bordered)
-                    Button("Max (\(maxExtra))") { moveInExtra = maxExtra }.buttonStyle(.bordered)
+                    Button("None") { moveInExtra = 0 }.buttonStyle(GameButtonStyle(kind: .secondary, small: true))
+                    Button("Max (\(maxExtra))") { moveInExtra = maxExtra }.buttonStyle(GameButtonStyle(kind: .secondary, small: true))
                 }
             }
 
@@ -140,7 +193,7 @@ struct AttackModalView: View {
                 vm.confirmMoveIn(moveInExtra)
                 moveInExtra = 0
             }
-            .buttonStyle(.borderedProminent)
+            .buttonStyle(GameButtonStyle())
         }
     }
 
@@ -155,9 +208,9 @@ struct AttackModalView: View {
                     production: grid.production,
                     fortified: gridState.fortified == true
                 )
-                .frame(width: 92, height: 83)
+                .frame(width: 124, height: 112)
             } else {
-                Color.clear.frame(width: 92, height: 83)
+                Color.clear.frame(width: 124, height: 112)
             }
             if let cityName = grid?.cityName {
                 Text(cityName).font(.caption2).italic().foregroundStyle(.secondary)
@@ -180,31 +233,7 @@ struct AttackModalView: View {
         }
     }
 
-    private var modifiersList: some View {
-        VStack(alignment: .leading, spacing: 2) {
-            if attackerTerrainBonus > 0 {
-                Label("+\(attackerTerrainBonus) attacker (forest)", systemImage: "leaf.fill").font(.caption)
-            }
-            if eliteBonus > 0 {
-                Label("+\(eliteBonus) attacker (elite troops)", systemImage: "bolt.fill").font(.caption)
-            }
-            if let terrain = defenderGrid?.terrain, terrain == .mountain {
-                Label("+1 defender (mountain)", systemImage: "mountain.2.fill").font(.caption)
-            }
-            if defenderState?.fortified == true {
-                Label("+2 defender (fortified)", systemImage: "shield.fill").font(.caption)
-            }
-            if state.bridgeAttackActive {
-                Label("Bridge active — river crossing bonus cancelled", systemImage: "figure.walk").font(.caption)
-            }
-            if defenderGrid?.terrain == .desert {
-                Label("Desert: attacker loses 1 extra army on conquest", systemImage: "sun.max.fill").font(.caption).foregroundStyle(.orange)
-            }
-        }
-        .frame(maxWidth: .infinity, alignment: .leading)
-    }
-
-    private func hexPreview(title: String, grid: Grid?, gridState: GridState?, owner: Player?) -> some View {
+    private func attackSide(title: String, grid: Grid?, gridState: GridState?, mods: [AttackMod]) -> some View {
         VStack(spacing: 4) {
             Text(title).font(.caption).foregroundStyle(.secondary)
             if let grid, let gridState {
@@ -215,16 +244,24 @@ struct AttackModalView: View {
                     production: grid.production,
                     fortified: gridState.fortified == true
                 )
-                .frame(width: 100, height: 90)
+                .frame(width: 138, height: 124)
             } else {
-                Color.clear.frame(width: 100, height: 90)
+                Color.clear.frame(width: 138, height: 124)
             }
-            Text(owner?.displayName ?? "Neutral")
+            Text(gridState?.owner?.displayName ?? "Neutral")
                 .font(.caption2)
-                .foregroundStyle(owner?.color ?? .secondary)
+                .foregroundStyle(gridState?.owner?.color ?? .secondary)
             if let cityName = grid?.cityName {
                 Text(cityName).font(.caption2).italic().foregroundStyle(.secondary)
             }
+            VStack(alignment: .leading, spacing: 2) {
+                ForEach(mods) { mod in
+                    Text(mod.text).font(.caption2).foregroundStyle(mod.style.color)
+                }
+            }
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .padding(.top, 4)
         }
+        .frame(width: 190)
     }
 }

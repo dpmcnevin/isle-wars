@@ -2,7 +2,7 @@ import Foundation
 
 enum CardType: String, Codable, CaseIterable {
     case air, bonus5, bonus8, bonus15, double, bomb, antibomb, reinforce, elite
-    case sabotage, fortify, ferry, invasion, deforest, storm, artillery, bridge, oasis
+    case sabotage, fortify, ferry, invasion, deforest, storm, artillery, bridge, oasis, rampart
 
     var label: String {
         switch self {
@@ -24,6 +24,7 @@ enum CardType: String, Codable, CaseIterable {
         case .artillery: "Artillery"
         case .bridge: "Bridge"
         case .oasis: "Oasis"
+        case .rampart: "Rampart (+1)"
         }
     }
 
@@ -47,6 +48,7 @@ enum CardType: String, Codable, CaseIterable {
         case .artillery: "💥"
         case .bridge: "🌉"
         case .oasis: "🌴"
+        case .rampart: "🧱"
         }
     }
 }

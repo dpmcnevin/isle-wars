@@ -212,7 +212,7 @@ struct MapView: View {
             return owner == .human && id != from
         case .bombSelect, .sabotageSelect:
             return owner != nil && owner != .human
-        case .reinforceSelect, .fortifySelect, .ferryFrom:
+        case .reinforceSelect, .fortifySelect, .rampartSelect, .ferryFrom:
             return owner == .human
         case .ferryTo:
             return from != nil && owner == .human && id != from
@@ -286,6 +286,15 @@ struct MapView: View {
                 )
             }
 
+            if st.rampart == true {
+                let rampR = (st.fortified == true ? 42 : 34) * scale
+                context.stroke(
+                    Path(ellipseIn: CGRect(x: center.x - rampR, y: center.y - rampR, width: rampR * 2, height: rampR * 2)),
+                    with: .color(AppTheme.successBorder.opacity(0.85)),
+                    lineWidth: 2 * scale
+                )
+            }
+
             let badgeR = 26 * scale
             let ringColor: Color = st.fortified == true ? MapColors.fortCyan : (grid.production ? MapColors.cityGold : .white)
             let ringWidth: CGFloat = (st.fortified == true ? 3 : grid.production ? 2.5 : 1.5) * scale
@@ -305,6 +314,9 @@ struct MapView: View {
 
             if st.fortified == true {
                 context.draw(Text("🛡").font(.system(size: 13 * scale)), at: CGPoint(x: center.x - 24 * scale, y: center.y - 16 * scale))
+            }
+            if st.rampart == true {
+                context.draw(Text("🧱").font(.system(size: 12 * scale)), at: CGPoint(x: center.x - 24 * scale, y: center.y + 18 * scale))
             }
             if grid.production {
                 context.draw(Text("★").font(.system(size: 14 * scale)).foregroundStyle(MapColors.cityGold), at: CGPoint(x: center.x + 26 * scale, y: center.y - 17 * scale))

@@ -4,6 +4,7 @@ struct GridState: Codable {
     let owner: Player?
     let armies: Int
     let fortified: Bool?
+    let rampart: Bool?
 }
 
 enum LogKind: String, Codable {

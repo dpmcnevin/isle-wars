@@ -38,7 +38,12 @@ import {
 	type GameState,
 	type Player
 } from '../../src/lib/game';
-import { runAiTurn } from '../../src/lib/ai';
+import { runAiTurn, setAiSynchronous } from '../../src/lib/ai';
+
+// The iOS JSContext has no real event loop, so cosmetic `await` pauses in the
+// AI turn can suspend and never resume (freezing the AI mid-turn). Run the AI
+// fully synchronously here — Swift owns all pacing/animation natively.
+setAiSynchronous(true);
 
 let latestState: GameState;
 game.subscribe((s) => {

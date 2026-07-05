@@ -10,58 +10,36 @@ struct ActionPanelView: View {
     let state: GameState
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 8) {
+        VStack(alignment: .trailing, spacing: 6) {
             Text(state.message)
-                .font(.callout)
+                .font(.caption)
                 .foregroundStyle(.secondary)
+                .lineLimit(2)
+                .multilineTextAlignment(.trailing)
+                .frame(maxWidth: 260, alignment: .trailing)
 
             switch state.phase {
-            case .placing:
-                Text("Armies to place: \(state.armiesToPlace)")
-                    .font(.headline)
-                Text("Tap one of your territories to place armies, or drag from a territory to attack/move.")
-                    .font(.caption)
-
             case .action:
-                HStack {
-                    Button("Attack") { vm.beginAttack() }
-                        .buttonStyle(.borderedProminent)
-                    Button("Move") { vm.beginMove() }
-                        .buttonStyle(.bordered)
-                    Button("Pass / End Turn") { vm.pass() }
-                        .buttonStyle(.bordered)
-                }
+                // Attack/move are done by dragging on the map, so this only
+                // needs the end-turn action.
+                Button("End Turn") { vm.pass() }
+                    .buttonStyle(GameButtonStyle(small: true))
 
-            case .attackSelectFrom, .attackSelectTo, .moveSelectFrom, .moveSelectTo:
-                Button("Cancel") { vm.cancelAction() }
-                    .buttonStyle(.bordered)
-
-            case .discard:
-                Text("Tap a card in your hand to discard.")
-                    .font(.caption)
-
-            case .gameOver:
-                if let winner = state.winner {
-                    Text("\(winner.displayName) wins!")
-                        .font(.title2).bold()
-                        .foregroundStyle(winner.color)
-                }
-
-            case .attackRolling, .attackMoveIn, .moveQty, .airQty:
-                EmptyView() // handled by AttackModalView / QuantityPickerSheet
+            case .placing, .attackRolling, .attackMoveIn, .moveQty, .airQty, .discard, .gameOver:
+                EmptyView() // guidance is in the message; modals handle the rest
 
             default:
                 Button("Cancel") { vm.cancelAction() }
-                    .buttonStyle(.bordered)
+                    .buttonStyle(GameButtonStyle(kind: .secondary, small: true))
             }
 
             if vm.isAiThinking {
                 HStack(spacing: 6) {
                     ProgressView().controlSize(.small)
-                    Text("\(state.current.displayName) is thinking…").font(.caption)
+                    Text("\(state.current.displayName) is thinking…").font(.caption2)
                 }
             }
         }
-        .padding()
+        .padding(10)
     }
 }

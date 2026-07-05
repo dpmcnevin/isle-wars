@@ -7,6 +7,7 @@ struct IsleWarsApp: App {
             ContentView()
                 .preferredColorScheme(.dark) // match the web app's dark navy theme
                 .tint(AppTheme.accent)
+                .statusBarHidden(true) // full-bleed map — reclaim the status-bar strip
         }
     }
 }

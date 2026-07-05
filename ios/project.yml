@@ -26,6 +26,8 @@ targets:
         INFOPLIST_KEY_UISupportedInterfaceOrientations: "UIInterfaceOrientationLandscapeLeft UIInterfaceOrientationLandscapeRight"
         INFOPLIST_KEY_UISupportedInterfaceOrientations~ipad: "UIInterfaceOrientationLandscapeLeft UIInterfaceOrientationLandscapeRight"
         INFOPLIST_KEY_UIRequiresFullScreen: true
+        INFOPLIST_KEY_UIStatusBarHidden: true
+        INFOPLIST_KEY_UIViewControllerBasedStatusBarAppearance: false
         GENERATE_INFOPLIST_FILE: true
         MARKETING_VERSION: "0.1.0"
         CURRENT_PROJECT_VERSION: "1"

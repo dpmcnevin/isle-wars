@@ -10,6 +10,9 @@ struct LogSlideOverView: View {
     let stats: [String: PlayerStats]
     let onClose: () -> Void
 
+    /// Live horizontal drag offset for swipe-to-dismiss (rightward only).
+    @State private var dragX: CGFloat = 0
+
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {
             HStack {
@@ -51,6 +54,23 @@ struct LogSlideOverView: View {
             Rectangle().frame(width: 1).foregroundStyle(AppTheme.border)
         }
         .foregroundStyle(AppTheme.text)
+        .shadow(color: .black.opacity(0.55), radius: 24, x: -8, y: 0)
+        .offset(x: dragX)
+        .gesture(
+            DragGesture(minimumDistance: 12)
+                .onChanged { value in
+                    // Rightward drags only — dragging the panel toward its home edge.
+                    dragX = max(0, value.translation.width)
+                }
+                .onEnded { value in
+                    if value.translation.width > 90 || value.predictedEndTranslation.width > 200 {
+                        onClose()
+                        dragX = 0
+                    } else {
+                        withAnimation(.spring(response: 0.3, dampingFraction: 0.8)) { dragX = 0 }
+                    }
+                }
+        )
     }
 
     private func logChip(_ entry: LogEntry, highlighted: Bool) -> some View {

@@ -34,7 +34,8 @@ export type CardType =
 	| 'storm'
 	| 'artillery'
 	| 'bridge'
-	| 'oasis';
+	| 'oasis'
+	| 'rampart';
 
 export const CARD_LABELS: Record<CardType, string> = {
 	air: 'Air Move',
@@ -54,7 +55,8 @@ export const CARD_LABELS: Record<CardType, string> = {
 	storm: 'Storm',
 	artillery: 'Artillery',
 	bridge: 'Bridge',
-	oasis: 'Oasis'
+	oasis: 'Oasis',
+	rampart: 'Rampart (+1)'
 };
 
 export interface CardMeta {
@@ -171,6 +173,12 @@ export const CARD_META: Record<CardType, CardMeta> = {
 		kind: 'terrain',
 		when: 'Placement or Action phase',
 		desc: 'Irrigate a desert hex you control, turning it back into plains. Removes the heat attrition (1 army lost per move into it).'
+	},
+	rampart: {
+		icon: '🧱',
+		kind: 'defense',
+		when: 'Placement or Action phase',
+		desc: 'Give one of your hexes a permanent +1 defense bonus. Stacks with Fortify. Lost when the hex is captured.'
 	}
 };
 
@@ -193,7 +201,8 @@ const CARD_POOL: CardType[] = [
 	'storm',
 	'artillery',
 	'bridge', 'bridge',
-	'oasis'
+	'oasis',
+	'rampart', 'rampart'
 ];
 
 export type Phase =
@@ -223,6 +232,7 @@ export type Phase =
 	| 'storm_to'
 	| 'artillery_from'
 	| 'artillery_to'
+	| 'rampart_select'
 	| 'discard'
 	| 'game_over';
 
@@ -230,6 +240,7 @@ export interface GridState {
 	owner: Player | null;
 	armies: number;
 	fortified?: boolean; // +2 defense from a Fortify card (persists until conquered)
+	rampart?: boolean; // +1 defense from a Rampart card (persists until conquered)
 }
 
 export interface LogEntry {
@@ -474,6 +485,14 @@ export function winProbability(atkArmies: number, defArmies: number, defenderBon
 /** Extra defender bonus from what the attacker had to cross: +2 for a sea
  *  lane, +1 for a river, 0 otherwise. Ignored for ranged/artillery attacks. */
 export function crossingDefenseBonus(s: GameState, fromId: number, toId: number): number {
+	// A Water Invasion crosses open sea over a temporary lane, storming the
+	// beach before the defenders dig in — only +1, not the +2 an established
+	// sea lane grants. Checked first because the invasion also pushes its lane
+	// into `seaLanes` for the duration of the attack.
+	const inv = s.pendingInvasionLane;
+	if (inv && ((inv[0] === fromId && inv[1] === toId) || (inv[0] === toId && inv[1] === fromId))) {
+		return 1;
+	}
 	for (const [a, b] of s.map.seaLanes) {
 		if ((a === fromId && b === toId) || (a === toId && b === fromId)) return 2;
 	}
@@ -487,6 +506,7 @@ export function defenseBonus(s: GameState, gridId: number, fromId?: number): num
 	let b = 0;
 	if (s.map.grids[gridId].terrain === 'mountain') b += 1;
 	if (s.states[gridId].fortified) b += 2;
+	if (s.states[gridId].rampart) b += 1;
 	if (fromId != null) b += crossingDefenseBonus(s, fromId, gridId);
 	return b;
 }
@@ -1267,6 +1287,18 @@ export function selectGrid(gridId: number): void {
 				s.message = 'Attack, move, or pass.';
 				break;
 			}
+			case 'rampart_select': {
+				if (s.states[gridId].owner !== s.current) { s.message = 'Raise a rampart on one of your territories.'; break; }
+				if (s.states[gridId].rampart) { s.message = 'Already has a rampart.'; break; }
+				s.states[gridId].rampart = true;
+				const idx = (s as any)._pendingCardIdx as number;
+				consumeCard(s, idx);
+				delete (s as any)._pendingCardIdx;
+				log(s, `${PLAYER_NAMES[s.current]} raised a rampart on ${gridLabel(s, gridId)} (+1 defense).`, 'card');
+				s.phase = 'action';
+				s.message = 'Attack, move, or pass.';
+				break;
+			}
 			case 'ferry_from': {
 				if (s.states[gridId].owner !== s.current) { s.message = 'Choose one of your territories.'; break; }
 				s.selectedFrom = gridId;
@@ -1419,6 +1451,7 @@ export function selectGrid(gridId: number): void {
 					target.owner = null;
 					target.armies = 0;
 					target.fortified = false;
+					target.rampart = false;
 					ownershipMsg = ' Territory abandoned.';
 				}
 				const idx = (s as any)._pendingCardIdx as number;
@@ -1454,6 +1487,7 @@ function autoConquer(s: GameState, fromId: number, toId: number): void {
 	const defender = to.owner; // typically null
 	to.owner = attacker;
 	to.fortified = false;
+	to.rampart = false;
 	s.stats[attacker].territoriesCaptured++;
 	if (defender) s.stats[defender].territoriesLost++;
 	s.defeatedThisTurn = true;
@@ -1514,6 +1548,7 @@ export function rollAttack(): void {
 		const defMods: string[] = [];
 		if (s.map.grids[s.selectedTo].terrain === 'mountain') defMods.push('+1 ⛰');
 		if (s.states[s.selectedTo].fortified) defMods.push('+2 fort');
+		if (s.states[s.selectedTo].rampart) defMods.push('+1 rampart');
 		const defTxt = defMods.length ? `${def} (${defMods.join(', ')})` : `${def}`;
 		devLog({
 			type: 'attack_roll',
@@ -1544,6 +1579,7 @@ export function rollAttack(): void {
 			// Conquered! Ask how many to move in
 			to.owner = from.owner;
 			to.fortified = false; // fortifications are destroyed on capture
+			to.rampart = false;
 			s.stats[attacker].territoriesCaptured++;
 			if (defender) s.stats[defender].territoriesLost++;
 			s.defeatedThisTurn = true;
@@ -1783,6 +1819,13 @@ export function playCard(idx: number) {
 				s.phase = 'fortify_select';
 				(s as any)._pendingCardIdx = idx;
 				s.message = 'Fortify: click one of your territories to fortify it (+2 defense).';
+				break;
+			}
+			case 'rampart': {
+				if (s.phase !== 'placing' && s.phase !== 'action') { s.message = 'Play Rampart during your turn.'; return s; }
+				s.phase = 'rampart_select';
+				(s as any)._pendingCardIdx = idx;
+				s.message = 'Rampart: click one of your territories to reinforce it (+1 defense).';
 				break;
 			}
 			case 'ferry': {

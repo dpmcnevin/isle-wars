@@ -21,6 +21,20 @@ import {
 import { crossesRiver } from './map';
 
 /**
+ * When true, `runAiTurn` skips every cosmetic `await wait()` pause, so its
+ * whole body executes synchronously in one tick (an async function runs
+ * straight through when it never actually awaits). The iOS host sets this:
+ * its JSContext has no real event loop, and relying on the microtask queue to
+ * resume the awaits was flaky — a turn could suspend at the first `await` and
+ * never resume, freezing the AI mid-placement. The web keeps it false so the
+ * turn still animates move-by-move.
+ */
+let synchronousAi = false;
+export function setAiSynchronous(v: boolean) {
+	synchronousAi = v;
+}
+
+/**
  * Run one full turn for an AI player. Assumes current player === p and
  * we are at the top of the turn (phase = 'placing'). Returns nothing.
  */
@@ -65,6 +79,7 @@ export async function runAiTurn(p: Player, tickMs = 90) {
 			p2 === 'move_select_from' || p2 === 'move_select_to' || p2 === 'move_qty' ||
 			p2 === 'bomb_select' || p2 === 'air_from' || p2 === 'air_to' || p2 === 'air_qty' ||
 			p2 === 'reinforce_select' || p2 === 'sabotage_select' || p2 === 'fortify_select' ||
+			p2 === 'rampart_select' ||
 			p2 === 'ferry_from' || p2 === 'ferry_to' || p2 === 'invasion_from' || p2 === 'invasion_to' ||
 			p2 === 'deforest_select' || p2 === 'oasis_select' || p2 === 'storm_from' || p2 === 'storm_to'
 		) {
@@ -83,7 +98,7 @@ export async function runAiTurn(p: Player, tickMs = 90) {
 
 	// --- Card play during placement (one per turn — highest-value wins) ---
 	tryPlayCardPlacement(p);
-	await wait();
+	if (!synchronousAi) await wait();
 
 	// --- Placement ---
 	while (get(game).phase === 'placing' && get(game).current === p) {
@@ -92,7 +107,7 @@ export async function runAiTurn(p: Player, tickMs = 90) {
 		if (target == null) break;
 		// Place all remaining on best target (simple but decisive)
 		placeArmies(target, s.armiesToPlace);
-		await wait();
+		if (!synchronousAi) await wait();
 	}
 
 	// --- Attack loop ---
@@ -147,20 +162,20 @@ export async function runAiTurn(p: Player, tickMs = 90) {
 		attackAttempts++;
 		// One visible pause per attack — spaces out the flurry visually but
 		// doesn't stall on individual rolls.
-		await wait();
+		if (!synchronousAi) await wait();
 	}
 
 	// --- Card play during action phase (bomb, elite, etc.) if we didn't
 	// already spend our card on placement.
 	tryPlayCardAction(p);
-	await wait();
+	if (!synchronousAi) await wait();
 
 	// --- Out of attacks: shift an idle rear stack toward the front rather
 	// than leaving it stranded in a corner. Moving ends the turn, so this
 	// replaces the plain "pass" below when it fires. ---
 	if (get(game).phase === 'action' && get(game).current === p) {
 		if (tryRepositionStack(p)) {
-			await wait();
+			if (!synchronousAi) await wait();
 			return;
 		}
 	}
@@ -389,6 +404,17 @@ function tryPlayCardPlacement(p: Player) {
 			return;
 		}
 	}
+	// Rampart weakest border (+1 defense).
+	s = get(game);
+	{
+		const idx = s.hands[p].findIndex((c) => c === 'rampart');
+		const target = findWeakestBorder(s, p);
+		if (idx >= 0 && target != null && !s.cardPlayedThisTurn) {
+			playCard(idx);
+			if (get(game).phase === 'rampart_select') selectGrid(target);
+			return;
+		}
+	}
 	// Sabotage a big enemy hex.
 	s = get(game);
 	{
@@ -489,6 +515,17 @@ function tryPlayCardAction(p: Player) {
 		if (idx >= 0 && target != null) {
 			playCard(idx);
 			if (get(game).phase === 'fortify_select') selectGrid(target);
+			return;
+		}
+	}
+	// Rampart weakest border if nothing else applies.
+	s = get(game);
+	{
+		const idx = s.hands[p].findIndex((c) => c === 'rampart');
+		const target = findWeakestBorder(s, p);
+		if (idx >= 0 && target != null) {
+			playCard(idx);
+			if (get(game).phase === 'rampart_select') selectGrid(target);
 			return;
 		}
 	}

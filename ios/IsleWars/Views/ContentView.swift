@@ -6,11 +6,7 @@ struct ContentView: View {
     var body: some View {
         Group {
             if let state = vm.state {
-                if !state.gameStarted {
-                    StartGateView(vm: vm)
-                } else {
-                    GameView(vm: vm, state: state)
-                }
+                GameView(vm: vm, state: state)
             } else {
                 NewGameSheet(vm: vm)
             }
@@ -20,22 +16,6 @@ struct ContentView: View {
         } message: {
             Text(vm.errorMessage ?? "")
         }
-    }
-}
-
-private struct StartGateView: View {
-    @ObservedObject var vm: GameViewModel
-
-    var body: some View {
-        VStack(spacing: 16) {
-            Text("Ready to play").font(.title).bold()
-            Button("Start Game →") { vm.startGamePlaying() }
-                .buttonStyle(.borderedProminent)
-                .controlSize(.large)
-        }
-        .frame(maxWidth: .infinity, maxHeight: .infinity)
-        .foregroundStyle(AppTheme.text)
-        .background(AppTheme.sidebarGradient.ignoresSafeArea())
     }
 }
 
@@ -66,19 +46,27 @@ private struct GameView: View {
                 onTapHex: handleTap,
                 onDragAttack: vm.dragAttack,
                 onDragMove: vm.dragMove,
-                contentInsets: EdgeInsets(top: 84, leading: 28, bottom: 96, trailing: 28)
+                onDragFerry: vm.dragFerry,
+                contentInsets: EdgeInsets(top: 68, leading: 16, bottom: 104, trailing: 16)
             )
             .ignoresSafeArea()
             .background(AppTheme.bg.ignoresSafeArea())
             .accessibilityElement(children: .ignore)
             .accessibilityLabel(mapAccessibilitySummary)
 
-            VStack(alignment: .leading, spacing: 0) {
-                topBar
+            // Compact HUD in the four corners; the open center/edges between the
+            // pills stay tappable so the map underneath is reachable.
+            VStack(spacing: 0) {
+                HStack(alignment: .top, spacing: 8) {
+                    topLeftPill
+                    Spacer(minLength: 8)
+                    topRightPill
+                }
                 Spacer(minLength: 0)
-                HStack(spacing: 0) {
+                HStack(alignment: .bottom, spacing: 8) {
+                    cardsPill
+                    Spacer(minLength: 8)
                     bottomBar
-                    Spacer(minLength: 0)
                 }
             }
             .padding(12)
@@ -136,7 +124,7 @@ private struct GameView: View {
                 )
             }
         } else if state.phase == .moveQty {
-            modalScrim(onTapBackdrop: nil) {
+            modalScrim(onTapBackdrop: { vm.cancelAction() }) {
                 QuantityPickerSheet(
                     title: "Move Armies",
                     subtitle: "How many armies to move?",
@@ -146,11 +134,12 @@ private struct GameView: View {
                     endsTurn: true,
                     sourceHex: sourceHexBuilder,
                     destHex: destHexBuilder,
-                    onConfirm: { qty in vm.confirmMove(qty) }
+                    onConfirm: { qty in vm.confirmMove(qty) },
+                    onCancel: { vm.cancelAction() }
                 )
             }
         } else if state.phase == .airQty {
-            modalScrim(onTapBackdrop: nil) {
+            modalScrim(onTapBackdrop: { vm.cancelAction() }) {
                 QuantityPickerSheet(
                     title: "Air Move",
                     subtitle: "How many armies to airlift?",
@@ -160,7 +149,8 @@ private struct GameView: View {
                     endsTurn: true,
                     sourceHex: sourceHexBuilder,
                     destHex: destHexBuilder,
-                    onConfirm: { qty in vm.confirmAir(qty) }
+                    onConfirm: { qty in vm.confirmAir(qty) },
+                    onCancel: { vm.cancelAction() }
                 )
             }
         }
@@ -177,46 +167,84 @@ private struct GameView: View {
         }
     }
 
-    private var topBar: some View {
-        HStack(spacing: 12) {
+    // Top-left: turn + per-player territory counts.
+    private var topLeftPill: some View {
+        let total = state.states.count
+        return HStack(spacing: 12) {
             Text("Turn \(state.turn)").font(.headline).bold()
-            ScoreboardView(state: state).frame(maxWidth: 460)
-            Spacer(minLength: 8)
+            ForEach(Player.allCases) { p in
+                let count = state.states.filter { $0.owner == p }.count
+                let alive = state.alive[p.rawValue] ?? true
+                HStack(spacing: 5) {
+                    Circle().fill(p.color).frame(width: 13, height: 13).opacity(alive ? 1 : 0.3)
+                    Text("\(count)/\(total)").font(.subheadline).monospacedDigit().strikethrough(!alive)
+                }
+                .padding(.horizontal, 7).padding(.vertical, 4)
+                .background(
+                    RoundedRectangle(cornerRadius: 6)
+                        .fill(state.current == p ? Color.yellow.opacity(0.25) : .clear)
+                )
+            }
+        }
+        .foregroundStyle(AppTheme.text)
+        .padding(.horizontal, 14).padding(.vertical, 9)
+        .background(hudBackground)
+    }
+
+    // Top-right: log + new game.
+    private var topRightPill: some View {
+        HStack(spacing: 8) {
             Button {
                 withAnimation(.easeInOut(duration: 0.25)) { showingLog.toggle() }
             } label: {
                 Label("Log", systemImage: "list.bullet.rectangle.portrait")
             }
-            .buttonStyle(.bordered)
+            .buttonStyle(GameButtonStyle(kind: .secondary, small: true))
             Button("New Game") { showingQuitConfirm = true }
-                .buttonStyle(.bordered)
+                .buttonStyle(GameButtonStyle(kind: .secondary, small: true))
         }
         .foregroundStyle(AppTheme.text)
-        .padding(.horizontal, 14)
-        .padding(.vertical, 10)
+        .padding(.horizontal, 10).padding(.vertical, 6)
         .background(hudBackground)
-        .frame(maxWidth: .infinity, alignment: .leading)
     }
 
+    // Bottom-left: compact action panel (message + phase controls).
     @ViewBuilder private var bottomBar: some View {
         if state.phase != .gameOver {
-            VStack(alignment: .leading, spacing: 6) {
-                ActionPanelView(vm: vm, state: state)
-                if state.current == .human, !state.humanHand.isEmpty {
-                    CardHandGridView(cards: state.humanHand, phase: state.phase) { index in
-                        if state.phase == .discard {
-                            vm.discardCard(index)
-                        } else {
-                            vm.playCard(index)
-                        }
-                    }
-                    .padding(.bottom, 8)
-                }
-            }
-            .foregroundStyle(AppTheme.text)
-            .frame(maxWidth: 560, alignment: .leading)
-            .background(hudBackground)
+            ActionPanelView(vm: vm, state: state)
+                .foregroundStyle(AppTheme.text)
+                .background(hudBackground)
         }
+    }
+
+    // Bottom-right: the player's card hand. Always shown (empty placeholder
+    // when the hand is empty), and only interactive on the human's own turn.
+    private var cardsPill: some View {
+        let hand = state.humanHand
+        let isHumanTurn = state.current == .human
+        return Group {
+            if hand.isEmpty {
+                HStack(spacing: 8) {
+                    Image(systemName: "rectangle.stack.badge.minus")
+                    Text("No cards").font(.caption)
+                }
+                .foregroundStyle(AppTheme.textDim)
+                .frame(height: 72)
+                .padding(.horizontal, 18)
+            } else {
+                CardHandGridView(cards: hand, phase: state.phase) { index in
+                    if state.phase == .discard {
+                        vm.discardCard(index)
+                    } else {
+                        vm.playCard(index)
+                    }
+                }
+                .frame(maxWidth: 380)
+                .disabled(!isHumanTurn)
+                .opacity(isHumanTurn ? 1 : 0.55)
+            }
+        }
+        .background(hudBackground)
     }
 
     private var hudBackground: some View {

@@ -17,33 +17,35 @@ struct CardHandGridView: View {
 
     var body: some View {
         ScrollView(.horizontal, showsIndicators: false) {
-            HStack(spacing: 10) {
+            HStack(spacing: 8) {
                 ForEach(Array(cards.enumerated()), id: \.offset) { index, card in
                     cardTile(card, index: index)
                 }
             }
-            .padding(.horizontal)
+            .padding(.horizontal, 8)
+            .padding(.vertical, 6)
         }
-        .frame(height: 92)
+        .frame(height: 72)
     }
 
     private func cardTile(_ card: CardType, index: Int) -> some View {
         let meta = card.meta
-        return Button {
-            onTap(index)
-        } label: {
-            VStack(spacing: 4) {
-                Text(card.icon).font(.title2)
-                Text(card.label).font(.caption2).lineLimit(2).multilineTextAlignment(.center)
-            }
-            .padding(8)
-            .frame(width: 84, height: 76)
-            .background(RoundedRectangle(cornerRadius: 10).fill(meta.kind.color.opacity(0.28)))
-            .overlay(RoundedRectangle(cornerRadius: 10).stroke(meta.kind.color, lineWidth: 1.5))
+        // A plain tile with tap/long-press gestures rather than a `Button` — a
+        // Button grabs the touch-down highlight and swallows horizontal drags,
+        // which stops the enclosing horizontal ScrollView from panning.
+        return VStack(spacing: 3) {
+            Text(card.icon).font(.body)
+            Text(card.label).font(.system(size: 9)).lineLimit(2).multilineTextAlignment(.center)
         }
-        .buttonStyle(.plain)
+        .padding(5)
+        .frame(width: 64, height: 58)
+        .background(RoundedRectangle(cornerRadius: 8).fill(meta.kind.color.opacity(0.28)))
+        .overlay(RoundedRectangle(cornerRadius: 8).stroke(meta.kind.color, lineWidth: 1.5))
+        .contentShape(RoundedRectangle(cornerRadius: 8))
         .opacity(isPlayable ? 1 : 0.45)
-        .disabled(!isPlayable)
+        .onTapGesture {
+            if isPlayable { onTap(index) }
+        }
         .onLongPressGesture(minimumDuration: 0.35) {
             detailIndex = index
         }

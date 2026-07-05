@@ -24,7 +24,6 @@ final class GameViewModel: ObservableObject {
         debugSettings = try? engine.getDebugSettings()
         if let seedString = ProcessInfo.processInfo.environment["ISLEWARS_AUTOSTART_SEED"], let seed = Int(seedString) {
             startNewGame(seed: seed)
-            startGamePlaying()
         } else {
             loadSavedGameIfPresent()
         }
@@ -34,6 +33,9 @@ final class GameViewModel: ObservableObject {
 
     func startNewGame(difficulty: Int = 2, startingArmies: Int = 3, seed: Int? = nil) {
         run { try $0.startGame(difficulty: difficulty, startingArmies: startingArmies, seed: seed) }
+        // Skip the "Ready to play" gate and drop straight into the game (the AI
+        // takes over too, if auto-play is on).
+        startGamePlaying()
     }
 
     func startGamePlaying() {
@@ -138,10 +140,21 @@ final class GameViewModel: ObservableObject {
         (try? engine.attackerBonus(gridId: gridId)) ?? 0
     }
 
+    /// Sea-lane (2) / river (1, or 0 if a Bridge is active) crossing bonus for
+    /// attacking `to` from `from`. Authoritative — same call the web modal uses.
+    func crossingBonus(from: Int, to: Int) -> Int {
+        (try? engine.crossingDefenseBonus(fromId: from, toId: to)) ?? 0
+    }
+
     // MARK: - Debug settings
 
     func updateDebugSettings(_ patch: DebugSettings) {
         debugSettings = (try? engine.updateDebugSettings(patch)) ?? debugSettings
+        // Toggling auto-play on mid-game should immediately hand the current
+        // (possibly human) turn to the AI.
+        if debugSettings?.autoPlay == true {
+            scheduleAiTurnIfNeeded()
+        }
     }
 
     // MARK: - Plumbing
@@ -184,7 +197,11 @@ final class GameViewModel: ObservableObject {
     /// (log-diff replay), so for now the board just snaps to the AI's
     /// final state.
     private func scheduleAiTurnIfNeeded() {
-        guard let state, state.gameStarted, state.phase != .gameOver, state.current != .human else {
+        // In auto-play (a debug option) the AI drives every player, including
+        // blue — so don't bail just because it's the human's turn.
+        let autoPlay = debugSettings?.autoPlay == true
+        guard let state, state.gameStarted, state.phase != .gameOver,
+              state.current != .human || autoPlay else {
             aiTask?.cancel()
             isAiThinking = false
             return

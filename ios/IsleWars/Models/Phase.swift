@@ -26,6 +26,7 @@ enum Phase: String, Codable {
     case stormTo = "storm_to"
     case artilleryFrom = "artillery_from"
     case artilleryTo = "artillery_to"
+    case rampartSelect = "rampart_select"
     case discard
     case gameOver = "game_over"
 }

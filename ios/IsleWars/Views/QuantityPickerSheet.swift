@@ -50,10 +50,10 @@ struct QuantityPickerSheet: View {
 
             if let sourceHex {
                 HStack(spacing: 16) {
-                    sourceHex(qty).frame(width: 110, height: 99)
+                    sourceHex(qty).frame(width: 150, height: 135)
                     if let destHex {
                         Image(systemName: "arrow.right").font(.title2).foregroundStyle(.secondary)
-                        destHex(qty).frame(width: 110, height: 99)
+                        destHex(qty).frame(width: 150, height: 135)
                     }
                 }
             }
@@ -92,11 +92,11 @@ struct QuantityPickerSheet: View {
                     Button(range.lowerBound == 0 ? "None" : "Min (\(range.lowerBound))") {
                         qty = range.lowerBound
                     }
-                    .buttonStyle(.bordered)
+                    .buttonStyle(GameButtonStyle(kind: .secondary, small: true))
                     Button("Max (\(range.upperBound))") {
                         qty = range.upperBound
                     }
-                    .buttonStyle(.bordered)
+                    .buttonStyle(GameButtonStyle(kind: .secondary, small: true))
                 }
             }
 
@@ -109,10 +109,10 @@ struct QuantityPickerSheet: View {
             HStack(spacing: 16) {
                 if let onCancel {
                     Button("Cancel", role: .cancel) { onCancel() }
-                        .buttonStyle(.bordered)
+                        .buttonStyle(GameButtonStyle(kind: .danger))
                 }
                 Button(confirmLabel) { onConfirm(qty) }
-                    .buttonStyle(.borderedProminent)
+                    .buttonStyle(GameButtonStyle())
             }
         }
         .padding(24)
