@@ -169,6 +169,7 @@ export interface GameState {
 	// Analytics
 	history: TurnSnapshot[];
 	stats: Record<Player, PlayerStats>;
+	conquests: ConquestEvent[];
 }
 
 export interface TurnSnapshot {
@@ -176,6 +177,20 @@ export interface TurnSnapshot {
 	territories: Record<Player, number>;
 	armies: Record<Player, number>;
 	islands: Record<Player, number>; // full-island count
+}
+
+// One entry per hex that changes hands — via combat (rollAttack conquest
+// branch, autoConquer walking into an undefended hex) or the rebels_flip
+// random event. Chronological (pushed in turn order); together with the
+// final GameState.states this is enough to reconstruct ownership at any
+// earlier turn (see reconstructOwnersAtTurn in summary.ts) and to drive a
+// post-game "turning points" map overlay.
+export interface ConquestEvent {
+	turn: number;
+	grid: number;
+	attacker: Player;
+	defender: Player | null; // null if the hex was neutral/unowned
+	from: number | null; // the hex the capture was launched from, if any (null for rebels_flip)
 }
 
 export interface PlayerStats {
@@ -204,7 +219,7 @@ function emptyStatsMap(): Record<Player, PlayerStats> {
 	return { blue: emptyStats(), green: emptyStats(), red: emptyStats(), brown: emptyStats() };
 }
 
-export const SAVE_KEY = 'isle-wars-save-v12';
+export const SAVE_KEY = 'isle-wars-save-v13';
 export const DEBUG_KEY = 'isle-wars-debug';
 
 export interface DebugSettings {
@@ -523,7 +538,8 @@ export function startGame(difficulty = 2, startingArmies = 3, seed?: number): Ga
 		message: '',
 		winner: null,
 		history: [],
-		stats: emptyStatsMap()
+		stats: emptyStatsMap(),
+		conquests: []
 	};
 	// Start first turn
 	const ready = beginTurn(state);
@@ -888,6 +904,7 @@ function applyRandomEvent(s: GameState) {
 				const newOwner = otherOwners[Math.floor(Math.random() * otherOwners.length)];
 				g.owner = newOwner;
 				g.armies = Math.max(1, Math.floor(g.armies / 2));
+				s.conquests.push({ turn: s.turn, grid: id, attacker: newOwner, defender: oldOwner, from: null });
 				log(s, `Rebels overthrew ${PLAYER_NAMES[oldOwner!]} in ${gridLabel(s, id)}! Now held by ${PLAYER_NAMES[newOwner]}.`, 'event', null);
 			}
 		}
@@ -1138,6 +1155,7 @@ function autoConquer(s: GameState, fromId: number, toId: number): void {
 	to.rampart = false;
 	s.stats[attacker].territoriesCaptured++;
 	if (defender) s.stats[defender].territoriesLost++;
+	s.conquests.push({ turn: s.turn, grid: toId, attacker, defender, from: fromId });
 	s.defeatedThisTurn = true;
 	s.lastAttackResult = 'win';
 	s.eliteAttackActive = false;
@@ -1230,6 +1248,7 @@ export function rollAttack(): void {
 			to.rampart = false;
 			s.stats[attacker].territoriesCaptured++;
 			if (defender) s.stats[defender].territoriesLost++;
+			s.conquests.push({ turn: s.turn, grid: s.selectedTo, attacker, defender, from: s.selectedFrom });
 			s.defeatedThisTurn = true;
 			s.lastAttackResult = 'win';
 			// Elite Troops was consumed by this successful attack.
@@ -1279,8 +1298,10 @@ export function rollAttack(): void {
 			}
 			log(s, `Attacker reduced to 1 — ${gridLabel(s, s.selectedFrom)} forfeit to ${PLAYER_NAMES[to.owner]}!`, 'attack');
 			const forfeitTo = to.owner;
+			const forfeitFrom = from.owner;
 			from.owner = forfeitTo;
 			from.armies = 1;
+			s.conquests.push({ turn: s.turn, grid: s.selectedFrom, attacker: forfeitTo, defender: forfeitFrom, from: s.selectedTo });
 			updateAlive(s);
 			if (checkWin(s)) return s;
 			// Turn ends per manual

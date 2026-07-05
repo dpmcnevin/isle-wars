@@ -41,6 +41,11 @@
 	} from '$lib/game';
 	import { wallBetween } from '$lib/map';
 	import { runAiTurn } from '$lib/ai';
+	import { computeTurningPoints, reconstructOwnersAtTurn } from '$lib/summary';
+
+	let turningPoints = $derived($game.phase === 'game_over' ? computeTurningPoints($game, 10) : []);
+	let selectedTurningPoint = $state<number | null>(null);
+	let openTurningPoint = $state<number | null>(null);
 
 	let placeQty = $state(1);
 	let moveQty = $state(1);
@@ -955,6 +960,133 @@
 			{/if}
 			<button onclick={startNewGame}>New Game</button>
 		</section>
+		{#if turningPoints.length > 0}
+			<section class="turning-points">
+				<h3>Turning points</h3>
+				<ol>
+					{#each turningPoints as tp, i}
+						<li
+							class:active={selectedTurningPoint === i}
+							onpointerenter={() => (selectedTurningPoint = i)}
+							onpointerleave={() => (selectedTurningPoint = null)}
+							onclick={() => (openTurningPoint = i)}
+						>
+							<span class="tp-num" class:star={tp.isFinal}>{tp.isFinal ? '★' : i + 1}</span>
+							<span class="tp-turn">Turn {tp.turn}</span>
+							<span class="tp-headline">{tp.headline}</span>
+							<span class="tp-swing" class:pos={tp.delta > 0} class:neg={tp.delta < 0}>
+								{tp.delta > 0 ? '+' : ''}{tp.delta} ({tp.territoriesAfter})
+							</span>
+						</li>
+					{/each}
+				</ol>
+			</section>
+		{/if}
+	{/if}
+
+	{#snippet tpMiniMap(owners: (Player | null)[], paths: { from: number; to: number }[] = [], changedGrids: number[] = [])}
+		<svg
+			viewBox={$game.map.viewBox ? `${$game.map.viewBox.x} ${$game.map.viewBox.y} ${$game.map.viewBox.w} ${$game.map.viewBox.h}` : `0 0 ${$game.map.width} ${$game.map.height}`}
+			class="tp-map"
+		>
+			<defs>
+				<marker id="tp-path-arrowhead" markerWidth="10" markerHeight="10" refX="7" refY="5" orient="auto">
+					<path d="M0,0 L10,5 L0,10 Z" fill="#fff" />
+				</marker>
+			</defs>
+			<rect x="0" y="0" width={$game.map.width} height={$game.map.height} fill="#0a2540" />
+			{#each $game.map.waterHexes ?? [] as poly}
+				<polygon points={polygonPoints(poly)} fill="#0e2a48" stroke="#26527a" stroke-width="0.8" stroke-opacity="0.55" />
+			{/each}
+			{#each $game.map.grids as g (g.id)}
+				{@const owner = owners[g.id]}
+				<polygon
+					points={polygonPoints(g.cell)}
+					fill={owner ? PLAYER_COLORS[owner] : '#334'}
+					stroke="#0a1420"
+					stroke-width="1.5"
+				/>
+			{/each}
+			{#each $game.map.grids as g (g.id)}
+				{#if changedGrids.includes(g.id)}
+					<polygon
+						points={polygonPoints(g.cell)}
+						fill="none"
+						stroke="#ffe980"
+						stroke-width="3.5"
+						pointer-events="none"
+					/>
+				{/if}
+			{/each}
+			{#each paths as p}
+				{@const fromG = $game.map.grids[p.from]}
+				{@const toG = $game.map.grids[p.to]}
+				<line
+					x1={fromG.x} y1={fromG.y}
+					x2={toG.x} y2={toG.y}
+					stroke="#fff"
+					stroke-width="3"
+					stroke-linecap="round"
+					marker-end="url(#tp-path-arrowhead)"
+					opacity="0.9"
+					pointer-events="none"
+				/>
+			{/each}
+		</svg>
+	{/snippet}
+
+	{#if openTurningPoint != null && turningPoints[openTurningPoint]}
+		{@const tp = turningPoints[openTurningPoint]}
+		{@const tpOwnersBefore = reconstructOwnersAtTurn($game, tp.turn - 1)}
+		{@const tpOwnersAfter = reconstructOwnersAtTurn($game, tp.turn)}
+		{@const tpChangedGrids = tp.conquests.map((c) => c.grid)}
+		{@const tpPaths = tp.conquests
+			.filter((c) => c.attacker === $game.winner && c.from != null)
+			.map((c) => ({ from: c.from as number, to: c.grid }))}
+		<div class="tp-modal-backdrop" role="presentation" onclick={() => (openTurningPoint = null)}>
+			<div
+				class="tp-modal"
+				role="dialog"
+				aria-label="Map at turn {tp.turn}"
+				tabindex="-1"
+				onclick={(e) => e.stopPropagation()}
+			>
+				<div class="tp-modal-header">
+					<h3>Turn {tp.turn} — {tp.headline}</h3>
+					<button class="close-x" onclick={() => (openTurningPoint = null)} aria-label="Close">✕</button>
+				</div>
+				<div class="tp-compare">
+					<div class="tp-compare-pane">
+						<div class="tp-compare-label">Before (turn {tp.turn - 1})</div>
+						{@render tpMiniMap(tpOwnersBefore)}
+					</div>
+					<div class="tp-compare-arrow" aria-hidden="true">
+						<svg viewBox="0 0 40 24" width="40" height="24">
+							<line x1="2" y1="12" x2="32" y2="12" stroke="#ffd54a" stroke-width="3" stroke-linecap="round" />
+							<path d="M24,3 L36,12 L24,21" fill="none" stroke="#ffd54a" stroke-width="3" stroke-linecap="round" stroke-linejoin="round" />
+						</svg>
+					</div>
+					<div class="tp-compare-pane">
+						<div class="tp-compare-label">After (turn {tp.turn})</div>
+						{@render tpMiniMap(tpOwnersAfter, tpPaths, tpChangedGrids)}
+					</div>
+				</div>
+				<div class="tp-modal-footer">
+					<button
+						class="tp-nav-btn"
+						disabled={openTurningPoint === 0}
+						onclick={() => (openTurningPoint = (openTurningPoint ?? 0) - 1)}
+						aria-label="Previous turning point"
+					>‹ Previous</button>
+					<button
+						class="tp-nav-btn"
+						disabled={openTurningPoint === turningPoints.length - 1}
+						onclick={() => (openTurningPoint = (openTurningPoint ?? 0) + 1)}
+						aria-label="Next turning point"
+					>Next ›</button>
+				</div>
+			</div>
+		</div>
 	{/if}
 
 	{#if $game.gameStarted}
@@ -1161,6 +1293,25 @@
 						pointer-events="none"
 					/>
 				{/if}
+				<!-- Post-game "turning point" markers: numbered pins on the hex
+				     where the biggest lead swings of the game happened. -->
+				{#each turningPoints as tp, i}
+					{@const grid = tp.conquests[0]?.grid}
+					{#if grid != null}
+						{@const g = $game.map.grids[grid]}
+						<g
+							class="turning-point-marker"
+							class:active={selectedTurningPoint === i}
+							role="button"
+							tabindex="0"
+							onpointerenter={() => (selectedTurningPoint = i)}
+							onpointerleave={() => (selectedTurningPoint = null)}
+						>
+							<circle cx={g.x} cy={g.y} r="17" fill="#1a1408" stroke="#ffd54a" stroke-width="3" />
+							<text x={g.x} y={g.y + 6} text-anchor="middle" fill="#ffd54a" font-size={tp.isFinal ? 16 : 18} font-weight="700" pointer-events="none">{tp.isFinal ? '★' : i + 1}</text>
+						</g>
+					{/if}
+				{/each}
 			</svg>
 		</div>
 
@@ -2457,4 +2608,116 @@
 	}
 	.banner.win { border-color: #7fcfff; background: #0f3a55; }
 	.banner.lose { border-color: #d44; background: #3a0f0f; }
+
+	.turning-points {
+		margin-bottom: 0.5rem;
+		padding: 0.75rem 1rem;
+		border: 1px solid #345;
+		background: #10182a;
+	}
+	.turning-points h3 { margin: 0 0 0.5rem; font-size: 0.95rem; color: #ffd54a; }
+	.turning-points ol { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 0.3rem; }
+	.turning-points li {
+		display: flex;
+		align-items: center;
+		gap: 0.6rem;
+		padding: 0.35rem 0.5rem;
+		border-radius: 4px;
+		cursor: default;
+	}
+	.turning-points li.active { background: #1e2c47; }
+	.tp-num {
+		flex: none;
+		width: 1.5rem;
+		height: 1.5rem;
+		border-radius: 50%;
+		background: #1a1408;
+		border: 2px solid #ffd54a;
+		color: #ffd54a;
+		font-weight: 700;
+		font-size: 0.8rem;
+		display: flex;
+		align-items: center;
+		justify-content: center;
+	}
+	.tp-num.star { background: #ffd54a; color: #1a1408; font-size: 0.9rem; }
+	.tp-turn { flex: none; color: #8ab; font-size: 0.8rem; }
+	.tp-headline { flex: 1; }
+	.tp-swing { flex: none; font-size: 0.8rem; }
+	.tp-swing.pos { color: #7fff7f; }
+	.tp-swing.neg { color: #ff7f7f; }
+
+	.turning-point-marker { cursor: pointer; }
+	.turning-point-marker circle { transition: r 0.15s ease; }
+	.turning-point-marker.active circle { r: 21; stroke-width: 4; }
+
+	.tp-modal-backdrop {
+		position: fixed;
+		inset: 0;
+		background: rgba(5, 8, 14, 0.75);
+		display: flex;
+		align-items: center;
+		justify-content: center;
+		z-index: 50;
+	}
+	.tp-modal {
+		background: #10182a;
+		border: 1px solid #345;
+		border-radius: 6px;
+		padding: 0.5rem 0.75rem 0.75rem;
+		width: 98vw;
+		max-width: 2600px;
+		max-height: 96vh;
+		display: flex;
+		flex-direction: column;
+		gap: 0.4rem;
+	}
+	.tp-modal-header {
+		display: flex;
+		align-items: center;
+		justify-content: space-between;
+		gap: 1rem;
+	}
+	.tp-modal-header h3 { margin: 0; font-size: 1rem; }
+	.tp-modal-footer {
+		display: flex;
+		justify-content: center;
+		gap: 0.75rem;
+	}
+	.tp-nav-btn {
+		flex: none;
+		padding: 0.4rem 1rem;
+		border-radius: 4px;
+		border: 1px solid #345;
+		background: transparent;
+		color: #cdd;
+		font-size: 0.9rem;
+		line-height: 1;
+		cursor: pointer;
+	}
+	.tp-nav-btn:hover:not(:disabled) { background: rgba(255, 255, 255, 0.08); }
+	.tp-nav-btn:disabled { opacity: 0.3; cursor: default; }
+	.tp-compare {
+		display: flex;
+		align-items: center;
+		gap: 0.75rem;
+	}
+	.tp-compare-pane {
+		flex: 1 1 0;
+		min-width: 0;
+		display: flex;
+		flex-direction: column;
+		gap: 0.3rem;
+	}
+	.tp-compare-label {
+		font-size: 0.8rem;
+		color: #8ab;
+		text-align: center;
+	}
+	.tp-compare-arrow { flex: none; align-self: center; width: 40px; }
+	.tp-map { width: 100%; height: auto; max-height: 88vh; }
+	@media (max-width: 700px) {
+		.tp-compare { flex-direction: column; }
+		.tp-compare-arrow { transform: rotate(90deg); }
+	}
 </style>
