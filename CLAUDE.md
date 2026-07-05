@@ -14,7 +14,8 @@ adjacent hexes, play cards) on a procedurally generated island map. It ships as:
 ## Architecture
 
 ```
-src/lib/game.ts      Core game state, rules, cards, turn flow (the svelte store `game`)
+src/lib/game.ts      Core game state, rules, turn flow, card dispatch (the svelte store `game`)
+src/lib/cards.ts     The card registry: CARD_DEFS + card metadata/selection helpers
 src/lib/map.ts       Procedural map generation + geometry helpers (rivers, walls, adjacency)
 src/lib/ai.ts        AI opponent (drives the same public functions the UI calls)
 src/routes/+page.svelte   The entire web UI (map SVG, HUD, card hand, modals)
@@ -60,10 +61,11 @@ cd ios && xcodebuild -project IsleWars.xcodeproj -scheme IsleWars \
 
 ## Cards
 
-Cards are defined by a single **registry** (`CARD_DEFS` in `src/lib/game.ts`). Adding a
+Cards are defined by a single **registry** (`CARD_DEFS` in `src/lib/cards.ts`). Adding a
 card is normally one object there — no switch edits, and no Swift changes for
 selection-based cards (iOS reads card metadata and selectable hexes over the bridge).
-See **[docs/CARDS.md](docs/CARDS.md)** for the full structure and an add-a-card checklist.
+`cards.ts` and `game.ts` import each other by design; see **[docs/CARDS.md](docs/CARDS.md)**
+for the full structure, why that cycle is safe, and an add-a-card checklist.
 
 ## Conventions & gotchas
 

@@ -1,9 +1,17 @@
 # Card system
 
-All cards are defined by one **registry** — `CARD_DEFS` in `src/lib/game.ts`. It is the
+All cards are defined by one **registry** — `CARD_DEFS` in `src/lib/cards.ts`. It is the
 single source of truth for a card's display metadata, its draw-pool weight, and its
 behaviour. Everything else (labels, the draw pool, the play/select flow, the web
 highlight, the iOS card tiles) is derived from it.
+
+`cards.ts` and `game.ts` import each other on purpose: the card closures call `game.ts`
+helpers (`consumeCard`, `log`, `resolveBomb`, …) at runtime, and `game.ts`'s dispatch
+imports the registry. That cycle is safe because the closures only *call* those helpers
+at runtime (never at module load), and ES modules finish evaluating `cards.ts` before
+`game.ts`'s own body runs. The `CardType` and `Phase` unions live in `game.ts` (imported
+by `cards.ts`); `game.ts` re-exports the registry's public API so consumers still import
+everything from `$lib/game`.
 
 This document explains the structure and how to add a card.
 
@@ -176,8 +184,8 @@ Both bridge functions are declared in `ios/bridge/entry.ts` and consumed in
 1. **`CardType` union** (`src/lib/game.ts`) — add the id.
 2. **`Phase` union** (`src/lib/game.ts`) — add the new selection phase string(s), for
    targeting cards. (Swift's `Phase` does *not* need updating — unknown decodes safely.)
-3. **`CARD_DEFS`** — add one entry (metadata, `weight`, `playableIn`, and either `onPlay`
-   or `steps` + `onResolve`).
+3. **`CARD_DEFS`** (`src/lib/cards.ts`) — add one entry (metadata, `weight`, `playableIn`,
+   and either `onPlay` or `steps` + `onResolve`).
 4. **AI** (optional) — add a heuristic in `src/lib/ai.ts` if the AI should play it.
 5. **Rendering** (only if it draws map art) — `+page.svelte` and `MapView.swift`.
 6. **Rebuild the iOS bundle** — `npm run build:ios-bridge`.
