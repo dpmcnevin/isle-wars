@@ -8,6 +8,10 @@ rivals.
 Ships as a **web app** (SvelteKit) and a **native iPad app** (SwiftUI) that share
 the exact same game engine.
 
+> Inspired by the classic **Isle Wars** by [Soleau Software](https://www.soleau.com/).
+> This is an independent, from-scratch reimagining — not affiliated with or
+> endorsed by Soleau Software.
+
 ---
 
 ## Objective
@@ -133,3 +137,11 @@ game logic in `src/lib`, rebuild the bridge bundle with `npm run build:ios-bridg
 (the Xcode build also does this automatically).
 
 For architecture, conventions, and the web ↔ iOS bridge, see **[CLAUDE.md](CLAUDE.md)**.
+
+---
+
+## Credits
+
+Inspired by **Isle Wars** by [Soleau Software](https://www.soleau.com/), William
+Soleau's classic strategy game. This project is an independent reimagining built
+from scratch and is not affiliated with or endorsed by Soleau Software.
