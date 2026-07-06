@@ -576,6 +576,29 @@ function findWallPlacement(s: GameState, p: Player): WallChoice | null {
 	}
 	return best;
 }
+// Pick a wall to tear down: an edge between one of our hexes and an enemy's,
+// preferring the case where that enemy is the last rival standing — a
+// self-walled-in "stronghold" is otherwise an unconquerable stalemate that
+// would deadlock the game forever (Wall has no aging/limit, so a defender can
+// keep sealing every remaining edge). Mirrors findWallPlacement but for the
+// opposite goal: reopening an attack lane rather than closing one.
+function findBreachTarget(s: GameState, p: Player): WallChoice | null {
+	let best: WallChoice | null = null;
+	let bestScore = -Infinity;
+	const aliveOthers = PLAYERS.filter((q) => q !== p && s.alive[q]).length;
+	for (const [a, b] of s.map.walls ?? []) {
+		const ours = s.states[a].owner === p ? a : s.states[b].owner === p ? b : null;
+		if (ours == null) continue;
+		const other = ours === a ? b : a;
+		const ot = s.states[other];
+		if (!ot.owner || ot.owner === p) continue; // only breach into an enemy
+		// Last-rival stalemate takes priority over ordinary tactical breaches;
+		// otherwise prefer breaching where we already outnumber the defender.
+		const score = (aliveOthers <= 1 ? 1000 : 0) + s.states[ours].armies - ot.armies;
+		if (score > bestScore) { bestScore = score; best = { from: ours, to: other }; }
+	}
+	return best;
+}
 // Pick an adjacent enemy forest hex to clear.
 function findForestNeighbor(s: GameState, p: Player): number | null {
 	for (const g of s.map.grids) {
@@ -665,6 +688,20 @@ function tryPlayCardAction(p: Player) {
 			if (get(game).phase === 'paratroop_to') selectGrid(plan.to);
 			if (get(game).phase === 'paratroop_qty') confirmParatroop(plan.qty);
 			else cancelAction();
+			return;
+		}
+	}
+	// Breach a wall blocking an attack — critical when an enemy has sealed
+	// itself in behind Wall cards, since that's otherwise unconquerable and
+	// would deadlock the game (see findBreachTarget).
+	s = get(game);
+	{
+		const idx = s.hands[p].findIndex((c) => c === 'breach');
+		const target = findBreachTarget(s, p);
+		if (idx >= 0 && target != null) {
+			playCard(idx);
+			if (get(game).phase === 'breach_from') selectGrid(target.from);
+			if (get(game).phase === 'breach_to') selectGrid(target.to);
 			return;
 		}
 	}
