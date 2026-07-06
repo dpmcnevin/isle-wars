@@ -27,6 +27,11 @@ export interface RecapData {
 	turningPoints: RecapTurningPoint[];
 	history: TurnSnapshot[];
 	stats: Record<Player, PlayerStats>;
+	// Per-player army totals at game end. history only has start-of-turn
+	// snapshots, so the final turn's "after" armies exist nowhere else in
+	// the payload. Optional: shared links from before this field decode
+	// without it (the recap page shows a placeholder instead).
+	finalArmies?: Record<Player, number>;
 	// Enough of the final GameState to drive reconstructOwnersAtTurn /
 	// reconstructEdgesAtTurn (see summary.ts) against a regenerated map.
 	finalOwners: (Player | null)[];
@@ -44,6 +49,7 @@ export function buildRecap(params: {
 	turningPoints: TurningPoint[];
 	history: TurnSnapshot[];
 	stats: Record<Player, PlayerStats>;
+	finalArmies?: Record<Player, number>;
 	finalOwners: (Player | null)[];
 	conquests: ConquestEvent[];
 	edgeEvents: EdgeEvent[];

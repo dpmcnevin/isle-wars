@@ -11,7 +11,9 @@
 
 	interface StatsSnapshot {
 		territories: Record<Player, number>;
-		armies: Record<Player, number>;
+		/** Absent when the snapshot was synthesized from an owner map alone
+		 *  (territories can be counted from owners; armies can't). */
+		armies?: Record<Player, number>;
 	}
 
 	let {
@@ -51,9 +53,10 @@
 		/** Per-player territory/army totals just before/after this turn — the
 		 *  one thing that's always real data even when the map is a no-op
 		 *  (a pure army-count swing has nothing to highlight on the map, but
-		 *  the numbers behind it are still worth showing). Undefined when no
-		 *  history snapshot exists for that turn (e.g. the very first turn,
-		 *  or the live end-of-game state for the final turning point). */
+		 *  the numbers behind it are still worth showing). The table renders
+		 *  unconditionally so the modal keeps a constant height while
+		 *  stepping through turning points; any value the caller can't
+		 *  provide (see StatsSnapshot.armies) shows as a placeholder. */
 		historyBefore?: StatsSnapshot;
 		historyAfter?: StatsSnapshot;
 		/** True when hexes DID change hands this turn, but only between other
@@ -77,36 +80,38 @@
 		{#if otherPlayersCapture}
 			<p class="tp-no-capture">The highlighted hex below changed hands between other players — unrelated to this turning point.</p>
 		{/if}
-		{#if historyBefore && historyAfter}
-			<table class="tp-stats">
-				<thead>
-					<tr><th></th><th>Territories</th><th>Armies</th></tr>
-				</thead>
-				<tbody>
-					{#each PLAYERS as p}
-						{@const terrBefore = historyBefore.territories[p]}
-						{@const terrAfter = historyAfter.territories[p]}
-						{@const armyBefore = historyBefore.armies[p]}
-						{@const armyAfter = historyAfter.armies[p]}
-						<tr>
-							<td><span class="tp-stats-dot" style="background:{PLAYER_COLORS[p]}"></span>{PLAYER_NAMES[p]}</td>
-							<td class:tp-stats-changed={terrAfter !== terrBefore}>
-								{terrBefore} → {terrAfter}
-								{#if terrAfter !== terrBefore}<span class:pos={terrAfter > terrBefore} class:neg={terrAfter < terrBefore}>({terrAfter > terrBefore ? '+' : ''}{terrAfter - terrBefore})</span>{/if}
-							</td>
-							<td class:tp-stats-changed={armyAfter !== armyBefore}>
-								{armyBefore} → {armyAfter}
-								{#if armyAfter !== armyBefore}<span class:pos={armyAfter > armyBefore} class:neg={armyAfter < armyBefore}>({armyAfter > armyBefore ? '+' : ''}{armyAfter - armyBefore})</span>{/if}
-							</td>
-						</tr>
-					{/each}
-				</tbody>
-			</table>
-		{/if}
+		{#snippet statCell(before: number | undefined, after: number | undefined)}
+			{#if before != null && after != null}
+				<td class:tp-stats-changed={after !== before}>
+					{before} → {after}
+					{#if after !== before}<span class:pos={after > before} class:neg={after < before}>({after > before ? '+' : ''}{after - before})</span>{/if}
+				</td>
+			{:else if before != null}
+				<td>{before} → <span class="tp-stats-unknown">—</span></td>
+			{:else if after != null}
+				<td>{after}</td>
+			{:else}
+				<td class="tp-stats-unknown">—</td>
+			{/if}
+		{/snippet}
+		<table class="tp-stats">
+			<thead>
+				<tr><th></th><th>Territories</th><th>Armies</th></tr>
+			</thead>
+			<tbody>
+				{#each PLAYERS as p}
+					<tr>
+						<td><span class="tp-stats-dot" style="background:{PLAYER_COLORS[p]}"></span>{PLAYER_NAMES[p]}</td>
+						{@render statCell(historyBefore?.territories[p], historyAfter?.territories[p])}
+						{@render statCell(historyBefore?.armies?.[p], historyAfter?.armies?.[p])}
+					</tr>
+				{/each}
+			</tbody>
+		</table>
 		<div class="tp-compare">
 			<div class="tp-compare-pane">
 				<div class="tp-compare-label">Before (turn {turn - 1})</div>
-				<TpMiniMap {map} owners={ownersBefore} edgeWalls={edgesBefore.walls} edgeSeaLanes={edgesBefore.seaLanes} />
+				<TpMiniMap {map} owners={ownersBefore} ghostGrids={changedGrids} edgeWalls={edgesBefore.walls} edgeSeaLanes={edgesBefore.seaLanes} />
 			</div>
 			<div class="tp-compare-arrow" aria-hidden="true">
 				<svg viewBox="0 0 40 24" width="40" height="24">
@@ -116,7 +121,7 @@
 			</div>
 			<div class="tp-compare-pane">
 				<div class="tp-compare-label">After (turn {turn})</div>
-				<TpMiniMap {map} owners={ownersAfter} {paths} {changedGrids} edgeWalls={edgesAfter.walls} edgeSeaLanes={edgesAfter.seaLanes} {capturedFrom} {armyLabels} />
+				<TpMiniMap {map} owners={ownersAfter} {paths} {changedGrids} dimUnchanged edgeWalls={edgesAfter.walls} edgeSeaLanes={edgesAfter.seaLanes} {capturedFrom} {armyLabels} />
 			</div>
 		</div>
 		<div class="tp-modal-footer">
@@ -172,6 +177,7 @@
 	.tp-stats-dot { display: inline-block; width: 8px; height: 8px; border-radius: 50%; margin-right: 0.35rem; }
 	.tp-stats span.pos { color: #7fff7f; margin-left: 0.25rem; }
 	.tp-stats span.neg { color: #ff7f7f; margin-left: 0.25rem; }
+	.tp-stats .tp-stats-unknown { color: #567; }
 	.close-x {
 		margin-left: auto;
 		background: transparent;

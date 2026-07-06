@@ -1,7 +1,7 @@
 <script lang="ts">
 	import type { GameMap } from '$lib/map';
 	import { polygonPoints, wallSegmentsFor, seaLanePath } from '$lib/map';
-	import { PLAYERS, PLAYER_COLORS, type Player } from '$lib/game';
+	import { PLAYER_COLORS, type Player } from '$lib/game';
 
 	interface Path {
 		from: number;
@@ -19,6 +19,8 @@
 		owners,
 		paths = [],
 		changedGrids = [],
+		ghostGrids = [],
+		dimUnchanged = false,
 		edgeWalls,
 		edgeSeaLanes,
 		capturedFrom = {},
@@ -28,6 +30,12 @@
 		owners: (Player | null)[];
 		paths?: Path[];
 		changedGrids?: number[];
+		/** Hexes that are ABOUT to change (shown on the "before" map as a faint
+		 *  dashed outline) so the eye knows where to look on both panes. */
+		ghostGrids?: number[];
+		/** Fade hexes that didn't change hands so the changed cluster is the
+		 *  only saturated thing on the map (used on the "after" pane). */
+		dimUnchanged?: boolean;
 		edgeWalls: [number, number][];
 		edgeSeaLanes: [number, number][];
 		capturedFrom?: Record<number, Player | null>;
@@ -49,6 +57,65 @@
 		if (entries.length < 2) return null; // nothing to call out among 0-1 labels
 		return entries.reduce((best, cur) => (Number(cur[1]) > Number(best[1]) ? cur : best))[0];
 	});
+
+	// The "captured from" wedge polygon for a captured hex, facing the winning
+	// attack when there's an incoming arrow (top-left otherwise). cell
+	// vertices come from hexPolygon in angle order — vertex k sits at
+	// (60k − 30)° (SVG y-down) — and the attacker's direction snaps to
+	// TWELVE sectors, not six: adjacent attacks arrive square on an edge
+	// (directions 60k, covered by the sixth between vertices k and k+1),
+	// but sea-lane and other long-range arrows can point straight at a
+	// vertex (directions 60k + 30), where an edge wedge would sit half-off
+	// to one side — those get a "kite" straddling that corner symmetrically
+	// (edge midpoint → vertex → edge midpoint).
+	function wedgePoints(gridId: number): string {
+		const g = map.grids[gridId];
+		const c = `${g.x},${g.y}`;
+		const vtx = (i: number) => `${g.cell[(i + 6) % 6][0]},${g.cell[(i + 6) % 6][1]}`;
+		const inc = paths.find((p) => p.to === gridId && !p.forfeited);
+		if (!inc) return `${c} ${vtx(4)} ${vtx(5)}`;
+		const from = map.grids[inc.from];
+		const deg = (Math.atan2(from.y - g.y, from.x - g.x) * 180) / Math.PI;
+		const s = ((Math.round(deg / 30) % 12) + 12) % 12;
+		if (s % 2 === 0) return `${c} ${vtx(s / 2)} ${vtx(s / 2 + 1)}`;
+		const mid = (a: [number, number], b: [number, number]) => `${(a[0] + b[0]) / 2},${(a[1] + b[1]) / 2}`;
+		const j = ((s + 1) / 2) % 6;
+		const v = g.cell[j];
+		return `${c} ${mid(g.cell[(j + 5) % 6], v)} ${vtx(j)} ${mid(v, g.cell[(j + 1) % 6])}`;
+	}
+
+	// Radius of the army badge drawn at a hex (0 when it has none) — must
+	// match the r values used in the badge markup below.
+	function badgeRadius(gridId: number): number {
+		if (!(gridId in armyLabels)) return 0;
+		return String(gridId) === biggestGrid ? 44 : 34;
+	}
+
+	// Conquest arrows run hex-center to hex-center, but the army badges sit
+	// exactly there — so trim each end back to the badge's rim (plus room for
+	// the arrowhead at the target) instead of burying the arrowhead under the
+	// badge circle.
+	function trimmedPath(p: Path): { x1: number; y1: number; x2: number; y2: number } {
+		const from = map.grids[p.from];
+		const to = map.grids[p.to];
+		const dx = to.x - from.x;
+		const dy = to.y - from.y;
+		const dist = Math.hypot(dx, dy);
+		if (dist < 1) return { x1: from.x, y1: from.y, x2: to.x, y2: to.y };
+		const w = tpArrowWidth(p.armies);
+		const startTrim = badgeRadius(p.from) === 0 ? 0 : badgeRadius(p.from) + 3;
+		const endTrim = badgeRadius(p.to) === 0 ? 0 : badgeRadius(p.to) + w + 3;
+		// Never trim the line away entirely (adjacent hexes with big badges).
+		const scale = Math.min(1, (dist - 8) / Math.max(startTrim + endTrim, 1));
+		const s = (startTrim * scale) / dist;
+		const e = (endTrim * scale) / dist;
+		return {
+			x1: from.x + dx * s,
+			y1: from.y + dy * s,
+			x2: to.x - dx * e,
+			y2: to.y - dy * e
+		};
+	}
 </script>
 
 <svg
@@ -76,24 +143,6 @@
 				</marker>
 			{/if}
 		{/each}
-		<!-- Diagonal two-tone stripes, one pattern per possible previous owner, so
-		     a captured hex clearly shows whose solid color it was taken from —
-		     opaque bands (not a translucent tint) so it reads even when the two
-		     owners' colors are close in hue. -->
-		{#each [...PLAYERS, null] as prevOwner}
-			<pattern
-				id="tp-capture-stripe-{prevOwner ?? 'neutral'}"
-				width="8" height="8"
-				patternUnits="userSpaceOnUse"
-				patternTransform="rotate(45)"
-			>
-				<rect width="8" height="8" fill="transparent" />
-				<!-- Dark halo behind the color band so the stripe reads even when
-				     the previous owner's hue is close to the current fill. -->
-				<line x1="0" y1="0" x2="0" y2="8" stroke="#0a1420" stroke-width="5.5" />
-				<line x1="0" y1="0" x2="0" y2="8" stroke={prevOwner ? PLAYER_COLORS[prevOwner] : '#c9d6e2'} stroke-width="3.5" />
-			</pattern>
-		{/each}
 	</defs>
 	<rect x="0" y="0" width={map.width} height={map.height} fill="#0a2540" />
 	{#each map.waterHexes ?? [] as poly}
@@ -108,16 +157,25 @@
 		<polygon
 			points={polygonPoints(g.cell)}
 			fill={owner ? PLAYER_COLORS[owner] : '#334'}
+			fill-opacity={dimUnchanged && changedGrids.length > 0 && !changedGrids.includes(g.id) ? 0.4 : 1}
 			stroke="#0a1420"
 			stroke-width="1.5"
 		/>
 	{/each}
+	<!-- "Captured from" wedge — one sixth of the hex filled with the previous
+	     owner's color, so a captured hex shows whose solid color it was taken
+	     from. It sits on the side the winning attack came in from (see
+	     wedgeCorners), so wedge and arrow read as one gesture. The dark
+	     stroke separates it from the fill even when the two owners' colors
+	     are close in hue. -->
 	{#each map.grids as g (g.id)}
 		{#if g.id in capturedFrom}
+			{@const prevOwner = capturedFrom[g.id]}
 			<polygon
-				points={polygonPoints(g.cell)}
-				fill="url(#tp-capture-stripe-{capturedFrom[g.id] ?? 'neutral'})"
-				stroke="none"
+				points={wedgePoints(g.id)}
+				fill={prevOwner ? PLAYER_COLORS[prevOwner] : '#c9d6e2'}
+				stroke="#0a1420"
+				stroke-width="1.5"
 				pointer-events="none"
 			/>
 		{/if}
@@ -133,6 +191,21 @@
 			/>
 		{/if}
 	{/each}
+	<!-- Faint dashed echo (on the "before" pane) of the hexes that change
+	     this turn, so the eye lands on the same spot in both maps. -->
+	{#each map.grids as g (g.id)}
+		{#if ghostGrids.includes(g.id)}
+			<polygon
+				points={polygonPoints(g.cell)}
+				fill="none"
+				stroke="#ffe980"
+				stroke-width="2.5"
+				stroke-dasharray="7 5"
+				stroke-opacity="0.6"
+				pointer-events="none"
+			/>
+		{/if}
+	{/each}
 	<!-- Wall barriers as of this turn -->
 	{#each wallSegmentsFor(edgeWalls, map.grids) as w}
 		<g pointer-events="none">
@@ -140,6 +213,20 @@
 			<line x1={w.a[0]} y1={w.a[1]} x2={w.b[0]} y2={w.b[1]} stroke="#9a8f83" stroke-width="9" stroke-linecap="round" />
 			<line x1={w.a[0]} y1={w.a[1]} x2={w.b[0]} y2={w.b[1]} stroke="#4a423b" stroke-width="9" stroke-linecap="butt" stroke-dasharray="2 9" />
 		</g>
+	{/each}
+	{#each paths as p, i}
+		{@const t = trimmedPath(p)}
+		<line
+			x1={t.x1} y1={t.y1}
+			x2={t.x2} y2={t.y2}
+			stroke={p.forfeited ? '#ff3b3b' : (p.color ?? '#fff')}
+			stroke-width={tpArrowWidth(p.armies)}
+			stroke-linecap="round"
+			stroke-dasharray={p.forfeited ? '5 4' : undefined}
+			marker-end="url(#tp-path-arrowhead-{i})"
+			opacity="0.9"
+			pointer-events="none"
+		/>
 	{/each}
 	<!-- Army count per changed hex — for a capture this is the committed
 	     attacking force (always positive); for a pure army-swing turn (no
@@ -164,21 +251,6 @@
 			fill={isBiggest ? (isLoss ? '#ff5a5a' : '#ffb03b') : (isLoss ? '#ff9a9a' : '#fff')}
 			pointer-events="none"
 		>{armies > 0 ? '+' : ''}{armies}</text>
-	{/each}
-	{#each paths as p, i}
-		{@const fromG = map.grids[p.from]}
-		{@const toG = map.grids[p.to]}
-		<line
-			x1={fromG.x} y1={fromG.y}
-			x2={toG.x} y2={toG.y}
-			stroke={p.forfeited ? '#ff3b3b' : (p.color ?? '#fff')}
-			stroke-width={tpArrowWidth(p.armies)}
-			stroke-linecap="round"
-			stroke-dasharray={p.forfeited ? '5 4' : undefined}
-			marker-end="url(#tp-path-arrowhead-{i})"
-			opacity="0.9"
-			pointer-events="none"
-		/>
 	{/each}
 </svg>
 
