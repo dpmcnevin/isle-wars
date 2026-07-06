@@ -1,5 +1,5 @@
 import { writable, derived, get } from 'svelte/store';
-import { generateMap, crossesRiver, wallBetween, shuffle, type GameMap } from './map';
+import { generateMap, crossesRiver, wallBetween, shuffle, encodeSeed, decodeSeedSettings, hashSeedToInt, type GameMap } from './map';
 // The card registry lives in ./cards (this module and it import each other; see
 // the note in cards.ts for why that cycle is safe). Values used by the dispatch
 // below are imported here; the public card API is re-exported near CardType so
@@ -56,7 +56,9 @@ export type CardType =
 	| 'oasis'
 	| 'rampart'
 	| 'wall'
-	| 'breach';
+	| 'breach'
+	| 'paratroop'
+	| 'antiair';
 
 // Re-export the card registry's public surface so consumers keep importing it
 // from '$lib/game'. The definitions themselves live in ./cards.
@@ -103,6 +105,9 @@ export type Phase =
 	| 'wall_to'
 	| 'breach_from'
 	| 'breach_to'
+	| 'paratroop_from'
+	| 'paratroop_to'
+	| 'paratroop_qty'
 	| 'discard'
 	| 'game_over';
 
@@ -122,8 +127,9 @@ export interface LogEntry {
 
 export interface GameState {
 	map: GameMap;
-	seed: number;
+	seed: string;
 	difficulty: number; // 1..4
+	startingArmies: number; // armies each initial territory got at game start — kept for share links
 	states: GridState[]; // indexed by grid id
 	hands: Record<Player, CardType[]>;
 	alive: Record<Player, boolean>;
@@ -170,6 +176,36 @@ export interface GameState {
 	history: TurnSnapshot[];
 	stats: Record<Player, PlayerStats>;
 	conquests: ConquestEvent[];
+	edgeEvents: EdgeEvent[];
+	hexArmyDeltas: HexArmyDelta[];
+	// Bookkeeping only (not meant for display): each hex's army count as of
+	// the start of the current turn, so beginTurn can diff against it next
+	// time to produce hexArmyDeltas without needing a full per-hex snapshot
+	// every turn (see beginTurn).
+	armiesAtTurnStart: number[];
+}
+
+// The biggest per-hex army swings each turn — deliberately NOT a full
+// per-hex-per-turn history (that would be ~turns*hexes numbers and blow up
+// the shareable recap link); only the few largest swings are kept, so a
+// pure-army-count turning point (no capture) can still point at *which*
+// hex(es) actually moved the needle, without storing every hex every turn.
+export interface HexArmyDelta {
+	turn: number;
+	grid: number;
+	delta: number; // signed: positive = armies grew there, negative = shrank
+}
+
+// One entry per wall/sea-lane edge added or removed — Wall/Breach and
+// Ferry/Invasion/Storm all mutate map.walls / map.seaLanes directly, with no
+// per-turn history of their own. Chronological (pushed in turn order); lets
+// the post-game turning-point map overlay show only the walls/lanes that
+// actually existed as of that turn (see reconstructEdgesAtTurn in summary.ts).
+export interface EdgeEvent {
+	turn: number;
+	kind: 'wall' | 'seaLane';
+	edge: [number, number];
+	added: boolean; // true = built/opened, false = torn down/destroyed
 }
 
 export interface TurnSnapshot {
@@ -191,6 +227,13 @@ export interface ConquestEvent {
 	attacker: Player;
 	defender: Player | null; // null if the hex was neutral/unowned
 	from: number | null; // the hex the capture was launched from, if any (null for rebels_flip)
+	armies: number; // attacking force size at the moment of capture, for arrow-weight display
+	// True when this isn't a normal capture but the *attacker's* own launch
+	// hex getting forfeited to the defender after their attack was ground
+	// down to 1 army — i.e. the "attacker"/"defender" here are swapped from
+	// the original attack's perspective. Lets the UI mark it as a failed
+	// attack (X) instead of a successful conquest (arrow).
+	forfeited?: boolean;
 }
 
 export interface PlayerStats {
@@ -219,7 +262,7 @@ function emptyStatsMap(): Record<Player, PlayerStats> {
 	return { blue: emptyStats(), green: emptyStats(), red: emptyStats(), brown: emptyStats() };
 }
 
-export const SAVE_KEY = 'isle-wars-save-v13';
+export const SAVE_KEY = 'isle-wars-save-v15';
 export const DEBUG_KEY = 'isle-wars-debug';
 
 export interface DebugSettings {
@@ -479,8 +522,31 @@ function emptyAlive(): Record<Player, boolean> {
  * Initialize a new game. Difficulty 1..4 controls how many countries the
  * human player starts with; startingArmies is the initial armies per grid.
  */
-export function startGame(difficulty = 2, startingArmies = 3, seed?: number): GameState {
-	const s = seed ?? Math.floor(Math.random() * 1e9);
+export function startGame(difficulty = 2, startingArmies = 3, seed?: string): GameState {
+	// A full seed string (see map.ts) carries its own difficulty/startingArmies
+	// and debug settings (die sides, starter cards, auto-play) packed into its
+	// trailing characters — typing or sharing just the seed reproduces the
+	// exact same game, not only the same map. Those decoded values win over
+	// whatever was passed in, since the whole point of pasting a seed is to
+	// reproduce THAT game. A hand-typed or pre-existing seed that isn't in
+	// this format decodes to null and falls back to the passed-in args.
+	const decoded = seed ? decodeSeedSettings(seed) : null;
+	if (decoded) {
+		difficulty = decoded.difficulty;
+		startingArmies = decoded.startingArmies;
+		updateDebugSettings({
+			dieSides: decoded.dieSides,
+			starterCards: decoded.starterCards,
+			autoPlay: decoded.autoPlay
+		});
+	}
+	// Canonical seed display/storage is uppercase — hashSeedToInt in map.ts is
+	// already case-insensitive, but normalizing here too means GameState.seed
+	// (shown in the UI and shared links) never shows a stray lowercase entry.
+	const s = (
+		seed ??
+		encodeSeed({ difficulty, startingArmies, ...getDebugSettings() })
+	).toUpperCase();
 	const map = generateMap(s);
 	const states: GridState[] = map.grids.map(() => ({ owner: null, armies: 0 }));
 
@@ -489,7 +555,7 @@ export function startGame(difficulty = 2, startingArmies = 3, seed?: number): Ga
 	// neutral so no player has a size advantage on turn 1. Difficulty no
 	// longer skews the initial map; it just changes how aggressively the
 	// AI plays (see ai.ts).
-	const rand = mulberry32(s ^ 0xa5a5a5);
+	const rand = mulberry32(hashSeedToInt(s) ^ 0xa5a5a5);
 	const ids = shuffle(map.grids.map((g) => g.id), rand);
 	const perPlayer = Math.floor(ids.length / PLAYERS.length);
 	const claimed = perPlayer * PLAYERS.length;
@@ -506,6 +572,7 @@ export function startGame(difficulty = 2, startingArmies = 3, seed?: number): Ga
 		map,
 		seed: s,
 		difficulty,
+		startingArmies,
 		states,
 		hands: emptyHands(),
 		alive: emptyAlive(),
@@ -539,7 +606,10 @@ export function startGame(difficulty = 2, startingArmies = 3, seed?: number): Ga
 		winner: null,
 		history: [],
 		stats: emptyStatsMap(),
-		conquests: []
+		conquests: [],
+		edgeEvents: [],
+		hexArmyDeltas: [],
+		armiesAtTurnStart: []
 	};
 	// Start first turn
 	const ready = beginTurn(state);
@@ -564,6 +634,12 @@ export function countryCount(s: GameState, p: Player): number {
 	return n;
 }
 
+export function armyCount(s: GameState, p: Player): number {
+	let n = 0;
+	for (const g of s.states) if (g.owner === p) n += g.armies;
+	return n;
+}
+
 export function fullIslandBonus(s: GameState, p: Player): number {
 	let bonus = 0;
 	for (const isl of s.map.islands) {
@@ -582,6 +658,14 @@ function computeReinforcements(s: GameState, p: Player): number {
 export function log(s: GameState, text: string, kind: LogEntry['kind'] = 'info', player: Player | null = s.current) {
 	const entry: LogEntry = { turn: s.turn, player, text, kind };
 	s.log = [entry, ...s.log].slice(0, 100);
+}
+
+// Records a wall/sea-lane edge being built or torn down, so the post-game
+// turning-point map can show only the walls/lanes that existed as of a given
+// turn (see reconstructEdgesAtTurn in summary.ts) instead of the final state.
+export function pushEdgeEvent(s: GameState, kind: EdgeEvent['kind'], a: number, b: number, added: boolean) {
+	const edge: [number, number] = a < b ? [a, b] : [b, a];
+	s.edgeEvents.push({ turn: s.turn, kind, edge, added });
 }
 
 // ---------------------------------------------------------------------------
@@ -722,6 +806,7 @@ function removePendingInvasionLane(s: GameState) {
 	if (!s.pendingInvasionLane) return;
 	const [a, b] = s.pendingInvasionLane;
 	s.map.seaLanes = s.map.seaLanes.filter(([x, y]) => !((x === a && y === b) || (x === b && y === a)));
+	pushEdgeEvent(s, 'seaLane', a, b, false);
 	s.map.adj[a] = s.map.adj[a].filter((n) => n !== b);
 	s.map.adj[b] = s.map.adj[b].filter((n) => n !== a);
 	log(s, `Water Invasion failed — sea route ${gridLabel(s, a)} ↔ ${gridLabel(s, b)} collapsed.`, 'card');
@@ -748,6 +833,30 @@ function snapshot(s: GameState) {
 	s.history = [...s.history, { turn: s.turn, territories, armies, islands }];
 }
 
+const HEX_ARMY_DELTA_TOP_K = 3;
+const HEX_ARMY_DELTA_MIN = 4; // skip routine 1-3 army noise (single placements, desert heat, etc.)
+
+/**
+ * Diffs every hex's army count against how it stood at the start of the
+ * turn that just ended, and keeps only the few biggest swings — not a full
+ * per-hex-per-turn history (that's ~turns*hexes numbers, too much for a
+ * shareable link), just enough to point at "which hex" for a turning point
+ * that isn't a capture. Must run before armiesAtTurnStart is refreshed for
+ * the turn about to start.
+ */
+function recordHexArmyDeltas(s: GameState) {
+	if (s.armiesAtTurnStart.length === s.states.length) {
+		const deltas = s.states
+			.map((st, grid) => ({ grid, delta: st.armies - s.armiesAtTurnStart[grid] }))
+			.filter((d) => Math.abs(d.delta) >= HEX_ARMY_DELTA_MIN)
+			.sort((a, b) => Math.abs(b.delta) - Math.abs(a.delta))
+			.slice(0, HEX_ARMY_DELTA_TOP_K);
+		const endedTurn = s.turn - 1;
+		for (const d of deltas) s.hexArmyDeltas.push({ turn: endedTurn, grid: d.grid, delta: d.delta });
+	}
+	s.armiesAtTurnStart = s.states.map((st) => st.armies);
+}
+
 /**
  * Called once at the top of each player's turn: applies interest-style
  * events, computes reinforcements, and moves into 'placing' phase.
@@ -761,6 +870,7 @@ function beginTurn(s: GameState): GameState {
 	}
 	// Snapshot state for analytics at start of each player's turn
 	snapshot(s);
+	recordHexArmyDeltas(s);
 	s.defeatedThisTurn = false;
 	s.turnCardAwarded = false;
 	s.lastAttackResult = null;
@@ -904,7 +1014,7 @@ function applyRandomEvent(s: GameState) {
 				const newOwner = otherOwners[Math.floor(Math.random() * otherOwners.length)];
 				g.owner = newOwner;
 				g.armies = Math.max(1, Math.floor(g.armies / 2));
-				s.conquests.push({ turn: s.turn, grid: id, attacker: newOwner, defender: oldOwner, from: null });
+				s.conquests.push({ turn: s.turn, grid: id, attacker: newOwner, defender: oldOwner, from: null, armies: g.armies });
 				log(s, `Rebels overthrew ${PLAYER_NAMES[oldOwner!]} in ${gridLabel(s, id)}! Now held by ${PLAYER_NAMES[newOwner]}.`, 'event', null);
 			}
 		}
@@ -985,33 +1095,41 @@ export function cancelAction() {
 	});
 }
 
+/**
+ * Card rule (per user spec): card at end of every round, UNLESS your turn
+ * ends on a battle loss. i.e. it's the OUTCOME of your final attack that
+ * matters — earlier wins don't rescue a losing finish. Shared by every path
+ * that can end a turn (End Turn button, and a move that ends the turn).
+ * Returns true if it paused the turn for a human discard (caller must not
+ * advance the turn in that case).
+ */
+function awardTurnCardIfDue(s: GameState): boolean {
+	const endedOnLoss = s.lastAttackResult === 'loss';
+	const shouldAward = !endedOnLoss && !s.turnCardAwarded;
+	if (!shouldAward) return false;
+	const card = drawCard(s);
+	if (!card) return false;
+	s.hands[s.current] = [...s.hands[s.current], card];
+	log(s, `${PLAYER_NAMES[s.current]} drew a ${CARD_LABELS[card]} card.`, 'card');
+	s.turnCardAwarded = true;
+	// If the human is over the hand limit, pause for them to pick a
+	// discard. In auto-play mode, blue is AI-controlled — skip the pause
+	// and auto-discard the oldest card(s).
+	if (s.current === 'blue' && s.hands.blue.length > HAND_MAX && !debugSettings.autoPlay) {
+		s.pendingDiscard = true;
+		s.phase = 'discard';
+		s.message = 'Hand full — click a card to discard.';
+		return true;
+	}
+	enforceHandLimit(s);
+	return false;
+}
+
 export function endTurn() {
 	game.update((s) => {
 		if (s.phase !== 'action') return s;
 		devLogAction(s.current, { kind: 'end_turn' }, s);
-		// Card rule (per user spec): card at end of every round, UNLESS your
-		// turn ends on a battle loss. i.e. it's the OUTCOME of your final
-		// attack that matters — earlier wins don't rescue a losing finish.
-		const endedOnLoss = s.lastAttackResult === 'loss';
-		const shouldAward = !endedOnLoss && !s.turnCardAwarded;
-		if (shouldAward) {
-			const card = drawCard(s);
-			if (card) {
-				s.hands[s.current] = [...s.hands[s.current], card];
-				log(s, `${PLAYER_NAMES[s.current]} drew a ${CARD_LABELS[card]} card.`, 'card');
-				s.turnCardAwarded = true;
-				// If the human is over the hand limit, pause for them to pick a
-				// discard. In auto-play mode, blue is AI-controlled — skip the pause
-				// and auto-discard the oldest card(s).
-				if (s.current === 'blue' && s.hands.blue.length > HAND_MAX && !debugSettings.autoPlay) {
-					s.pendingDiscard = true;
-					s.phase = 'discard';
-					s.message = 'Hand full — click a card to discard.';
-					return s;
-				}
-				enforceHandLimit(s);
-			}
-		}
+		if (awardTurnCardIfDue(s)) return s;
 		return advanceTurn(s);
 	});
 }
@@ -1155,7 +1273,7 @@ function autoConquer(s: GameState, fromId: number, toId: number): void {
 	to.rampart = false;
 	s.stats[attacker].territoriesCaptured++;
 	if (defender) s.stats[defender].territoriesLost++;
-	s.conquests.push({ turn: s.turn, grid: toId, attacker, defender, from: fromId });
+	s.conquests.push({ turn: s.turn, grid: toId, attacker, defender, from: fromId, armies: from.armies });
 	s.defeatedThisTurn = true;
 	s.lastAttackResult = 'win';
 	s.eliteAttackActive = false;
@@ -1248,7 +1366,7 @@ export function rollAttack(): void {
 			to.rampart = false;
 			s.stats[attacker].territoriesCaptured++;
 			if (defender) s.stats[defender].territoriesLost++;
-			s.conquests.push({ turn: s.turn, grid: s.selectedTo, attacker, defender, from: s.selectedFrom });
+			s.conquests.push({ turn: s.turn, grid: s.selectedTo, attacker, defender, from: s.selectedFrom, armies: from.armies });
 			s.defeatedThisTurn = true;
 			s.lastAttackResult = 'win';
 			// Elite Troops was consumed by this successful attack.
@@ -1301,7 +1419,7 @@ export function rollAttack(): void {
 			const forfeitFrom = from.owner;
 			from.owner = forfeitTo;
 			from.armies = 1;
-			s.conquests.push({ turn: s.turn, grid: s.selectedFrom, attacker: forfeitTo, defender: forfeitFrom, from: s.selectedTo });
+			s.conquests.push({ turn: s.turn, grid: s.selectedFrom, attacker: forfeitTo, defender: forfeitFrom, from: s.selectedTo, armies: to.armies, forfeited: true });
 			updateAlive(s);
 			if (checkWin(s)) return s;
 			// Turn ends per manual
@@ -1378,6 +1496,7 @@ export function confirmMove(qty: number) {
 		s.selectedFrom = null;
 		s.selectedTo = null;
 		// per manual, move ends the turn
+		if (awardTurnCardIfDue(s)) return s;
 		return advanceTurn(s);
 	});
 }
@@ -1396,16 +1515,16 @@ export function playCard(idx: number) {
 		const hand = s.hands[s.current];
 		const card = hand[idx];
 		if (!card) return s;
+		const def = CARD_BY_ID[card];
 		// One-card-per-turn rule (excluding passives).
-		if (s.cardPlayedThisTurn && card !== 'antibomb') {
+		if (s.cardPlayedThisTurn && !def.passive) {
 			s.message = 'Only one card per turn.';
 			return s;
 		}
 		devLogAction(s.current, { kind: 'play_card', card, index: idx }, s);
-		const def = CARD_BY_ID[card];
 		if (def.passive) {
 			// Antibomb and friends work automatically; there's nothing to activate.
-			s.message = 'Anti-Bomb is passive — it protects automatically.';
+			s.message = `${def.label} is passive — it protects automatically.`;
 			return s;
 		}
 		if (!def.playableIn.includes(s.phase)) {
@@ -1562,6 +1681,79 @@ export function confirmAir(qty: number) {
 	});
 }
 
+// Paratroop Attack resolves as one self-contained engagement (like Bomb/
+// Artillery) rather than through the repeatable attack_rolling UI loop —
+// the committed force has no adjacent home hex to retreat rounds into, so
+// it fights until one side is wiped out, then the card is done.
+export function resolveParatroop(s: GameState, fromId: number, toId: number, qty: number): void {
+	const from = s.states[fromId];
+	const to = s.states[toId];
+	const attacker = from.owner!;
+	const defender = to.owner;
+	from.armies -= qty;
+	if (defender && s.hands[defender].includes('antiair')) {
+		s.hands[defender] = s.hands[defender].filter((c) => c !== 'antiair');
+		log(s, `${PLAYER_NAMES[defender]}'s Anti-Air shot down a Paratroop Attack from ${PLAYER_NAMES[attacker]}!`, 'card');
+		s.lastAttackResult = 'loss';
+		s.stats[attacker].attacksLost++;
+		s.phase = 'action';
+		s.selectedFrom = null;
+		s.selectedTo = null;
+		s.message = 'Attack, move, or pass.';
+		updateAlive(s);
+		checkWin(s);
+		return;
+	}
+	let attackers = qty;
+	let defenders = to.armies;
+	const defBonus = defenseBonus(s, toId);
+	const atkBonus = attackerBonus(s, toId);
+	while (attackers > 0 && defenders > 0) {
+		const atk = rollDie() + atkBonus;
+		const def = rollDie() + defBonus;
+		if (atk > def) defenders -= 1; else attackers -= 1;
+	}
+	if (defenders <= 0) {
+		to.owner = attacker;
+		to.fortified = false;
+		to.rampart = false;
+		to.armies = Math.max(1, attackers);
+		s.stats[attacker].territoriesCaptured++;
+		if (defender) s.stats[defender].territoriesLost++;
+		s.conquests.push({ turn: s.turn, grid: toId, attacker, defender, from: fromId, armies: qty });
+		s.defeatedThisTurn = true;
+		s.lastAttackResult = 'win';
+		s.stats[attacker].attacksWon++;
+		log(s, `${PLAYER_NAMES[attacker]}'s paratroopers seized ${gridLabel(s, toId)}!`, 'defeat');
+	} else {
+		to.armies = defenders;
+		s.lastAttackResult = 'loss';
+		s.stats[attacker].attacksLost++;
+		log(s, `${PLAYER_NAMES[attacker]}'s paratroop drop on ${gridLabel(s, toId)} was wiped out.`, 'attack');
+	}
+	s.phase = 'action';
+	s.selectedFrom = null;
+	s.selectedTo = null;
+	s.message = 'Attack, move, or pass.';
+	updateAlive(s);
+	checkWin(s);
+}
+
+export function confirmParatroop(qty: number) {
+	game.update((s) => {
+		if (s.phase !== 'paratroop_qty' || s.selectedFrom == null || s.selectedTo == null) return s;
+		const from = s.states[s.selectedFrom];
+		const q = Math.max(1, Math.min(qty, from.armies - 1));
+		const idx = (s as any)._pendingCardIdx as number;
+		if (typeof idx === 'number') {
+			consumeCard(s, idx);
+			delete (s as any)._pendingCardIdx;
+		}
+		resolveParatroop(s, s.selectedFrom, s.selectedTo, q);
+		return s;
+	});
+}
+
 export function startGamePlaying() {
 	game.update((s) => { s.gameStarted = true; return s; });
 }
@@ -1579,7 +1771,7 @@ export function forceEndTurn() {
 	});
 }
 
-export function newGame(difficulty: number, startingArmies: number, seed?: number) {
+export function newGame(difficulty: number, startingArmies: number, seed?: string) {
 	game.set(startGame(difficulty, startingArmies, seed));
 }
 

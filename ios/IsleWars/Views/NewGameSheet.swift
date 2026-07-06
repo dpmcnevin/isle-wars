@@ -153,13 +153,14 @@ struct NewGameSheet: View {
             sectionLabel("SEED (OPTIONAL)")
             HStack(spacing: 10) {
                 TextField("Random", text: $seedText)
-                    .keyboardType(.numberPad)
+                    .textInputAutocapitalization(.characters)
+                    .autocorrectionDisabled()
                     .textFieldStyle(.plain)
                     .padding(.horizontal, 12).padding(.vertical, 10)
                     .background(RoundedRectangle(cornerRadius: 10).fill(Color.white.opacity(0.06)))
                     .overlay(RoundedRectangle(cornerRadius: 10).stroke(AppTheme.border, lineWidth: 1))
                 Button {
-                    seedText = "\(Int.random(in: 1...999_999_999))"
+                    seedText = Self.randomSeed()
                 } label: {
                     Label("Randomize", systemImage: "dice.fill")
                 }
@@ -168,9 +169,17 @@ struct NewGameSheet: View {
         }
     }
 
+    // Mirrors src/lib/map.ts's randomSeed(): a 12-char uppercase-alphanumeric
+    // seed, for the same "more variety, unambiguous when shared" reasons.
+    private static func randomSeed(length: Int = 12) -> String {
+        let chars = Array("0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZ")
+        return String((0..<length).map { _ in chars.randomElement()! })
+    }
+
     private var startButton: some View {
         Button {
-            vm.startNewGame(difficulty: difficulty, startingArmies: startingArmies, seed: Int(seedText))
+            let seed = seedText.trimmingCharacters(in: .whitespaces)
+            vm.startNewGame(difficulty: difficulty, startingArmies: startingArmies, seed: seed.isEmpty ? nil : seed.uppercased())
         } label: {
             Text("Start New Game  →")
                 .font(.title3.bold())

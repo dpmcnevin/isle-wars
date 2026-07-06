@@ -60,6 +60,148 @@ export function wallBetween(map: GameMap, a: number, b: number): boolean {
 	return false;
 }
 
+// --- Rendering helpers shared by the live board (+page.svelte) and the
+// turning-point mini map (TpMiniMap.svelte, used both in-app and on the
+// shareable recap page) -----------------------------------------------
+
+export function polygonPoints(pts: [number, number][]): string {
+	return pts.map((p) => p.join(',')).join(' ');
+}
+
+/** Wall barriers: a short thick segment straddling the shared edge between
+ *  the two walled hexes. We use the two vertices the hexes have in common. */
+export function wallSegmentsFor(
+	walls: [number, number][],
+	grids: Grid[]
+): { a: [number, number]; b: [number, number] }[] {
+	if (walls.length === 0) return [];
+	const vkey = (v: [number, number]) => `${Math.round(v[0] * 10)},${Math.round(v[1] * 10)}`;
+	const segs: { a: [number, number]; b: [number, number] }[] = [];
+	for (const [g1, g2] of walls) {
+		if (!grids[g1] || !grids[g2]) continue;
+		const cb = new Set(grids[g2].cell.map(vkey));
+		const shared = grids[g1].cell.filter((v) => cb.has(vkey(v)));
+		if (shared.length !== 2) continue;
+		segs.push({ a: shared[0], b: shared[1] });
+	}
+	return segs;
+}
+
+/** Draws a sea lane as a quadratic Bezier that arcs perpendicular to the
+ *  segment. A slight curve prevents lanes from overlapping straight-through
+ *  hex centers and gives them a nautical "sea route" feel. */
+export function seaLanePath(a: number, b: number, grids: Grid[]): string {
+	const g1 = grids[a];
+	const g2 = grids[b];
+	const midX = (g1.x + g2.x) / 2;
+	const midY = (g1.y + g2.y) / 2;
+	const dx = g2.x - g1.x;
+	const dy = g2.y - g1.y;
+	const len = Math.hypot(dx, dy) || 1;
+	// Perpendicular unit vector — arc height ~12% of segment length, capped.
+	const perpX = -dy / len;
+	const perpY = dx / len;
+	const arc = Math.min(22, len * 0.06);
+	// Deterministic side based on the endpoint ids so the curve doesn't jitter
+	// between renders.
+	const side = (a + b) % 2 === 0 ? 1 : -1;
+	const cx = midX + perpX * arc * side;
+	const cy = midY + perpY * arc * side;
+	return `M ${g1.x} ${g1.y} Q ${cx} ${cy} ${g2.x} ${g2.y}`;
+}
+
+// Map seeds are a human-shareable 12-char uppercase-alphanumeric string, not
+// just map entropy: the last 4 characters pack difficulty, startingArmies,
+// die sides, and the starter-cards/auto-play debug flags, so typing or
+// sharing a single seed reproduces the exact same game end-to-end — not
+// just the same board. mulberry32 only takes a 32-bit int, so hashSeedToInt
+// folds the whole string down deterministically for the map's own RNG.
+const SEED_CHARS = '0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZ';
+const RANDOM_PART_LEN = 8;
+const SETTINGS_PART_LEN = 4;
+export const SEED_LENGTH = RANDOM_PART_LEN + SETTINGS_PART_LEN;
+
+export interface SeedSettings {
+	difficulty: number;
+	startingArmies: number;
+	dieSides: number;
+	starterCards: boolean;
+	autoPlay: boolean;
+}
+
+function clamp(n: number, lo: number, hi: number): number {
+	return Math.max(lo, Math.min(hi, Math.round(n)));
+}
+
+// 3 bits difficulty (0-7) + 5 bits armies (0-31) + 7 bits dieSides (0-127)
+// + 2 flag bits = 17 bits, comfortably under 36^4 (~1.68M) once base36-encoded.
+function packSettings(s: SeedSettings): number {
+	const difficulty = clamp(s.difficulty, 0, 7);
+	const armies = clamp(s.startingArmies, 0, 31);
+	const dieSides = clamp(s.dieSides, 0, 127);
+	const flags = (s.autoPlay ? 1 : 0) | (s.starterCards ? 2 : 0);
+	return ((difficulty * 32 + armies) * 128 + dieSides) * 4 + flags;
+}
+
+function unpackSettings(packed: number): SeedSettings {
+	let v = packed;
+	const flags = v % 4; v = Math.floor(v / 4);
+	const dieSides = v % 128; v = Math.floor(v / 128);
+	const startingArmies = v % 32; v = Math.floor(v / 32);
+	const difficulty = v % 8;
+	return {
+		// Clamped to the app's actual valid ranges — a hand-typed 12-char
+		// seed that isn't one of ours can still unpack to *some* number here,
+		// and an out-of-range difficulty/dieSides shouldn't leak into play.
+		difficulty: clamp(difficulty, 1, 4),
+		startingArmies: clamp(startingArmies, 1, 20),
+		dieSides: clamp(dieSides, 2, 100),
+		autoPlay: !!(flags & 1),
+		starterCards: !!(flags & 2)
+	};
+}
+
+function randomAlnum(length: number): string {
+	let out = '';
+	if (typeof crypto !== 'undefined' && crypto.getRandomValues) {
+		const bytes = crypto.getRandomValues(new Uint8Array(length));
+		for (let i = 0; i < length; i++) out += SEED_CHARS[bytes[i] % SEED_CHARS.length];
+	} else {
+		for (let i = 0; i < length; i++) out += SEED_CHARS[Math.floor(Math.random() * SEED_CHARS.length)];
+	}
+	return out;
+}
+
+/** Builds a full seed string: fresh random map entropy + the given settings
+ *  packed into the trailing characters. */
+export function encodeSeed(settings: SeedSettings): string {
+	const randomPart = randomAlnum(RANDOM_PART_LEN);
+	const packed = packSettings(settings).toString(36).toUpperCase().padStart(SETTINGS_PART_LEN, '0');
+	return `${randomPart}${packed}`;
+}
+
+/** Extracts the settings packed into a full-length seed, or null if `seed`
+ *  isn't in that format (e.g. hand-typed, or from before this scheme). */
+export function decodeSeedSettings(seed: string): SeedSettings | null {
+	const s = seed.trim().toUpperCase();
+	if (s.length !== SEED_LENGTH) return null;
+	const packed = parseInt(s.slice(RANDOM_PART_LEN), 36);
+	if (!Number.isFinite(packed)) return null;
+	return unpackSettings(packed);
+}
+
+/** djb2 string hash, folded to an unsigned 32-bit int for mulberry32.
+ *  Case-normalizes first so a seed typed in lowercase still hits the same
+ *  map — canonical display/storage is still uppercase. Exported so game.ts's
+ *  own PRNG (the initial territory shuffle) can derive a numeric seed from
+ *  the same string too. */
+export function hashSeedToInt(seed: string): number {
+	const upper = seed.toUpperCase();
+	let h = 5381;
+	for (let i = 0; i < upper.length; i++) h = ((h << 5) + h + upper.charCodeAt(i)) | 0;
+	return h >>> 0;
+}
+
 export function mulberry32(a: number) {
 	return function () {
 		a |= 0;
@@ -327,8 +469,16 @@ function polygonArea(poly: [number, number][]): number {
 // Main generator
 // -----------------------------------------------------------------------------
 
-export function generateMap(seed: number = Math.floor(Math.random() * 1e9)): GameMap {
-	const rnd = mulberry32(seed);
+const DEFAULT_SEED_SETTINGS: SeedSettings = {
+	difficulty: 2,
+	startingArmies: 3,
+	dieSides: 10,
+	starterCards: false,
+	autoPlay: false
+};
+
+export function generateMap(seed: string = encodeSeed(DEFAULT_SEED_SETTINGS)): GameMap {
+	const rnd = mulberry32(hashSeedToInt(seed));
 	const width = 1400;
 	const height = 900;
 
@@ -880,20 +1030,20 @@ export function generateMap(seed: number = Math.floor(Math.random() * 1e9)): Gam
 		}
 	}
 
-	// Named water features. Classification is per water hex:
-	//   6 land neighbors → lake (fully enclosed)
-	//   4-5 land neighbors → bay
-	// Any hex touching the map border or lacking in-bounds neighbors is skipped.
-	const waterFeatures: WaterFeature[] = [];
-	const lakeNames = shuffle(LAKE_NAMES, rnd);
-	const bayNames = shuffle(BAY_NAMES, rnd);
-	let lakeIdx = 0;
-	let bayIdx = 0;
+	// Named water features. A water hex is a *candidate* (mostly enclosed by
+	// land) if it has 5-6 land neighbors, isn't on the map edge, and has no
+	// out-of-bounds neighbors. Candidates that are adjacent to each other
+	// form a single connected body of water — flood-fill them together into
+	// one feature instead of naming each hex separately (otherwise two hexes
+	// of the same lake/bay show up as two differently-named water bodies).
+	// A group is a "lake" only if it never touches open water outside the
+	// group; if any hex in it borders unclaimed water that isn't part of
+	// the group, the whole group is open to the sea and named as a "bay".
+	const isCandidate = new Map<string, { c: number; r: number }>();
 	for (let r = 0; r < hexGrid.length; r++) {
 		for (let c = 0; c < hexGrid[r].length; c++) {
 			const k = hexKey(c, r);
 			if (claimedBy.has(k)) continue;
-			// Skip hexes right on the map edge — not truly enclosed.
 			if (c === 0 || r === 0 || c === nCols - 1 || r === nRows - 1) continue;
 			let landN = 0, oob = 0;
 			for (const [nc, nr] of hexNeighbors(c, r)) {
@@ -901,22 +1051,62 @@ export function generateMap(seed: number = Math.floor(Math.random() * 1e9)): Gam
 				if (claimedBy.has(hexKey(nc, nr))) landN++;
 			}
 			if (oob > 0) continue;
-			const h = hexGrid[r][c];
-			if (landN === 6) {
-				waterFeatures.push({
-					kind: 'lake',
-					name: lakeNames[lakeIdx++ % lakeNames.length],
-					center: [h.x, h.y],
-					hexes: [h.poly]
-				});
-			} else if (landN === 5) {
-				waterFeatures.push({
-					kind: 'bay',
-					name: bayNames[bayIdx++ % bayNames.length],
-					center: [h.x, h.y],
-					hexes: [h.poly]
-				});
+			if (landN === 5 || landN === 6) isCandidate.set(k, { c, r });
+		}
+	}
+
+	const waterFeatures: WaterFeature[] = [];
+	const lakeNames = shuffle(LAKE_NAMES, rnd);
+	const bayNames = shuffle(BAY_NAMES, rnd);
+	let lakeIdx = 0;
+	let bayIdx = 0;
+	const visited = new Set<string>();
+	for (const startKey of isCandidate.keys()) {
+		if (visited.has(startKey)) continue;
+		const group: { c: number; r: number }[] = [];
+		const groupKeys = new Set<string>();
+		const queue = [startKey];
+		visited.add(startKey);
+		while (queue.length) {
+			const k = queue.pop()!;
+			const cell = isCandidate.get(k)!;
+			group.push(cell);
+			groupKeys.add(k);
+			for (const [nc, nr] of hexNeighbors(cell.c, cell.r)) {
+				const nk = hexKey(nc, nr);
+				if (isCandidate.has(nk) && !visited.has(nk)) {
+					visited.add(nk);
+					queue.push(nk);
+				}
 			}
+		}
+		// Open to the sea if any hex in the group borders unclaimed water
+		// that isn't itself part of the group.
+		let opensToSea = false;
+		for (const cell of group) {
+			for (const [nc, nr] of hexNeighbors(cell.c, cell.r)) {
+				const nk = hexKey(nc, nr);
+				if (!claimedBy.has(nk) && !groupKeys.has(nk)) { opensToSea = true; break; }
+			}
+			if (opensToSea) break;
+		}
+		const hexes = group.map(({ c, r }) => hexGrid[r][c]);
+		const cx = hexes.reduce((s, h) => s + h.x, 0) / hexes.length;
+		const cy = hexes.reduce((s, h) => s + h.y, 0) / hexes.length;
+		if (opensToSea) {
+			waterFeatures.push({
+				kind: 'bay',
+				name: bayNames[bayIdx++ % bayNames.length],
+				center: [cx, cy],
+				hexes: hexes.map((h) => h.poly)
+			});
+		} else {
+			waterFeatures.push({
+				kind: 'lake',
+				name: lakeNames[lakeIdx++ % lakeNames.length],
+				center: [cx, cy],
+				hexes: hexes.map((h) => h.poly)
+			});
 		}
 	}
 

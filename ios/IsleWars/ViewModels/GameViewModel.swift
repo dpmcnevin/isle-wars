@@ -28,8 +28,8 @@ final class GameViewModel: ObservableObject {
         }
         CardCatalog.load(from: engine)
         debugSettings = try? engine.getDebugSettings()
-        if let seedString = ProcessInfo.processInfo.environment["ISLEWARS_AUTOSTART_SEED"], let seed = Int(seedString) {
-            startNewGame(seed: seed)
+        if let seedString = ProcessInfo.processInfo.environment["ISLEWARS_AUTOSTART_SEED"] {
+            startNewGame(seed: seedString)
         } else {
             loadSavedGameIfPresent()
         }
@@ -37,7 +37,7 @@ final class GameViewModel: ObservableObject {
 
     // MARK: - Lifecycle
 
-    func startNewGame(difficulty: Int = 2, startingArmies: Int = 3, seed: Int? = nil) {
+    func startNewGame(difficulty: Int = 2, startingArmies: Int = 3, seed: String? = nil) {
         run { try $0.startGame(difficulty: difficulty, startingArmies: startingArmies, seed: seed) }
         // Skip the "Ready to play" gate and drop straight into the game (the AI
         // takes over too, if auto-play is on).

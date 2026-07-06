@@ -45,7 +45,7 @@ enum AttackResult: String, Codable {
 
 struct GameState: Codable {
     let map: GameMap
-    let seed: Int
+    let seed: String
     let difficulty: Int
     let states: [GridState]
     let hands: [String: [CardType]]

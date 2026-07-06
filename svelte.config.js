@@ -24,7 +24,11 @@ const config = {
 			strict: true
 		}),
 		paths: { base },
-		prerender: { entries: ['*'] }
+		// '*' only crawls links reachable from '/', and nothing links to
+		// /recap (it's reached via a JS-built URL with a data fragment,
+		// never an <a href>) — list it explicitly so the static build always
+		// emits a real recap/index.html for GitHub Pages to serve.
+		prerender: { entries: ['*', '/recap'] }
 	}
 };
 

@@ -13,6 +13,7 @@ import {
 	PLAYER_NAMES,
 	consumeCard,
 	log,
+	pushEdgeEvent,
 	gridLabel,
 	resolveBomb,
 	resolveArtillery,
@@ -29,6 +30,7 @@ export interface CardMeta {
 	kind: 'attack' | 'defense' | 'boost' | 'movement' | 'terrain';
 	when: string;
 	desc: string;
+	passive?: boolean;
 }
 
 // One selection step in a card's targeting flow. `check` returns an error
@@ -212,6 +214,7 @@ export const CARD_DEFS: CardDef[] = [
 		],
 		onResolve: (s, [from, to], idx) => {
 			s.map.seaLanes.push([from, to]);
+			pushEdgeEvent(s, 'seaLane', from, to, true);
 			if (!s.map.adj[from].includes(to)) s.map.adj[from].push(to);
 			if (!s.map.adj[to].includes(from)) s.map.adj[to].push(from);
 			consumeCard(s, idx);
@@ -233,6 +236,7 @@ export const CARD_DEFS: CardDef[] = [
 		],
 		onResolve: (s, [from, to], idx) => {
 			s.map.seaLanes.push([from, to]);
+			pushEdgeEvent(s, 'seaLane', from, to, true);
 			s.map.adj[from].push(to); s.map.adj[to].push(from);
 			s.pendingInvasionLane = [from, to];
 			consumeCard(s, idx);
@@ -266,6 +270,7 @@ export const CARD_DEFS: CardDef[] = [
 		onResolve: (s, [from, to], idx) => {
 			const laneIdx = s.map.seaLanes.findIndex(([a, b]) => (a === from && b === to) || (a === to && b === from));
 			if (laneIdx >= 0) s.map.seaLanes.splice(laneIdx, 1);
+			pushEdgeEvent(s, 'seaLane', from, to, false);
 			s.map.adj[from] = s.map.adj[from].filter((n) => n !== to);
 			s.map.adj[to] = s.map.adj[to].filter((n) => n !== from);
 			consumeCard(s, idx);
@@ -350,6 +355,7 @@ export const CARD_DEFS: CardDef[] = [
 			const lo = Math.min(from, to), hi = Math.max(from, to);
 			if (!s.map.walls) s.map.walls = [];
 			s.map.walls.push([lo, hi]);
+			pushEdgeEvent(s, 'wall', from, to, true);
 			consumeCard(s, idx);
 			log(s, `${PLAYER_NAMES[s.current]} built a wall between ${gridLabel(s, from)} and ${gridLabel(s, to)}.`, 'card');
 			s.phase = 'action'; s.selectedFrom = null; s.selectedTo = null; s.message = 'Attack, move, or pass.';
@@ -376,10 +382,36 @@ export const CARD_DEFS: CardDef[] = [
 		onResolve: (s, [from, to], idx) => {
 			const lo = Math.min(from, to), hi = Math.max(from, to);
 			s.map.walls = (s.map.walls ?? []).filter(([a, b]) => !(a === lo && b === hi));
+			pushEdgeEvent(s, 'wall', from, to, false);
 			consumeCard(s, idx);
 			log(s, `${PLAYER_NAMES[s.current]} breached the wall between ${gridLabel(s, from)} and ${gridLabel(s, to)}.`, 'card');
 			s.phase = 'action'; s.selectedFrom = null; s.selectedTo = null; s.message = 'Attack, move, or pass.';
 		}
+	},
+	{
+		id: 'paratroop', label: 'Paratroop Attack', icon: '🪂', kind: 'attack', weight: 1,
+		when: 'Action phase',
+		desc: 'Drop from any of your territories onto any enemy/neutral hex, ignoring adjacency and water. Commit how many armies to send before they land and fight.',
+		playableIn: ACTION_OR_ATTACK,
+		steps: [
+			{ phase: 'paratroop_from', prompt: 'Paratroop Attack: choose one of your territories to launch from (2+ armies).',
+				check: (s, id) => s.states[id].owner !== s.current ? 'Launch from one of your territories.'
+					: s.states[id].armies < 2 ? 'Need at least 2 armies to send paratroopers.' : null },
+			{ phase: 'paratroop_to', prompt: 'Paratroop Attack: choose any enemy or neutral hex to drop onto.',
+				check: (s, id, from) => id === from ? 'Pick a different hex to drop onto.'
+					: s.states[id].owner === s.current ? 'Drop onto an enemy or neutral hex.' : null }
+		],
+		onResolve: (s, [, to]) => {
+			s.selectedTo = to;
+			s.pendingArmies = 1;
+			s.phase = 'paratroop_qty';
+			s.message = 'Choose how many armies to drop, then confirm.';
+		}
+	},
+	{
+		id: 'antiair', label: 'Anti-Air', icon: '🚫', kind: 'defense', weight: 2,
+		when: 'Passive', passive: true, playableIn: [],
+		desc: 'Automatically shoots down the next Paratroop Attack targeting one of your hexes. No action needed.'
 	}
 ];
 
@@ -397,7 +429,7 @@ export const CARD_LABELS = Object.fromEntries(
 ) as Record<CardType, string>;
 
 export const CARD_META = Object.fromEntries(
-	CARD_DEFS.map((c) => [c.id, { icon: c.icon, kind: c.kind, when: c.when, desc: c.desc }])
+	CARD_DEFS.map((c) => [c.id, { icon: c.icon, kind: c.kind, when: c.when, desc: c.desc, passive: c.passive }])
 ) as Record<CardType, CardMeta>;
 
 // Weighted draw pool expanded from each card's `weight`.

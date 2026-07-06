@@ -22,6 +22,7 @@ import {
 	confirmMoveInAfterConquest,
 	confirmMove,
 	confirmAir,
+	confirmParatroop,
 	playCard,
 	startGamePlaying,
 	forceEndTurn,
@@ -62,7 +63,7 @@ function withState<Args extends unknown[]>(fn: (...args: Args) => void) {
 (globalThis as any).IsleWars = {
 	getState: () => JSON.stringify(latestState),
 
-	startGame: (difficulty: number, startingArmies: number, seed?: number) => {
+	startGame: (difficulty: number, startingArmies: number, seed?: string) => {
 		newGame(difficulty, startingArmies, seed);
 		return JSON.stringify(latestState);
 	},
@@ -97,6 +98,7 @@ function withState<Args extends unknown[]>(fn: (...args: Args) => void) {
 	confirmMoveInAfterConquest: withState(confirmMoveInAfterConquest),
 	confirmMove: withState(confirmMove),
 	confirmAir: withState(confirmAir),
+	confirmParatroop: withState(confirmParatroop),
 	playCard: withState(playCard),
 	startGamePlaying: withState(startGamePlaying),
 	forceEndTurn: withState(forceEndTurn),

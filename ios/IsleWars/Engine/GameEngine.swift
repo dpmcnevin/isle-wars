@@ -107,7 +107,7 @@ final class GameEngine {
 
     // MARK: - Game lifecycle
 
-    func startGame(difficulty: Int = 2, startingArmies: Int = 3, seed: Int? = nil) throws -> GameState {
+    func startGame(difficulty: Int = 2, startingArmies: Int = 3, seed: String? = nil) throws -> GameState {
         // JS default parameters only kick in for `undefined`, not `null`, so
         // omit the argument entirely rather than passing NSNull() when unset.
         var args: [Any] = [difficulty, startingArmies]

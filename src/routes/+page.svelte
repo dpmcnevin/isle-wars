@@ -13,6 +13,7 @@
 		confirmMoveInAfterConquest,
 		confirmMove,
 		confirmAir,
+		confirmParatroop,
 		endTurn,
 		playCard,
 		discardCard,
@@ -37,28 +38,34 @@
 		CARD_LABELS,
 		CARD_META,
 		type Player,
-		type CardType
+		type CardType,
+		type GameState
 	} from '$lib/game';
-	import { wallBetween } from '$lib/map';
+	import { wallBetween, polygonPoints, wallSegmentsFor, seaLanePath, type GameMap } from '$lib/map';
 	import { runAiTurn } from '$lib/ai';
-	import { computeTurningPoints, reconstructOwnersAtTurn } from '$lib/summary';
+	import { computeTurningPoints } from '$lib/summary';
+	import { buildRecap, encodeRecap } from '$lib/recap';
+	import { base } from '$app/paths';
+	import { goto } from '$app/navigation';
 
-	let turningPoints = $derived($game.phase === 'game_over' ? computeTurningPoints($game, 10) : []);
-	let selectedTurningPoint = $state<number | null>(null);
-	let openTurningPoint = $state<number | null>(null);
+	// Game over has its own dedicated page (see routes/recap) so both a
+	// just-finished local game and a shared link render the same turning
+	// points/stats/mini-map view. This redirects there the moment the game
+	// ends — see the $effect further down for the actual navigation.
 
 	let placeQty = $state(1);
 	let moveQty = $state(1);
 	let airQty = $state(1);
+	let paratroopQty = $state(1);
 	let moveInQty = $state(0);
 	// The hex the human clicked during placement — opens the qty modal.
 	let placeTargetHex = $state<number | null>(null);
 
-	// Qty modal helpers — covers placement, post-conquest move-in, move, and air.
+	// Qty modal helpers — covers placement, post-conquest move-in, move, air, and paratroop.
 	function isQtyPhase(): boolean {
 		if ($game.current !== HUMAN) return false;
 		if ($game.phase === 'placing' && placeTargetHex != null) return true;
-		return $game.phase === 'attack_move_in' || $game.phase === 'move_qty' || $game.phase === 'air_qty';
+		return $game.phase === 'attack_move_in' || $game.phase === 'move_qty' || $game.phase === 'air_qty' || $game.phase === 'paratroop_qty';
 	}
 	function qtySourceHex(): number | null {
 		if ($game.phase === 'placing') return placeTargetHex;
@@ -89,6 +96,14 @@
 				confirmLabel: 'Move & End Turn'
 			};
 		}
+		if ($game.phase === 'paratroop_qty') {
+			return {
+				title: 'Commit how many armies to the drop?',
+				min: 1,
+				max: Math.max(1, srcArmies - 1),
+				confirmLabel: 'Drop & Attack'
+			};
+		}
 		return {
 			title: 'Airlift how many armies?',
 			min: 1,
@@ -98,7 +113,10 @@
 	}
 	function qtyValue(): number {
 		if ($game.phase === 'placing') return placeQty;
-		return $game.phase === 'attack_move_in' ? moveInQty : $game.phase === 'move_qty' ? moveQty : airQty;
+		if ($game.phase === 'attack_move_in') return moveInQty;
+		if ($game.phase === 'move_qty') return moveQty;
+		if ($game.phase === 'paratroop_qty') return paratroopQty;
+		return airQty;
 	}
 	function setQty(n: number) {
 		const src = qtySourceHex();
@@ -108,6 +126,7 @@
 		if ($game.phase === 'placing') placeQty = v;
 		else if ($game.phase === 'attack_move_in') moveInQty = v;
 		else if ($game.phase === 'move_qty') moveQty = v;
+		else if ($game.phase === 'paratroop_qty') paratroopQty = v;
 		else airQty = v;
 	}
 	function bumpQty(delta: number) { setQty(qtyValue() + delta); }
@@ -123,6 +142,7 @@
 		}
 		if ($game.phase === 'attack_move_in') confirmMoveInAfterConquest(v);
 		else if ($game.phase === 'move_qty') confirmMove(v);
+		else if ($game.phase === 'paratroop_qty') confirmParatroop(v);
 		else confirmAir(v);
 	}
 	function cancelQty() {
@@ -149,6 +169,8 @@
 			moveQty = Math.max(info.min, Math.min(info.max, Math.round(Number.isFinite(moveQty) ? moveQty : 1)));
 		} else if ($game.phase === 'air_qty') {
 			airQty = Math.max(info.min, Math.min(info.max, Math.round(Number.isFinite(airQty) ? airQty : 1)));
+		} else if ($game.phase === 'paratroop_qty') {
+			paratroopQty = Math.max(info.min, Math.min(info.max, Math.round(Number.isFinite(paratroopQty) ? paratroopQty : 1)));
 		}
 	});
 	let difficulty = $state(2);
@@ -159,7 +181,20 @@
 
 	let aiRunning = $state(false);
 	// AI speed: 1× (deliberate) | 2× (fast) | 0 (instant, no ticks)
-	let aiSpeed = $state<1 | 2 | 0>(1);
+	const AI_SPEED_KEY = 'isle-wars-ai-speed';
+	function loadAiSpeed(): 1 | 2 | 0 {
+		if (typeof window === 'undefined') return 1;
+		try {
+			const raw = localStorage.getItem(AI_SPEED_KEY);
+			const v = raw != null ? Number(raw) : 1;
+			return v === 0 || v === 2 ? v : 1;
+		} catch { return 1; }
+	}
+	let aiSpeed = $state<1 | 2 | 0>(loadAiSpeed());
+	$effect(() => {
+		if (typeof window === 'undefined') return;
+		try { localStorage.setItem(AI_SPEED_KEY, String(aiSpeed)); } catch { /* ignore */ }
+	});
 	function aiTickMs() { return aiSpeed === 0 ? 0 : aiSpeed === 2 ? 20 : 60; }
 
 	let autoRolling = $state(false);
@@ -375,12 +410,17 @@
 	onMount(() => {
 		loadDebugUi();
 		// A shared map link (?seed=...) always wins over any saved game — the
-		// whole point is to reproduce that exact map, not resume old progress.
+		// whole point is to reproduce that exact game. The seed itself packs
+		// difficulty/startingArmies/debug settings (see map.ts's encodeSeed),
+		// so startGame() applies those over whatever's passed in here; a
+		// hand-typed seed that isn't in that packed format just falls back to
+		// this browser's current menu defaults.
 		const url = new URL(window.location.href);
 		const sharedSeed = url.searchParams.get('seed');
-		if (sharedSeed != null && Number.isFinite(Number(sharedSeed))) {
+		if (sharedSeed != null && sharedSeed.trim() !== '') {
 			loadSavedGame(); // still registers the auto-save subscription
-			newGame(difficulty, startingArmies, Math.floor(Number(sharedSeed)));
+			newGame(difficulty, startingArmies, sharedSeed);
+			loadDebugUi(); // reflect any debug settings the seed just applied
 			url.searchParams.delete('seed');
 			window.history.replaceState({}, '', url.toString());
 		} else {
@@ -466,11 +506,9 @@
 
 	let seedInput = $state('');
 
-	function parseSeedInput(): number | undefined {
+	function parseSeedInput(): string | undefined {
 		const trimmed = seedInput.trim();
-		if (trimmed === '') return undefined;
-		const n = Number(trimmed);
-		return Number.isFinite(n) ? Math.floor(n) : undefined;
+		return trimmed === '' ? undefined : trimmed.toUpperCase();
 	}
 
 	function startNewGame() {
@@ -491,16 +529,50 @@
 	function copyShareLink() {
 		const url = new URL(window.location.href);
 		url.search = '';
-		url.searchParams.set('seed', String($game.seed));
+		// The seed itself packs difficulty/startingArmies/debug settings (see
+		// map.ts's encodeSeed) — no separate query params needed for the
+		// recipient to get the exact same map AND rules.
+		url.searchParams.set('seed', $game.seed);
 		navigator.clipboard.writeText(url.toString()).then(() => {
 			seedCopied = true;
 			setTimeout(() => (seedCopied = false), 1500);
 		});
 	}
 
-	function polygonPoints(pts: [number, number][]): string {
-		return pts.map((p) => p.join(',')).join(' ');
+	// Builds the same recap payload the shareable /recap page decodes — used
+	// to redirect there the moment a game ends (see the $effect below). The
+	// map itself isn't embedded (the recap page regenerates it from the
+	// seed), so conquests/edgeEvents/final owners+edges are what's needed to
+	// replay the turning-point compare view against that regenerated map.
+	async function recapUrl(): Promise<string> {
+		const recap = buildRecap({
+			seed: $game.seed,
+			winner: $game.winner,
+			turn: $game.turn,
+			turningPoints: computeTurningPoints($game, 15),
+			history: $game.history,
+			stats: $game.stats,
+			finalOwners: $game.states.map((st) => st.owner),
+			conquests: $game.conquests,
+			edgeEvents: $game.edgeEvents,
+			hexArmyDeltas: $game.hexArmyDeltas,
+			finalWalls: $game.map.walls ?? [],
+			finalSeaLanes: $game.map.seaLanes
+		});
+		return `${base}/recap/#d=${await encodeRecap(recap)}`;
 	}
+
+	// Game over has its own dedicated page (routes/recap) — jump there the
+	// instant the game ends, whether that's a live finish or reloading a
+	// page whose saved game already ended. replaceState so the finished
+	// board doesn't linger as a back-button stop.
+	$effect(() => {
+		if ($game.phase === 'game_over') {
+			recapUrl().then((url) => goto(url, { replaceState: true }));
+		}
+	});
+
+
 
 	// Build one continuous polyline per river that follows actual hex edges.
 	// For each hex on the river chain, we walk along that hex's perimeter from
@@ -646,46 +718,7 @@
 		return paths;
 	});
 
-	// Wall barriers: a short thick segment straddling the shared edge between
-	// the two walled hexes. We use the two vertices the hexes have in common.
-	const wallSegments = $derived.by(() => {
-		const walls = $game.map.walls ?? [];
-		if (walls.length === 0) return [] as { a: [number, number]; b: [number, number] }[];
-		const grids = $game.map.grids;
-		const vkey = (v: [number, number]) => `${Math.round(v[0] * 10)},${Math.round(v[1] * 10)}`;
-		const segs: { a: [number, number]; b: [number, number] }[] = [];
-		for (const [g1, g2] of walls) {
-			if (!grids[g1] || !grids[g2]) continue;
-			const cb = new Set(grids[g2].cell.map(vkey));
-			const shared = grids[g1].cell.filter((v) => cb.has(vkey(v)));
-			if (shared.length !== 2) continue;
-			segs.push({ a: shared[0], b: shared[1] });
-		}
-		return segs;
-	});
-
-	function seaLanePath(a: number, b: number, s: typeof $game) {
-		// Draw as a quadratic Bezier that arcs perpendicular to the segment.
-		// A slight curve prevents lanes from overlapping straight-through hex
-		// centers and gives them a nautical "sea route" feel.
-		const g1 = s.map.grids[a];
-		const g2 = s.map.grids[b];
-		const midX = (g1.x + g2.x) / 2;
-		const midY = (g1.y + g2.y) / 2;
-		const dx = g2.x - g1.x;
-		const dy = g2.y - g1.y;
-		const len = Math.hypot(dx, dy) || 1;
-		// Perpendicular unit vector — arc height ~12% of segment length, capped.
-		const perpX = -dy / len;
-		const perpY = dx / len;
-		const arc = Math.min(22, len * 0.06);
-		// Deterministic side based on the endpoint ids so the curve doesn't jitter
-		// between renders.
-		const side = ((a + b) % 2 === 0) ? 1 : -1;
-		const cx = midX + perpX * arc * side;
-		const cy = midY + perpY * arc * side;
-		return `M ${g1.x} ${g1.y} Q ${cx} ${cy} ${g2.x} ${g2.y}`;
-	}
+	const wallSegments = $derived(wallSegmentsFor($game.map.walls ?? [], $game.map.grids));
 
 	// Debug menu
 	let showDebug = $state(false);
@@ -870,7 +903,7 @@
 					</select>
 				</label>
 				<button class="icon-btn" title="New Game" onclick={() => (showMenu = !showMenu)}>{showMenu ? '✕' : 'New'}</button>
-				<button class="icon-btn" title="Copy a link to this exact map (seed {$game.seed})" onclick={copyShareLink}>{seedCopied ? 'Copied!' : 'Share'}</button>
+				<button class="icon-btn" title="Copy a link to this exact game — map and settings (seed {$game.seed})" onclick={copyShareLink}>{seedCopied ? 'Copied!' : 'Share'}</button>
 				<button class="icon-btn debug-btn" title="Debug" onclick={() => (showDebug = !showDebug)}>Debug</button>
 				<button class="icon-btn danger" title="Clear Save" onclick={confirmClearSave}>Clear</button>
 			</div>
@@ -891,8 +924,8 @@
 			<label>Starting armies per country
 				<input type="number" min="1" max="10" bind:value={startingArmies} />
 			</label>
-			<label>Map seed <span class="menu-hint">(optional — same seed = same map)</span>
-				<input type="text" inputmode="numeric" placeholder="random" bind:value={seedInput} />
+			<label>Map seed <span class="menu-hint">(optional — same seed = same game & settings)</span>
+				<input type="text" placeholder="random" style="text-transform: uppercase" bind:value={seedInput} />
 			</label>
 			<button onclick={startNewGame}>Start</button>
 			<span class="share-label">Current map's seed: <strong>{$game.seed}</strong></span>
@@ -907,6 +940,13 @@
 				<button class="close-x" onclick={() => (showDebug = false)} aria-label="Close debug">✕</button>
 			</div>
 			<div class="debug-options">
+				<div class="toggle-card">
+					<div class="toggle-text" style="flex:1">
+						<div class="toggle-title">Current seed</div>
+						<div class="toggle-desc">Packs this game's map, difficulty, starting armies, and these debug settings — paste it into "Map seed" on a New Game to reproduce it exactly.</div>
+					</div>
+					<code class="current-seed">{$game.seed}</code>
+				</div>
 				<label class="toggle-card" class:on={debugDisableSave}>
 					<input type="checkbox" checked={debugDisableSave} onchange={toggleDebugDisableSave} />
 					<div class="toggle-slot"><div class="toggle-thumb"></div></div>
@@ -949,145 +989,6 @@
 	{/if}
 
 
-	{#if $game.phase === 'game_over'}
-		<section class="banner {$game.winner === HUMAN ? 'win' : 'lose'}">
-			{#if $game.winner === HUMAN}
-				<h2>Victory! Blue conquered the isles.</h2>
-			{:else if $game.winner}
-				<h2>Defeat. {PLAYER_NAMES[$game.winner]} won.</h2>
-			{:else}
-				<h2>Game Over</h2>
-			{/if}
-			<button onclick={startNewGame}>New Game</button>
-		</section>
-		{#if turningPoints.length > 0}
-			<section class="turning-points">
-				<h3>Turning points</h3>
-				<ol>
-					{#each turningPoints as tp, i}
-						<li
-							class:active={selectedTurningPoint === i}
-							onpointerenter={() => (selectedTurningPoint = i)}
-							onpointerleave={() => (selectedTurningPoint = null)}
-							onclick={() => (openTurningPoint = i)}
-						>
-							<span class="tp-num" class:star={tp.isFinal}>{tp.isFinal ? '★' : i + 1}</span>
-							<span class="tp-turn">Turn {tp.turn}</span>
-							<span class="tp-headline">{tp.headline}</span>
-							<span class="tp-swing" class:pos={tp.delta > 0} class:neg={tp.delta < 0}>
-								{tp.delta > 0 ? '+' : ''}{tp.delta} ({tp.territoriesAfter})
-							</span>
-						</li>
-					{/each}
-				</ol>
-			</section>
-		{/if}
-	{/if}
-
-	{#snippet tpMiniMap(owners: (Player | null)[], paths: { from: number; to: number }[] = [], changedGrids: number[] = [])}
-		<svg
-			viewBox={$game.map.viewBox ? `${$game.map.viewBox.x} ${$game.map.viewBox.y} ${$game.map.viewBox.w} ${$game.map.viewBox.h}` : `0 0 ${$game.map.width} ${$game.map.height}`}
-			class="tp-map"
-		>
-			<defs>
-				<marker id="tp-path-arrowhead" markerWidth="10" markerHeight="10" refX="7" refY="5" orient="auto">
-					<path d="M0,0 L10,5 L0,10 Z" fill="#fff" />
-				</marker>
-			</defs>
-			<rect x="0" y="0" width={$game.map.width} height={$game.map.height} fill="#0a2540" />
-			{#each $game.map.waterHexes ?? [] as poly}
-				<polygon points={polygonPoints(poly)} fill="#0e2a48" stroke="#26527a" stroke-width="0.8" stroke-opacity="0.55" />
-			{/each}
-			{#each $game.map.grids as g (g.id)}
-				{@const owner = owners[g.id]}
-				<polygon
-					points={polygonPoints(g.cell)}
-					fill={owner ? PLAYER_COLORS[owner] : '#334'}
-					stroke="#0a1420"
-					stroke-width="1.5"
-				/>
-			{/each}
-			{#each $game.map.grids as g (g.id)}
-				{#if changedGrids.includes(g.id)}
-					<polygon
-						points={polygonPoints(g.cell)}
-						fill="none"
-						stroke="#ffe980"
-						stroke-width="3.5"
-						pointer-events="none"
-					/>
-				{/if}
-			{/each}
-			{#each paths as p}
-				{@const fromG = $game.map.grids[p.from]}
-				{@const toG = $game.map.grids[p.to]}
-				<line
-					x1={fromG.x} y1={fromG.y}
-					x2={toG.x} y2={toG.y}
-					stroke="#fff"
-					stroke-width="3"
-					stroke-linecap="round"
-					marker-end="url(#tp-path-arrowhead)"
-					opacity="0.9"
-					pointer-events="none"
-				/>
-			{/each}
-		</svg>
-	{/snippet}
-
-	{#if openTurningPoint != null && turningPoints[openTurningPoint]}
-		{@const tp = turningPoints[openTurningPoint]}
-		{@const tpOwnersBefore = reconstructOwnersAtTurn($game, tp.turn - 1)}
-		{@const tpOwnersAfter = reconstructOwnersAtTurn($game, tp.turn)}
-		{@const tpChangedGrids = tp.conquests.map((c) => c.grid)}
-		{@const tpPaths = tp.conquests
-			.filter((c) => c.attacker === $game.winner && c.from != null)
-			.map((c) => ({ from: c.from as number, to: c.grid }))}
-		<div class="tp-modal-backdrop" role="presentation" onclick={() => (openTurningPoint = null)}>
-			<div
-				class="tp-modal"
-				role="dialog"
-				aria-label="Map at turn {tp.turn}"
-				tabindex="-1"
-				onclick={(e) => e.stopPropagation()}
-			>
-				<div class="tp-modal-header">
-					<h3>Turn {tp.turn} — {tp.headline}</h3>
-					<button class="close-x" onclick={() => (openTurningPoint = null)} aria-label="Close">✕</button>
-				</div>
-				<div class="tp-compare">
-					<div class="tp-compare-pane">
-						<div class="tp-compare-label">Before (turn {tp.turn - 1})</div>
-						{@render tpMiniMap(tpOwnersBefore)}
-					</div>
-					<div class="tp-compare-arrow" aria-hidden="true">
-						<svg viewBox="0 0 40 24" width="40" height="24">
-							<line x1="2" y1="12" x2="32" y2="12" stroke="#ffd54a" stroke-width="3" stroke-linecap="round" />
-							<path d="M24,3 L36,12 L24,21" fill="none" stroke="#ffd54a" stroke-width="3" stroke-linecap="round" stroke-linejoin="round" />
-						</svg>
-					</div>
-					<div class="tp-compare-pane">
-						<div class="tp-compare-label">After (turn {tp.turn})</div>
-						{@render tpMiniMap(tpOwnersAfter, tpPaths, tpChangedGrids)}
-					</div>
-				</div>
-				<div class="tp-modal-footer">
-					<button
-						class="tp-nav-btn"
-						disabled={openTurningPoint === 0}
-						onclick={() => (openTurningPoint = (openTurningPoint ?? 0) - 1)}
-						aria-label="Previous turning point"
-					>‹ Previous</button>
-					<button
-						class="tp-nav-btn"
-						disabled={openTurningPoint === turningPoints.length - 1}
-						onclick={() => (openTurningPoint = (openTurningPoint ?? 0) + 1)}
-						aria-label="Next turning point"
-					>Next ›</button>
-				</div>
-			</div>
-		</div>
-	{/if}
 
 	{#if $game.gameStarted}
 		<div class="msg">{$game.message}</div>
@@ -1160,7 +1061,7 @@
 				{/each}
 				<!-- Sea lanes: curved paths arcing through open water -->
 				{#each $game.map.seaLanes as [a, b]}
-					<path d={seaLanePath(a, b, $game)} fill="none" stroke="#a0d8ff" stroke-width="2.5" stroke-dasharray="6 4" stroke-opacity="0.85" pointer-events="none" />
+					<path d={seaLanePath(a, b, $game.map.grids)} fill="none" stroke="#a0d8ff" stroke-width="2.5" stroke-dasharray="6 4" stroke-opacity="0.85" pointer-events="none" />
 				{/each}
 				<!-- Territory polygons (Voronoi cells clipped to island hulls) -->
 				{#each $game.map.grids as g}
@@ -1293,25 +1194,6 @@
 						pointer-events="none"
 					/>
 				{/if}
-				<!-- Post-game "turning point" markers: numbered pins on the hex
-				     where the biggest lead swings of the game happened. -->
-				{#each turningPoints as tp, i}
-					{@const grid = tp.conquests[0]?.grid}
-					{#if grid != null}
-						{@const g = $game.map.grids[grid]}
-						<g
-							class="turning-point-marker"
-							class:active={selectedTurningPoint === i}
-							role="button"
-							tabindex="0"
-							onpointerenter={() => (selectedTurningPoint = i)}
-							onpointerleave={() => (selectedTurningPoint = null)}
-						>
-							<circle cx={g.x} cy={g.y} r="17" fill="#1a1408" stroke="#ffd54a" stroke-width="3" />
-							<text x={g.x} y={g.y + 6} text-anchor="middle" fill="#ffd54a" font-size={tp.isFinal ? 16 : 18} font-weight="700" pointer-events="none">{tp.isFinal ? '★' : i + 1}</text>
-						</g>
-					{/if}
-				{/each}
 			</svg>
 		</div>
 
@@ -1379,7 +1261,7 @@
 						{#each $game.hands[HUMAN] as c, i}
 							{@const meta = CARD_META[c]}
 							{@const isDiscarding = $game.current === HUMAN && $game.phase === 'discard'}
-							{@const disabled = !isDiscarding && $game.cardPlayedThisTurn && c !== 'antibomb'}
+							{@const disabled = !isDiscarding && $game.cardPlayedThisTurn && !meta.passive}
 							<button
 								class="card-tile kind-{meta.kind}"
 								class:disabled
@@ -1605,80 +1487,83 @@
 	{/if}
 
 	{#if $game.history}
-	{@const hist = $game.history}
+		<section class="analytics">
+			{@render analyticsCharts($game.history)}
+		</section>
+	{/if}
+</main>
+
+{#snippet analyticsCharts(hist: GameState['history'])}
 	{@const maxTerr = Math.max(1, ...hist.flatMap((h) => PLAYERS.map((p) => h.territories[p])))}
 	{@const maxArm = Math.max(1, ...hist.flatMap((h) => PLAYERS.map((p) => h.armies[p])))}
 	{@const chartW = 560}
 	{@const chartH = 180}
 	{@const xStep = hist.length > 1 ? chartW / (hist.length - 1) : 0}
-	<section class="analytics">
-		<div class="charts">
-			<div class="chart">
-				<h3>Territories owned</h3>
-				<svg viewBox="0 0 {chartW + 40} {chartH + 30}">
-					<line x1="30" y1={chartH + 5} x2={chartW + 35} y2={chartH + 5} stroke="#345" />
-					<line x1="30" y1="5" x2="30" y2={chartH + 5} stroke="#345" />
-					<text x="26" y="10" text-anchor="end" class="axis">{maxTerr}</text>
-					<text x="26" y={chartH + 8} text-anchor="end" class="axis">0</text>
-					{#each PLAYERS as p}
-						{#if hist.length > 0}
-							<polyline
-								fill="none"
-								stroke={PLAYER_COLORS[p]}
-								stroke-width="2"
-								points={hist.map((h, i) => `${30 + i * xStep},${5 + (chartH - (h.territories[p] / maxTerr) * chartH)}`).join(' ')}
-							/>
-						{/if}
-					{/each}
-				</svg>
-			</div>
-			<div class="chart">
-				<h3>Total armies</h3>
-				<svg viewBox="0 0 {chartW + 40} {chartH + 30}">
-					<line x1="30" y1={chartH + 5} x2={chartW + 35} y2={chartH + 5} stroke="#345" />
-					<line x1="30" y1="5" x2="30" y2={chartH + 5} stroke="#345" />
-					<text x="26" y="10" text-anchor="end" class="axis">{maxArm}</text>
-					<text x="26" y={chartH + 8} text-anchor="end" class="axis">0</text>
-					{#each PLAYERS as p}
-						{#if hist.length > 0}
-							<polyline
-								fill="none"
-								stroke={PLAYER_COLORS[p]}
-								stroke-width="2"
-								points={hist.map((h, i) => `${30 + i * xStep},${5 + (chartH - (h.armies[p] / maxArm) * chartH)}`).join(' ')}
-							/>
-						{/if}
-					{/each}
-				</svg>
-			</div>
-			<div class="chart stat-table">
-				<h3>Stats</h3>
-				<table class="stats-table">
-					<thead>
-						<tr>
-							<th></th><th>T</th><th>A</th><th>W/L</th><th>+/−</th><th>Cards</th>
-						</tr>
-					</thead>
-					<tbody>
-						{#each PLAYERS as p}
-							{@const last = hist[hist.length - 1]}
-							{@const st = $game.stats[p]}
-							<tr>
-								<td><span class="dot" style="background:{PLAYER_COLORS[p]}"></span> {PLAYER_NAMES[p]}</td>
-								<td>{last?.territories[p] ?? 0}</td>
-								<td>{last?.armies[p] ?? 0}</td>
-								<td>{st.attacksWon}/{st.attacksLost}</td>
-								<td>{st.territoriesCaptured}/{st.territoriesLost}</td>
-								<td>{st.cardsDrawn}</td>
-							</tr>
-						{/each}
-					</tbody>
-				</table>
-			</div>
+	<div class="charts">
+		<div class="chart">
+			<h3>Territories owned</h3>
+			<svg viewBox="0 0 {chartW + 40} {chartH + 30}">
+				<line x1="30" y1={chartH + 5} x2={chartW + 35} y2={chartH + 5} stroke="#345" />
+				<line x1="30" y1="5" x2="30" y2={chartH + 5} stroke="#345" />
+				<text x="26" y="10" text-anchor="end" class="axis">{maxTerr}</text>
+				<text x="26" y={chartH + 8} text-anchor="end" class="axis">0</text>
+				{#each PLAYERS as p}
+					{#if hist.length > 0}
+						<polyline
+							fill="none"
+							stroke={PLAYER_COLORS[p]}
+							stroke-width="2"
+							points={hist.map((h, i) => `${30 + i * xStep},${5 + (chartH - (h.territories[p] / maxTerr) * chartH)}`).join(' ')}
+						/>
+					{/if}
+				{/each}
+			</svg>
 		</div>
-	</section>
-	{/if}
-</main>
+		<div class="chart">
+			<h3>Total armies</h3>
+			<svg viewBox="0 0 {chartW + 40} {chartH + 30}">
+				<line x1="30" y1={chartH + 5} x2={chartW + 35} y2={chartH + 5} stroke="#345" />
+				<line x1="30" y1="5" x2="30" y2={chartH + 5} stroke="#345" />
+				<text x="26" y="10" text-anchor="end" class="axis">{maxArm}</text>
+				<text x="26" y={chartH + 8} text-anchor="end" class="axis">0</text>
+				{#each PLAYERS as p}
+					{#if hist.length > 0}
+						<polyline
+							fill="none"
+							stroke={PLAYER_COLORS[p]}
+							stroke-width="2"
+							points={hist.map((h, i) => `${30 + i * xStep},${5 + (chartH - (h.armies[p] / maxArm) * chartH)}`).join(' ')}
+						/>
+					{/if}
+				{/each}
+			</svg>
+		</div>
+		<div class="chart stat-table">
+			<h3>Stats</h3>
+			<table class="stats-table">
+				<thead>
+					<tr>
+						<th></th><th>T</th><th>A</th><th>W/L</th><th>+/−</th><th>Cards</th>
+					</tr>
+				</thead>
+				<tbody>
+					{#each PLAYERS as p}
+						{@const last = hist[hist.length - 1]}
+						{@const st = $game.stats[p]}
+						<tr>
+							<td><span class="dot" style="background:{PLAYER_COLORS[p]}"></span> {PLAYER_NAMES[p]}</td>
+							<td>{last?.territories[p] ?? 0}</td>
+							<td>{last?.armies[p] ?? 0}</td>
+							<td>{st.attacksWon}/{st.attacksLost}</td>
+							<td>{st.territoriesCaptured}/{st.territoriesLost}</td>
+							<td>{st.cardsDrawn}</td>
+						</tr>
+					{/each}
+				</tbody>
+			</table>
+		</div>
+	</div>
+{/snippet}
 
 {#if hoveredLogIdx != null && logTipPos && $game.log[hoveredLogIdx]}
 	{@const le = $game.log[hoveredLogIdx]}
@@ -2455,6 +2340,17 @@
 		transition: border-color 0.15s, background 0.15s;
 	}
 	.toggle-card:hover { border-color: #4a4a5a; background: #14171f; }
+	.current-seed {
+		flex: none;
+		align-self: center;
+		background: #1a1d26;
+		border: 1px solid #345;
+		border-radius: 4px;
+		padding: 0.3rem 0.55rem;
+		font-size: 0.9rem;
+		letter-spacing: 0.05em;
+		color: #ffd54a;
+	}
 	.toggle-card.on { border-color: #ffbe3c; background: #1a1712; }
 	.toggle-card input[type='checkbox'] {
 		position: absolute;
@@ -2600,124 +2496,6 @@
 		.charts { grid-template-columns: 1fr; }
 	}
 
-	.banner {
-		padding: 1rem;
-		margin-bottom: 0.5rem;
-		text-align: center;
-		border: 2px solid;
-	}
-	.banner.win { border-color: #7fcfff; background: #0f3a55; }
-	.banner.lose { border-color: #d44; background: #3a0f0f; }
-
-	.turning-points {
-		margin-bottom: 0.5rem;
-		padding: 0.75rem 1rem;
-		border: 1px solid #345;
-		background: #10182a;
-	}
-	.turning-points h3 { margin: 0 0 0.5rem; font-size: 0.95rem; color: #ffd54a; }
-	.turning-points ol { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 0.3rem; }
-	.turning-points li {
-		display: flex;
-		align-items: center;
-		gap: 0.6rem;
-		padding: 0.35rem 0.5rem;
-		border-radius: 4px;
-		cursor: default;
-	}
-	.turning-points li.active { background: #1e2c47; }
-	.tp-num {
-		flex: none;
-		width: 1.5rem;
-		height: 1.5rem;
-		border-radius: 50%;
-		background: #1a1408;
-		border: 2px solid #ffd54a;
-		color: #ffd54a;
-		font-weight: 700;
-		font-size: 0.8rem;
-		display: flex;
-		align-items: center;
-		justify-content: center;
-	}
-	.tp-num.star { background: #ffd54a; color: #1a1408; font-size: 0.9rem; }
-	.tp-turn { flex: none; color: #8ab; font-size: 0.8rem; }
-	.tp-headline { flex: 1; }
-	.tp-swing { flex: none; font-size: 0.8rem; }
-	.tp-swing.pos { color: #7fff7f; }
-	.tp-swing.neg { color: #ff7f7f; }
-
-	.turning-point-marker { cursor: pointer; }
-	.turning-point-marker circle { transition: r 0.15s ease; }
-	.turning-point-marker.active circle { r: 21; stroke-width: 4; }
-
-	.tp-modal-backdrop {
-		position: fixed;
-		inset: 0;
-		background: rgba(5, 8, 14, 0.75);
-		display: flex;
-		align-items: center;
-		justify-content: center;
-		z-index: 50;
-	}
-	.tp-modal {
-		background: #10182a;
-		border: 1px solid #345;
-		border-radius: 6px;
-		padding: 0.5rem 0.75rem 0.75rem;
-		width: 98vw;
-		max-width: 2600px;
-		max-height: 96vh;
-		display: flex;
-		flex-direction: column;
-		gap: 0.4rem;
-	}
-	.tp-modal-header {
-		display: flex;
-		align-items: center;
-		justify-content: space-between;
-		gap: 1rem;
-	}
-	.tp-modal-header h3 { margin: 0; font-size: 1rem; }
-	.tp-modal-footer {
-		display: flex;
-		justify-content: center;
-		gap: 0.75rem;
-	}
-	.tp-nav-btn {
-		flex: none;
-		padding: 0.4rem 1rem;
-		border-radius: 4px;
-		border: 1px solid #345;
-		background: transparent;
-		color: #cdd;
-		font-size: 0.9rem;
-		line-height: 1;
-		cursor: pointer;
-	}
-	.tp-nav-btn:hover:not(:disabled) { background: rgba(255, 255, 255, 0.08); }
-	.tp-nav-btn:disabled { opacity: 0.3; cursor: default; }
-	.tp-compare {
-		display: flex;
-		align-items: center;
-		gap: 0.75rem;
-	}
-	.tp-compare-pane {
-		flex: 1 1 0;
-		min-width: 0;
-		display: flex;
-		flex-direction: column;
-		gap: 0.3rem;
-	}
-	.tp-compare-label {
-		font-size: 0.8rem;
-		color: #8ab;
-		text-align: center;
-	}
-	.tp-compare-arrow { flex: none; align-self: center; width: 40px; }
-	.tp-map { width: 100%; height: auto; max-height: 88vh; }
-	@media (max-width: 700px) {
-		.tp-compare { flex-direction: column; }
-		.tp-compare-arrow { transform: rotate(90deg); }
-	}
+	/* Game-over/turning-point UI now lives entirely on routes/recap — see
+	   TurningPointCompareModal.svelte and TpMiniMap.svelte. */
 </style>
