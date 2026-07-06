@@ -23,6 +23,7 @@
 		dimUnchanged = false,
 		edgeWalls,
 		edgeSeaLanes,
+		createdLaneKeys = new Set<string>(),
 		capturedFrom = {},
 		armyLabels = {}
 	}: {
@@ -38,6 +39,9 @@
 		dimUnchanged?: boolean;
 		edgeWalls: [number, number][];
 		edgeSeaLanes: [number, number][];
+		/** Sorted "a,b" keys of lanes opened by cards (Ferry / Water Invasion)
+		 *  during play — drawn in a distinct color from map-generated lanes. */
+		createdLaneKeys?: Set<string>;
 		capturedFrom?: Record<number, Player | null>;
 		/** Committed army count per changed hex this turn (from ConquestEvent.armies)
 		 *  — the only per-hex "how big was this" signal the data supports; there's
@@ -148,10 +152,6 @@
 	{#each map.waterHexes ?? [] as poly}
 		<polygon points={polygonPoints(poly)} fill="#0e2a48" stroke="#26527a" stroke-width="0.8" stroke-opacity="0.55" />
 	{/each}
-	<!-- Sea lanes as of this turn -->
-	{#each edgeSeaLanes as [a, b]}
-		<path d={seaLanePath(a, b, map.grids)} fill="none" stroke="#a0d8ff" stroke-width="2.5" stroke-dasharray="6 4" stroke-opacity="0.85" pointer-events="none" />
-	{/each}
 	{#each map.grids as g (g.id)}
 		{@const owner = owners[g.id]}
 		<polygon
@@ -190,6 +190,14 @@
 				pointer-events="none"
 			/>
 		{/if}
+	{/each}
+	<!-- Sea lanes as of this turn — drawn ABOVE the hex fills, not under them:
+	     a lane between two coastal hexes of the same island (e.g. a Water
+	     Invasion that hooked around a wall) runs mostly over land polygons
+	     and would be painted over entirely if it sat below. -->
+	{#each edgeSeaLanes as [a, b]}
+		{@const created = createdLaneKeys.has(a < b ? `${a},${b}` : `${b},${a}`)}
+		<path d={seaLanePath(a, b, map.grids)} fill="none" stroke={created ? '#c68fff' : '#a0d8ff'} stroke-width="2.5" stroke-dasharray="6 4" stroke-opacity="0.85" pointer-events="none" />
 	{/each}
 	<!-- Faint dashed echo (on the "before" pane) of the hexes that change
 	     this turn, so the eye lands on the same spot in both maps. -->

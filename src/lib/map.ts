@@ -90,6 +90,18 @@ export function wallSegmentsFor(
 /** Draws a sea lane as a quadratic Bezier that arcs perpendicular to the
  *  segment. A slight curve prevents lanes from overlapping straight-through
  *  hex centers and gives them a nautical "sea route" feel. */
+// Point-in-polygon (ray cast) — render-time twin of the helper inside
+// generateMap, used by seaLanePath to keep drawn lanes over open water.
+function pointInPolygon(px: number, py: number, poly: [number, number][]): boolean {
+	let inside = false;
+	for (let i = 0, j = poly.length - 1; i < poly.length; j = i++) {
+		const xi = poly[i][0], yi = poly[i][1];
+		const xj = poly[j][0], yj = poly[j][1];
+		if (((yi > py) !== (yj > py)) && (px < ((xj - xi) * (py - yi)) / (yj - yi) + xi)) inside = !inside;
+	}
+	return inside;
+}
+
 export function seaLanePath(a: number, b: number, grids: Grid[]): string {
 	const g1 = grids[a];
 	const g2 = grids[b];
@@ -98,16 +110,49 @@ export function seaLanePath(a: number, b: number, grids: Grid[]): string {
 	const dx = g2.x - g1.x;
 	const dy = g2.y - g1.y;
 	const len = Math.hypot(dx, dy) || 1;
-	// Perpendicular unit vector — arc height ~12% of segment length, capped.
+	// Perpendicular unit vector for the curve's bow.
 	const perpX = -dy / len;
 	const perpY = dx / len;
-	const arc = Math.min(22, len * 0.06);
 	// Deterministic side based on the endpoint ids so the curve doesn't jitter
 	// between renders.
-	const side = (a + b) % 2 === 0 ? 1 : -1;
-	const cx = midX + perpX * arc * side;
-	const cy = midY + perpY * arc * side;
-	return `M ${g1.x} ${g1.y} Q ${cx} ${cy} ${g2.x} ${g2.y}`;
+	const defaultSide = (a + b) % 2 === 0 ? 1 : -1;
+
+	// True when the quadratic curve through control point (cx, cy) stays off
+	// every land hex except its own two endpoints.
+	const clearsLand = (cx: number, cy: number): boolean => {
+		const STEPS = 14;
+		for (let i = 0; i <= STEPS; i++) {
+			const t = 0.15 + (0.7 * i) / STEPS;
+			const omt = 1 - t;
+			const px = omt * omt * g1.x + 2 * omt * t * cx + t * t * g2.x;
+			const py = omt * omt * g1.y + 2 * omt * t * cy + t * t * g2.y;
+			for (const g of grids) {
+				if (g.id === a || g.id === b) continue;
+				if (pointInPolygon(px, py, g.cell)) return false;
+			}
+		}
+		return true;
+	};
+	const controlFor = (side: number, arc: number) => ({ cx: midX + perpX * arc * side, cy: midY + perpY * arc * side });
+
+	// The gentle default arc (~6% of length) is what map-gen lanes were
+	// validated against, so it's tried first and usually wins. Card-opened
+	// lanes (Ferry / Water Invasion) can hug a coastline where that bow cuts
+	// across a neighbouring land hex — for those, bow progressively further
+	// out on either side until the curve finds open sea. Falls back to the
+	// default when nothing clears (shouldn't happen for a legal lane).
+	const defaultArc = Math.min(22, len * 0.06);
+	let chosen = controlFor(defaultSide, defaultArc);
+	const candidates: [number, number][] = [[defaultSide, defaultArc], [-defaultSide, defaultArc]];
+	for (const f of [0.15, 0.28, 0.45]) {
+		const arc = Math.min(130, len * f);
+		candidates.push([defaultSide, arc], [-defaultSide, arc]);
+	}
+	for (const [side, arc] of candidates) {
+		const c = controlFor(side, arc);
+		if (clearsLand(c.cx, c.cy)) { chosen = c; break; }
+	}
+	return `M ${g1.x} ${g1.y} Q ${chosen.cx} ${chosen.cy} ${g2.x} ${g2.y}`;
 }
 
 // Map seeds are a human-shareable 12-char uppercase-alphanumeric string, not

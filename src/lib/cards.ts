@@ -10,10 +10,12 @@
 // evaluating this module before game.ts's own body runs.
 import { crossesRiver, wallBetween } from './map';
 import {
+	PLAYERS,
 	PLAYER_NAMES,
 	consumeCard,
 	log,
 	pushEdgeEvent,
+	pushArmyEvent,
 	gridLabel,
 	resolveBomb,
 	resolveArtillery,
@@ -178,6 +180,7 @@ export const CARD_DEFS: CardDef[] = [
 		onResolve: (s, [id], idx) => {
 			const g = s.states[id]; const before = g.armies;
 			g.armies = Math.max(1, Math.floor(g.armies / 2)); consumeCard(s, idx);
+			pushArmyEvent(s, id, g.owner!, g.armies - before, 'sabotage', s.current);
 			log(s, `${PLAYER_NAMES[s.current]} sabotaged ${gridLabel(s, id)}: ${before} → ${g.armies} armies.`, 'card');
 			s.phase = 'action'; s.message = 'Attack, move, or pass.';
 		}
@@ -386,6 +389,63 @@ export const CARD_DEFS: CardDef[] = [
 			consumeCard(s, idx);
 			log(s, `${PLAYER_NAMES[s.current]} breached the wall between ${gridLabel(s, from)} and ${gridLabel(s, to)}.`, 'card');
 			s.phase = 'action'; s.selectedFrom = null; s.selectedTo = null; s.message = 'Attack, move, or pass.';
+		}
+	},
+	{
+		id: 'canal', label: 'Canal', icon: '🚧', kind: 'terrain', weight: 1,
+		when: 'Placement or Action phase',
+		desc: 'Dig a river along one edge of a hex you own. Attacks across it suffer the +1 river-crossing defender bonus (both ways). Cannot be placed on an existing river or wall edge. Permanent.',
+		playableIn: TURN,
+		steps: [
+			{ phase: 'canal_from', prompt: 'Canal: click one of your territories to dig a river on its edge.',
+				check: (s, id) => s.states[id].owner !== s.current ? 'Dig the canal from a hex you own.' : null },
+			{ phase: 'canal_to', prompt: 'Canal: click an adjacent hex to dig the river along that edge.',
+				check: (s, id, from) => {
+					if (id === from) return 'Pick a neighbouring hex.';
+					if (!s.map.adj[from as number].includes(id) || s.map.grids[id].island !== s.map.grids[from as number].island)
+						return 'Must be a bordering hex on the same island.';
+					if (crossesRiver(s.map, from as number, id)) return 'There is already a river on that edge.';
+					if (wallBetween(s.map, from as number, id)) return 'That edge has a wall — dig the canal elsewhere.';
+					return null;
+				} }
+		],
+		onResolve: (s, [from, to], idx) => {
+			const lo = Math.min(from, to), hi = Math.max(from, to);
+			// No pushEdgeEvent: the recap only reconstructs walls/sea lanes
+			// (its mini maps don't draw rivers), and the canal itself persists
+			// through save/load via the serialized map.
+			s.map.rivers.push([lo, hi]);
+			consumeCard(s, idx);
+			log(s, `${PLAYER_NAMES[s.current]} dug a canal between ${gridLabel(s, from)} and ${gridLabel(s, to)}.`, 'card');
+			s.phase = 'action'; s.selectedFrom = null; s.selectedTo = null; s.message = 'Attack, move, or pass.';
+		}
+	},
+	{
+		id: 'spy', label: 'Spy', icon: '🕵', kind: 'attack', weight: 1,
+		when: 'Placement or Action phase',
+		desc: 'Steal a random card from the player holding the most cards. Not consumed if no opponent has any.',
+		playableIn: TURN,
+		onPlay: (s, idx) => {
+			// Rob the richest hand among living opponents; break ties randomly.
+			const rivals = PLAYERS.filter((p) => p !== s.current && s.alive[p] && s.hands[p].length > 0);
+			if (rivals.length === 0) {
+				s.message = 'Spy: no opponent has any cards to steal.';
+				return; // card stays in hand
+			}
+			const most = Math.max(...rivals.map((p) => s.hands[p].length));
+			const richest = rivals.filter((p) => s.hands[p].length === most);
+			const victim = richest[Math.floor(Math.random() * richest.length)];
+			const stolenIdx = Math.floor(Math.random() * s.hands[victim].length);
+			const stolen = s.hands[victim][stolenIdx];
+			s.hands[victim] = s.hands[victim].filter((_, i) => i !== stolenIdx);
+			// Consume the spy BEFORE pushing the loot so the hand index is
+			// still valid; net hand size is unchanged, so no discard check.
+			consumeCard(s, idx);
+			s.hands[s.current].push(stolen);
+			// The public log hides WHICH card was taken (hidden information);
+			// only the thief's own message names it.
+			log(s, `${PLAYER_NAMES[s.current]} sent a spy — stole a card from ${PLAYER_NAMES[victim]}.`, 'card');
+			s.message = `Spy stole ${CARD_LABELS[stolen]} from ${PLAYER_NAMES[victim]}.`;
 		}
 	},
 	{

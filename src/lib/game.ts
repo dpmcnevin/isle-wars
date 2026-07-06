@@ -58,7 +58,9 @@ export type CardType =
 	| 'wall'
 	| 'breach'
 	| 'paratroop'
-	| 'antiair';
+	| 'antiair'
+	| 'canal'
+	| 'spy';
 
 // Re-export the card registry's public surface so consumers keep importing it
 // from '$lib/game'. The definitions themselves live in ./cards.
@@ -105,11 +107,18 @@ export type Phase =
 	| 'wall_to'
 	| 'breach_from'
 	| 'breach_to'
+	| 'canal_from'
+	| 'canal_to'
 	| 'paratroop_from'
 	| 'paratroop_to'
 	| 'paratroop_qty'
 	| 'discard'
 	| 'game_over';
+
+// Declared above the module-level `game` store initialization: newGame() runs
+// at import time and reaches capitalBonus(), so this const must already be
+// initialized by then (a later declaration hits the temporal dead zone).
+export const CAPITAL_BONUS = 3;
 
 export interface GridState {
 	owner: Player | null;
@@ -164,6 +173,12 @@ export interface GameState {
 	// Grid IDs of marsh hexes that were used as an attack source this turn.
 	// These can't be used as attack sources again until next turn.
 	usedMarshHexes: number[];
+	// Each player's capital hex (a city they start with, or a starting hex
+	// promoted to one). Holding your OWN capital pays +3 reinforcements per
+	// turn (see capitalBonus); an occupier gets nothing special — for them
+	// it's just a normal city — and the bonus returns on recapture.
+	// Optional: absent on saves from before capitals existed.
+	capitals?: Partial<Record<Player, number>>;
 	// True once the player has pressed "Start Game" — AI won't act until then.
 	gameStarted: boolean;
 	// Log
@@ -178,6 +193,8 @@ export interface GameState {
 	conquests: ConquestEvent[];
 	edgeEvents: EdgeEvent[];
 	hexArmyDeltas: HexArmyDelta[];
+	// Optional: absent on saves from before causes were tracked.
+	armyEvents?: ArmyEvent[];
 	// Bookkeeping only (not meant for display): each hex's army count as of
 	// the start of the current turn, so beginTurn can diff against it next
 	// time to produce hexArmyDeltas without needing a full per-hex snapshot
@@ -194,6 +211,21 @@ export interface HexArmyDelta {
 	turn: number;
 	grid: number;
 	delta: number; // signed: positive = armies grew there, negative = shrank
+}
+
+// A notable army swing caused by something other than ordinary combat — a
+// card (Bomb/Sabotage/Artillery) or a world event (rebellion, earthquake,
+// flood, production surge). Combat losses are deliberately NOT recorded here:
+// they're already explained by the conquest log. These exist so a post-game
+// "armies decreased by 915" turning point can name its cause ("Brown's
+// Sabotage cost Blue 915 armies") instead of leaving a mystery number.
+export interface ArmyEvent {
+	turn: number;
+	grid: number;
+	player: Player; // whose armies moved
+	delta: number; // signed: negative = lost, positive = gained
+	cause: 'bomb' | 'sabotage' | 'artillery' | 'rebellion' | 'earthquake' | 'flood' | 'production';
+	by: Player | null; // who played the card; null for world events
 }
 
 // One entry per wall/sea-lane edge added or removed — Wall/Breach and
@@ -567,6 +599,25 @@ export function startGame(difficulty = 2, startingArmies = 3, seed?: string): Ga
 		states[ids[i]] = { owner: null, armies: 0 };
 	}
 
+	// Each player gets a capital: one of their starting cities, or — when the
+	// shuffle dealt them no production hex — a random starting hex promoted to
+	// a city, so a lost capital always behaves like a normal city for its
+	// occupier. Uses the same seeded rand as the distribution above, so a
+	// given seed always produces the same capitals.
+	const capitals: Partial<Record<Player, number>> = {};
+	for (const p of PLAYERS) {
+		const owned = map.grids.filter((g) => states[g.id].owner === p);
+		const cities = owned.filter((g) => g.production);
+		const pool = cities.length > 0 ? cities : owned;
+		if (pool.length === 0) continue; // degenerate tiny map
+		const cap = pool[Math.floor(rand() * pool.length)];
+		if (!cap.production) {
+			cap.production = true;
+			cap.cityName = `${PLAYER_NAMES[p]} Capital`;
+		}
+		capitals[p] = cap.id;
+	}
+
 	const startPlayer: Player = PLAYERS[Math.floor(rand() * 4)];
 	const state: GameState = {
 		map,
@@ -574,6 +625,7 @@ export function startGame(difficulty = 2, startingArmies = 3, seed?: string): Ga
 		difficulty,
 		startingArmies,
 		states,
+		capitals,
 		hands: emptyHands(),
 		alive: emptyAlive(),
 		current: startPlayer,
@@ -609,6 +661,7 @@ export function startGame(difficulty = 2, startingArmies = 3, seed?: string): Ga
 		conquests: [],
 		edgeEvents: [],
 		hexArmyDeltas: [],
+		armyEvents: [],
 		armiesAtTurnStart: []
 	};
 	// Start first turn
@@ -649,15 +702,37 @@ export function fullIslandBonus(s: GameState, p: Player): number {
 	return bonus;
 }
 
+/** +3 reinforcements while a player holds their own capital; 0 while it's
+ *  occupied (the occupier gets nothing — it's just a normal city to them). */
+export function capitalBonus(s: GameState, p: Player): number {
+	const cap = s.capitals?.[p];
+	return cap != null && s.states[cap].owner === p ? CAPITAL_BONUS : 0;
+}
+
 function computeReinforcements(s: GameState, p: Player): number {
 	const c = countryCount(s, p);
 	const base = Math.max(2, Math.floor(c / 3));
-	return base + fullIslandBonus(s, p);
+	return base + fullIslandBonus(s, p) + capitalBonus(s, p);
 }
 
 export function log(s: GameState, text: string, kind: LogEntry['kind'] = 'info', player: Player | null = s.current) {
 	const entry: LogEntry = { turn: s.turn, player, text, kind };
 	s.log = [entry, ...s.log].slice(0, 100);
+}
+
+/** Records a non-combat army swing with its cause (see ArmyEvent). No-ops on
+ *  zero deltas so callers can pass computed losses unconditionally. */
+export function pushArmyEvent(
+	s: GameState,
+	grid: number,
+	player: Player,
+	delta: number,
+	cause: ArmyEvent['cause'],
+	by: Player | null
+) {
+	if (delta === 0) return;
+	if (!s.armyEvents) s.armyEvents = [];
+	s.armyEvents.push({ turn: s.turn, grid, player, delta, cause, by });
 }
 
 // Records a wall/sea-lane edge being built or torn down, so the post-game
@@ -906,6 +981,7 @@ function beginTurn(s: GameState): GameState {
 			} else {
 				s.states[g.id].armies = cur + PROD_ADD;
 			}
+			pushArmyEvent(s, g.id, s.states[g.id].owner!, s.states[g.id].armies - cur, 'production', null);
 			touched++;
 		}
 		if (touched > 0) log(s, `Production centers active! ${touched} grids boosted.`, 'event', null);
@@ -914,7 +990,7 @@ function beginTurn(s: GameState): GameState {
 	// Reinforcements
 	let reinf = computeReinforcements(s, s.current);
 	s.armiesToPlace = reinf;
-	log(s, `${PLAYER_NAMES[s.current]}'s turn ${s.turn}. Reinforcements: ${reinf} (${countryCount(s, s.current)} territories, +${fullIslandBonus(s, s.current)} island bonus).`, 'info');
+	log(s, `${PLAYER_NAMES[s.current]}'s turn ${s.turn}. Reinforcements: ${reinf} (${countryCount(s, s.current)} territories, +${fullIslandBonus(s, s.current)} island bonus${capitalBonus(s, s.current) ? `, +${CAPITAL_BONUS} capital` : ''}).`, 'info');
 	s.phase = 'placing';
 	s.message = `${PLAYER_NAMES[s.current]}: place ${s.armiesToPlace} armies. Click one of your territories.`;
 	return s;
@@ -973,6 +1049,7 @@ function applyRandomEvent(s: GameState) {
 			if (g.owner) {
 				const loss = Math.min(g.armies, 2 + Math.floor(Math.random() * 4));
 				g.armies -= loss;
+				pushArmyEvent(s, id, g.owner, -loss, 'earthquake', null);
 				if (g.armies < 0) g.armies = 0;
 			}
 		}
@@ -986,6 +1063,7 @@ function applyRandomEvent(s: GameState) {
 			if (g.owner) {
 				const loss = Math.min(g.armies, 1 + Math.floor(Math.random() * 3));
 				g.armies -= loss;
+				pushArmyEvent(s, id, g.owner, -loss, 'flood', null);
 				if (g.armies < 0) g.armies = 0;
 			}
 		}
@@ -998,6 +1076,7 @@ function applyRandomEvent(s: GameState) {
 			const g = s.states[id];
 			const loss = Math.ceil(g.armies / 2);
 			g.armies -= loss;
+			pushArmyEvent(s, id, g.owner!, -loss, 'rebellion', null);
 			log(s, `Rebellion in ${gridLabel(s, id)}! ${loss} armies lost.`, 'event', null);
 			if (g.armies < 0) g.armies = 0;
 		}
@@ -1114,8 +1193,9 @@ function awardTurnCardIfDue(s: GameState): boolean {
 	s.turnCardAwarded = true;
 	// If the human is over the hand limit, pause for them to pick a
 	// discard. In auto-play mode, blue is AI-controlled — skip the pause
-	// and auto-discard the oldest card(s).
-	if (s.current === 'blue' && s.hands.blue.length > HAND_MAX && !debugSettings.autoPlay) {
+	// and auto-discard the oldest card(s). With the "blue starts with every
+	// card" debug option the limit is waived (see enforceHandLimit).
+	if (s.current === 'blue' && s.hands.blue.length > HAND_MAX && !debugSettings.autoPlay && !debugSettings.starterCards) {
 		s.pendingDiscard = true;
 		s.phase = 'discard';
 		s.message = 'Hand full — click a card to discard.';
@@ -1167,6 +1247,10 @@ function drawCard(s: GameState): CardType | null {
 }
 
 function enforceHandLimit(s: GameState) {
+	// Debug: "blue starts with every card" hands out far more than HAND_MAX
+	// on purpose — waive the limit entirely so the debug hand isn't trimmed
+	// (and the human is never forced into the discard flow).
+	if (debugSettings.starterCards) return;
 	// If AI over limit, discard random. Human over limit prompted via UI —
 	// we auto-discard oldest to avoid a modal for now.
 	while (s.hands[s.current].length > HAND_MAX) {
@@ -1590,6 +1674,7 @@ export function resolveBomb(s: GameState, targetId: number, idx: number) {
 		const g = s.states[targetId];
 		const loss = Math.min(g.armies, 3 + Math.floor(Math.random() * 5));
 		g.armies -= loss;
+		pushArmyEvent(s, targetId, defender, -loss, 'bomb', s.current);
 		log(s, `${PLAYER_NAMES[s.current]} bombed ${gridLabel(s, targetId)} (${PLAYER_NAMES[defender]}) — ${loss} armies destroyed!`, 'card');
 		if (g.armies < 0) g.armies = 0;
 	}
@@ -1630,6 +1715,7 @@ export function resolveArtillery(s: GameState, fromId: number, toId: number, idx
 			hits++;
 		}
 	}
+	if (target.owner) pushArmyEvent(s, toId, target.owner, -hits, 'artillery', s.current);
 	let ownershipMsg = '';
 	if (target.armies <= 0) {
 		// Target reduced to zero — becomes neutral (artillery doesn't itself

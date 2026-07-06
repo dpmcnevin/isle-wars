@@ -3,7 +3,7 @@
 // post-game view, and can reconstruct map ownership at any earlier turn.
 // Pure functions — call once after checkWin() sets s.winner.
 
-import type { GameState, ConquestEvent, EdgeEvent, Player } from './game';
+import type { GameState, ConquestEvent, EdgeEvent, ArmyEvent, Player } from './game';
 import { PLAYERS, PLAYER_NAMES, PLAYER_COLORS, countryCount, armyCount } from './game';
 
 export interface TurningPoint {
@@ -91,19 +91,37 @@ export function computeTurningPoints(s: GameState, count = 5): TurningPoint[] {
 		const conquests = s.conquests.filter(
 			(c) => c.turn === turn && (c.attacker === winner || c.defender === winner)
 		);
+		const armyEvents = (s.armyEvents ?? []).filter((e) => e.turn === turn && e.player === winner);
 		return {
 			turn,
 			delta,
 			territoriesAfter,
 			armyDelta,
 			conquests,
-			headline: describeForWinner(conquests, winner, armyDelta),
+			headline: describeForWinner(conquests, winner, armyDelta, armyEvents),
 			isFinal: turn === finalTurn
 		};
 	});
 }
 
-function describeForWinner(conquests: ConquestEvent[], winner: Player, armyDelta: number): string {
+// How each ArmyEvent cause reads in a headline. Card causes are prefixed with
+// the perpetrator's name ("Brown's Sabotage …"); world events stand alone.
+const CAUSE_PHRASE: Record<ArmyEvent['cause'], string> = {
+	bomb: 'Bomb',
+	sabotage: 'Sabotage',
+	artillery: 'Artillery',
+	rebellion: 'A rebellion',
+	earthquake: 'An earthquake',
+	flood: 'A flood',
+	production: 'A production surge'
+};
+
+function describeForWinner(
+	conquests: ConquestEvent[],
+	winner: Player,
+	armyDelta: number,
+	armyEvents: ArmyEvent[] = []
+): string {
 	const gains = conquests.filter((c) => c.attacker === winner);
 	const losses = conquests.filter((c) => c.defender === winner);
 	const parts: string[] = [];
@@ -116,10 +134,32 @@ function describeForWinner(conquests: ConquestEvent[], winner: Player, armyDelta
 	}
 	if (parts.length === 0) {
 		// No hex changed hands — this turn only made the cut because of a big
-		// army-count swing (a large battle that didn't flip the hex, or a
-		// card/event that moved a lot of armies at once).
-		if (armyDelta > 0) return `${PLAYER_NAMES[winner]}'s armies increased by ${armyDelta}.`;
-		if (armyDelta < 0) return `${PLAYER_NAMES[winner]}'s armies decreased by ${-armyDelta}.`;
+		// army-count swing. If recorded card/event causes explain the bulk of
+		// it, name the dominant cause instead of leaving a mystery number.
+		// Aggregate per cause+perpetrator first: earthquakes/floods/production
+		// surges hit several hexes with one event each.
+		const groups = new Map<string, { cause: ArmyEvent['cause']; by: Player | null; total: number }>();
+		for (const e of armyEvents) {
+			const key = `${e.cause}|${e.by ?? ''}`;
+			const g = groups.get(key) ?? { cause: e.cause, by: e.by, total: 0 };
+			g.total += e.delta;
+			groups.set(key, g);
+		}
+		if (armyDelta < 0) {
+			const ev = [...groups.values()].filter((g) => g.total < 0).sort((a, b) => a.total - b.total)[0];
+			if (ev && -ev.total >= -armyDelta * 0.5) {
+				const cost = `cost ${PLAYER_NAMES[winner]} ${-ev.total} armies`;
+				return ev.by ? `${PLAYER_NAMES[ev.by]}'s ${CAUSE_PHRASE[ev.cause]} ${cost}.` : `${CAUSE_PHRASE[ev.cause]} ${cost}.`;
+			}
+			return `${PLAYER_NAMES[winner]}'s armies decreased by ${-armyDelta}.`;
+		}
+		if (armyDelta > 0) {
+			const ev = [...groups.values()].filter((g) => g.total > 0).sort((a, b) => b.total - a.total)[0];
+			if (ev && ev.total >= armyDelta * 0.5) {
+				return `${CAUSE_PHRASE[ev.cause]} grew ${PLAYER_NAMES[winner]}'s armies by ${ev.total}.`;
+			}
+			return `${PLAYER_NAMES[winner]}'s armies increased by ${armyDelta}.`;
+		}
 		return `${PLAYER_NAMES[winner]}'s territory count shifted.`;
 	}
 	return `${parts.join(', ')}.`;

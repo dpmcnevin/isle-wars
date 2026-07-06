@@ -16,6 +16,7 @@ import {
 	playCard,
 	canInvasionConnect,
 	hasClearWaterPath,
+	PLAYERS,
 	type Player,
 	type CardType,
 	type GameState
@@ -652,6 +653,20 @@ function tryPlayCardPlacement(p: Player) {
 			return;
 		}
 	}
+	// Canal: same "seal the scariest border edge" logic as Wall, but with the
+	// +1 river-crossing bonus instead of a hard block (identical edge
+	// constraints, so findWallPlacement's choice is always canal-legal).
+	s = get(game);
+	{
+		const idx = s.hands[p].findIndex((c) => c === 'canal');
+		const target = findWallPlacement(s, p);
+		if (idx >= 0 && target != null && !s.cardPlayedThisTurn) {
+			playCard(idx);
+			if (get(game).phase === 'canal_from') selectGrid(target.from);
+			if (get(game).phase === 'canal_to') selectGrid(target.to);
+			return;
+		}
+	}
 	// Sabotage a big enemy hex.
 	s = get(game);
 	{
@@ -660,6 +675,16 @@ function tryPlayCardPlacement(p: Player) {
 		if (idx >= 0 && target != null && s.states[target].armies >= 5 && !s.cardPlayedThisTurn) {
 			playCard(idx);
 			if (get(game).phase === 'sabotage_select') selectGrid(target);
+			return;
+		}
+	}
+	// Spy: steal from the richest hand as soon as anyone has cards to take.
+	s = get(game);
+	{
+		const idx = s.hands[p].findIndex((c) => c === 'spy');
+		const anyLoot = PLAYERS.some((q) => q !== p && s.alive[q] && s.hands[q].length > 0);
+		if (idx >= 0 && anyLoot && !s.cardPlayedThisTurn) {
+			playCard(idx);
 			return;
 		}
 	}

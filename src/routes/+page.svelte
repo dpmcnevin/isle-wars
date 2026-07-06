@@ -576,6 +576,13 @@
 
 
 
+	// Lanes opened by cards during play (Ferry / Water Invasion) — every card
+	// lane pushes a seaLane edge event; map-generated lanes don't. Drawn in a
+	// distinct color so player-built routes stand out from natural ones.
+	const createdLaneKeys = $derived(
+		new Set($game.edgeEvents.filter((e) => e.kind === 'seaLane' && e.added).map((e) => `${e.edge[0]},${e.edge[1]}`))
+	);
+
 	// Build one continuous polyline per river that follows actual hex edges.
 	// For each hex on the river chain, we walk along that hex's perimeter from
 	// the entry face to the exit face, so bends and straight sections both trace
@@ -808,6 +815,16 @@
 				desc: '+1 defense on this hex. Lost when the hex is captured.'
 			});
 		}
+		const capitalOf = PLAYERS.find((p) => $game.capitals?.[p] === gridId);
+		if (capitalOf) {
+			modifiers.push({
+				name: `★ ${PLAYER_NAMES[capitalOf]}'s capital`,
+				desc:
+					capitalOf === st.owner
+						? `Pays ${PLAYER_NAMES[capitalOf]} +3 reinforcements per turn while they hold it.`
+						: `Currently occupied — just a normal city for its occupier. ${PLAYER_NAMES[capitalOf]} regains +3 reinforcements per turn by retaking it.`
+			});
+		}
 		return {
 			title,
 			owner,
@@ -845,6 +862,7 @@
 {#snippet hexBadge(gridId: number, cx: number, cy: number, scale: number, showCityLabel: boolean, armiesOverride: number | null)}
 	{@const g = $game.map.grids[gridId]}
 	{@const st = $game.states[gridId]}
+	{@const capitalOf = PLAYERS.find((p) => $game.capitals?.[p] === gridId) ?? null}
 	{@const shownArmies = armiesOverride ?? st.armies}
 	{@const badgeR = 20 * scale}
 	{@const fortR1 = 30 * scale}
@@ -871,13 +889,20 @@
 			<text x={cx - 18 * scale} y={cy + 24 * scale} text-anchor="middle"
 				font-size={14 * scale} style="filter: drop-shadow(0 0 {3 * scale}px #4fcf7f);">🏰</text>
 		{/if}
-		{#if g.production}
+		<!-- Only capitals get a star, in the home player's color (whose capital
+		     it IS, not who currently occupies it). Regular cities are marked by
+		     the yellow badge ring + name alone. The star sits on a dark disc
+		     with a light ring so it stays visible when the hex fill is the
+		     same color as the star (e.g. Green's capital on a green hex). -->
+		{#if capitalOf}
+			<circle cx={cx + 20 * scale} cy={cy - 22 * scale} r={13 * scale}
+				fill="#0a1420" fill-opacity="0.9" stroke="#e6f0fa" stroke-width={1.5 * scale} />
 			<text x={cx + 20 * scale} y={cy - 15 * scale} text-anchor="middle"
-				font-size={18 * scale} fill="#ffe14a">★</text>
-			{#if showCityLabel && g.cityName}
-				<text x={cx} y={cy + 34 * scale} class="city-label city-label-outline" text-anchor="middle">{g.cityName}</text>
-				<text x={cx} y={cy + 34 * scale} class="city-label" text-anchor="middle">{g.cityName}</text>
-			{/if}
+				font-size={20 * scale} fill={PLAYER_COLORS[capitalOf]}>★</text>
+		{/if}
+		{#if g.production && showCityLabel && g.cityName}
+			<text x={cx} y={cy + 34 * scale} class="city-label city-label-outline" text-anchor="middle">{g.cityName}</text>
+			<text x={cx} y={cy + 34 * scale} class="city-label" text-anchor="middle">{g.cityName}</text>
 		{/if}
 	</g>
 {/snippet}
@@ -1061,10 +1086,6 @@
 				{#each $game.map.waterHexes ?? [] as poly}
 					<polygon points={polygonPoints(poly)} fill="#0e2a48" stroke="#26527a" stroke-width="0.8" stroke-opacity="0.55" pointer-events="none" />
 				{/each}
-				<!-- Sea lanes: curved paths arcing through open water -->
-				{#each $game.map.seaLanes as [a, b]}
-					<path d={seaLanePath(a, b, $game.map.grids)} fill="none" stroke="#a0d8ff" stroke-width="2.5" stroke-dasharray="6 4" stroke-opacity="0.85" pointer-events="none" />
-				{/each}
 				<!-- Territory polygons (Voronoi cells clipped to island hulls) -->
 				{#each $game.map.grids as g}
 					{@const st = $game.states[g.id]}
@@ -1101,6 +1122,14 @@
 				<!-- Terrain overlays: mountains + forests + marshes -->
 				{#each $game.map.grids as g}
 					{@render hexTerrain(polygonPoints(g.cell), g.terrain)}
+				{/each}
+				<!-- Sea lanes: curved dashed paths. Drawn ABOVE the territory
+				     polygons, not under them — a lane between two coastal hexes
+				     of the same island (e.g. a Water Invasion around a wall)
+				     runs mostly over land and would be painted over below. -->
+				{#each $game.map.seaLanes as [a, b]}
+					{@const created = createdLaneKeys.has(a < b ? `${a},${b}` : `${b},${a}`)}
+					<path d={seaLanePath(a, b, $game.map.grids)} fill="none" stroke={created ? '#c68fff' : '#a0d8ff'} stroke-width="2.5" stroke-dasharray="6 4" stroke-opacity="0.85" pointer-events="none" />
 				{/each}
 				<!-- Rivers: thick layered strokes (dark banks + mid + highlight) with
 				     a soft glow, straddling the shared edge between two land hexes. -->

@@ -175,6 +175,12 @@
 		{@const maxArm = Math.max(1, ...d.history.flatMap((h) => PLAYERS.map((p) => h.armies[p])))}
 		{@const finalTerr = territoriesFromOwners(d.finalOwners)}
 		{@const last = d.history[d.history.length - 1]}
+		<!-- Lanes opened by cards during play (Ferry / Water Invasion) — every
+		     card lane pushes a seaLane edge event; map-generated lanes don't.
+		     Rendered in a distinct color on every mini map. -->
+		{@const createdLaneKeys = new Set(
+			d.edgeEvents.filter((e) => e.kind === 'seaLane' && e.added).map((e) => `${e.edge[0]},${e.edge[1]}`)
+		)}
 		<section
 			class="banner"
 			style={d.winner
@@ -295,7 +301,7 @@
 					{#if map}
 						<div class="chart">
 							<h3>Final board</h3>
-							<TpMiniMap {map} owners={d.finalOwners} edgeWalls={d.finalWalls} edgeSeaLanes={d.finalSeaLanes} />
+							<TpMiniMap {map} owners={d.finalOwners} edgeWalls={d.finalWalls} edgeSeaLanes={d.finalSeaLanes} {createdLaneKeys} />
 						</div>
 					{/if}
 					<div class="chart">
@@ -411,6 +417,7 @@
 				{ownersAfter}
 				{edgesBefore}
 				{edgesAfter}
+				{createdLaneKeys}
 				{paths}
 				{changedGrids}
 				{capturedFrom}
