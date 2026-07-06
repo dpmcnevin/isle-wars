@@ -291,7 +291,12 @@ const ISLAND_NAMES = [
 	// Elden Ring / Lands Between
 	'Limgrave', 'Liurnia', 'Caelid', 'Altus', 'Gelmir', 'Farum',
 	'Nokron', 'Nokstella', 'Mohgwyn', 'Miquella', 'Belurat',
-	'Enir', 'Rauh', 'Scadu', 'Shaded', 'Consecrated', 'Weeping'
+	'Enir', 'Rauh', 'Scadu', 'Shaded', 'Consecrated', 'Weeping',
+	// A Song of Ice and Fire — continents, regions, and isles
+	'Westeros', 'Essos', 'Sothoryos', 'Ulthos', 'Dorne', 'Skagos',
+	'Skane', 'Tarth', 'Dragonstone', 'Driftmark', 'Pyke', 'Great Wyk',
+	'Harlaw', 'Bear Island', 'Naath', 'Ibben', 'Summer Isles',
+	'Basilisk Isle', 'Isle of Faces', 'Valyria'
 ];
 
 const LAKE_NAMES = [
@@ -338,7 +343,15 @@ const CITY_NAMES = [
 	'Elphael', 'Haligtree', 'Sellia', 'Sofria', 'Redmane',
 	'Roundtable Hold', 'Church of Marika', 'Bellum', 'Deeproot',
 	'Mountaintops', 'Nokstella', 'Ainsel', 'Siofra', 'Rold', 'Ordina',
-	'Belurat', 'Enir-Ilim', 'Rauh Base', 'Ancient Ruins', 'Bonny Village'
+	'Belurat', 'Enir-Ilim', 'Rauh Base', 'Ancient Ruins', 'Bonny Village',
+	// A Song of Ice and Fire ('Riverrun' is already in the base list)
+	'King\'s Landing', 'Winterfell', 'Oldtown', 'Lannisport', 'Gulltown',
+	'White Harbor', 'Sunspear', 'Highgarden', 'Storm\'s End', 'Casterly Rock',
+	'The Eyrie', 'Harrenhal', 'Castle Black', 'Barrowton', 'Karhold',
+	'Deepwood Motte', 'The Twins', 'Duskendale', 'Maidenpool', 'Fairmarket',
+	'Stoney Sept', 'Starfall', 'Yronwood', 'Godsgrace', 'Braavos',
+	'Pentos', 'Myr', 'Tyrosh', 'Volantis', 'Qohor', 'Norvos', 'Lorath',
+	'Lys', 'Meereen', 'Astapor', 'Yunkai', 'Qarth', 'Vaes Dothrak', 'Asshai'
 ];
 
 // -----------------------------------------------------------------------------
