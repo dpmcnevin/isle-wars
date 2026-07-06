@@ -70,7 +70,7 @@ struct MapView: View {
                     }
                 }
 
-                if let id = infoGrid, let info = HexInfo.make(gridId: id, map: map, states: states) {
+                if let id = infoGrid, let info = HexInfo.make(gridId: id, state: state) {
                     HexInfoCard(info: info)
                         .position(infoCardPosition(for: infoPoint, in: geo.size))
                         .allowsHitTesting(false)
@@ -121,12 +121,31 @@ struct MapView: View {
         }
     }
 
+    /// Sea lanes opened by cards (Ferry/Water Invasion) push a `seaLane` edge
+    /// event; map-generated lanes don't. Drawn in a distinct color so
+    /// player-built routes stand out (mirrors web's `createdLaneKeys`).
+    private var createdLaneKeys: Set<String> {
+        guard let edgeEvents = state.edgeEvents else { return [] }
+        var keys: Set<String> = []
+        for e in edgeEvents where e.kind == .seaLane && e.added && e.edge.count == 2 {
+            let (a, b) = (e.edge[0], e.edge[1])
+            keys.insert(a < b ? "\(a),\(b)" : "\(b),\(a)")
+        }
+        return keys
+    }
+
     private func drawSeaLanes(context: GraphicsContext, transform: MapTransform) {
+        let created = createdLaneKeys
         for lane in map.seaLanes where lane.count == 2 {
-            let path = seaLanePath(a: lane[0], b: lane[1], map: map, transform: transform)
+            let (a, b) = (lane[0], lane[1])
+            let key = a < b ? "\(a),\(b)" : "\(b),\(a)"
+            let color = created.contains(key)
+                ? Color(red: 0.78, green: 0.56, blue: 1.0)
+                : Color(red: 0.63, green: 0.85, blue: 1.0)
+            let path = seaLanePath(a: a, b: b, map: map, transform: transform)
             context.stroke(
                 path,
-                with: .color(Color(red: 0.63, green: 0.85, blue: 1.0).opacity(0.85)),
+                with: .color(color.opacity(0.85)),
                 style: StrokeStyle(lineWidth: 2.5, dash: [6, 4])
             )
         }
@@ -316,8 +335,26 @@ struct MapView: View {
             if st.rampart == true {
                 context.draw(Text("🏰").font(.system(size: 12 * scale)), at: CGPoint(x: center.x - 24 * scale, y: center.y + 18 * scale))
             }
-            if grid.production {
-                context.draw(Text("★").font(.system(size: 14 * scale)).foregroundStyle(MapColors.cityGold), at: CGPoint(x: center.x + 26 * scale, y: center.y - 17 * scale))
+            // Only capitals get a star, in the home player's color (whose
+            // capital it IS, not who currently occupies it) — mirrors web's
+            // `capitalOf` badge. Regular production cities are marked by the
+            // yellow badge ring + name alone (handled above/below).
+            if let capitalOwner = state.capitalOwner(at: grid.id) {
+                let starCenter = CGPoint(x: center.x + 20 * scale, y: center.y - 22 * scale)
+                let starR = 13 * scale
+                context.fill(
+                    Path(ellipseIn: CGRect(x: starCenter.x - starR, y: starCenter.y - starR, width: starR * 2, height: starR * 2)),
+                    with: .color(Color(red: 0.04, green: 0.08, blue: 0.13).opacity(0.9))
+                )
+                context.stroke(
+                    Path(ellipseIn: CGRect(x: starCenter.x - starR, y: starCenter.y - starR, width: starR * 2, height: starR * 2)),
+                    with: .color(Color(red: 0.90, green: 0.94, blue: 0.98)),
+                    lineWidth: 1.5 * scale
+                )
+                context.draw(
+                    Text("★").font(.system(size: 20 * scale)).foregroundStyle(capitalOwner.color),
+                    at: CGPoint(x: starCenter.x, y: starCenter.y + 3 * scale)
+                )
             }
             if let cityName = grid.cityName {
                 drawOutlinedLabel(

@@ -129,6 +129,7 @@ final class GameViewModel: ObservableObject {
     func confirmMoveIn(_ extra: Int) { run { try $0.confirmMoveInAfterConquest(extra) } }
     func confirmMove(_ qty: Int) { run { try $0.confirmMove(qty) } }
     func confirmAir(_ qty: Int) { run { try $0.confirmAir(qty) } }
+    func confirmParatroop(_ qty: Int) { run { try $0.confirmParatroop(qty) } }
     func playCard(_ index: Int) { run { try $0.playCard(index) } }
     func discardCard(_ index: Int) { run { try $0.discardCard(index: index) } }
 
@@ -150,6 +151,29 @@ final class GameViewModel: ObservableObject {
     /// attacking `to` from `from`. Authoritative — same call the web modal uses.
     func crossingBonus(from: Int, to: Int) -> Int {
         (try? engine.crossingDefenseBonus(fromId: from, toId: to)) ?? 0
+    }
+
+    /// Whether `card` can be played right now, straight from the engine's
+    /// `canPlayCardNow` (phase/`cardPlayedThisTurn`/passive rules) rather than
+    /// a Swift-side approximation.
+    func canPlayCardNow(_ card: CardType) -> Bool {
+        (try? engine.canPlayCardNow(card: card)) ?? false
+    }
+
+    func turningPoints(count: Int = 15) -> [TurningPoint] {
+        (try? engine.computeTurningPoints(count: count)) ?? []
+    }
+
+    /// A shareable recap link pointing at the web app's `/recap` page —
+    /// mirrors the web's own `recapUrl()`/`encodeRecap` (see entry.ts's
+    /// `buildRecapJSON` for why this is uncompressed 'r' rather than gzip 'z').
+    func recapShareURL() -> URL? {
+        guard let json = try? engine.buildRecapJSON() else { return nil }
+        let encoded = Data(json.utf8).base64EncodedString()
+            .replacingOccurrences(of: "+", with: "-")
+            .replacingOccurrences(of: "/", with: "_")
+            .replacingOccurrences(of: "=", with: "")
+        return URL(string: "https://dpmcnevin.github.io/isle-wars/recap/#d=r\(encoded)")
     }
 
     // MARK: - Debug settings

@@ -167,6 +167,7 @@ final class GameEngine {
     }
     func confirmMove(_ qty: Int) throws -> GameState { try callState("confirmMove", args: [qty]) }
     func confirmAir(_ qty: Int) throws -> GameState { try callState("confirmAir", args: [qty]) }
+    func confirmParatroop(_ qty: Int) throws -> GameState { try callState("confirmParatroop", args: [qty]) }
     func playCard(_ index: Int) throws -> GameState { try callState("playCard", args: [index]) }
 
     /// Fire-and-forget: relies on the setTimeout shim (see above) so the
@@ -234,5 +235,29 @@ final class GameEngine {
 
     func fullIslandBonus(player: Player) throws -> Int {
         Int(try rawCall("fullIslandBonus", args: [player.rawValue]).toInt32())
+    }
+
+    /// Whether `card` is legal to play right now — the same `playableIn`/
+    /// `cardPlayedThisTurn`/passive rules the engine uses to gate `playCard`,
+    /// so Swift never re-derives a coarser approximation of this check.
+    func canPlayCardNow(card: CardType) throws -> Bool {
+        try rawCall("canPlayCardNow", args: [card.rawValue]).toBool()
+    }
+
+    /// Post-game "key moments" — same picks (territory/army swing, always
+    /// including the final turn) the web recap page uses.
+    func computeTurningPoints(count: Int = 15) throws -> [TurningPoint] {
+        try call("computeTurningPoints", args: [count], as: [TurningPoint].self)
+    }
+
+    /// The full shareable recap payload (turning points, history, stats,
+    /// final board state) as raw JSON — nil if the game hasn't been won.
+    /// Swift base64url-encodes this itself with the 'r' (uncompressed) tag
+    /// the web's `encodeRecap` also emits, so a link built here still decodes
+    /// on the web `/recap` page (JavaScriptCore has no CompressionStream to
+    /// match the web's gzip path, so this always takes the larger, raw form).
+    func buildRecapJSON() throws -> String? {
+        let result = try rawCall("buildRecapJSON")
+        return result.isNull ? nil : result.toString()
     }
 }

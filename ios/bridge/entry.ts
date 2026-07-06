@@ -38,9 +38,15 @@ import {
 	fullIslandBonus,
 	selectableHexes,
 	cardCatalog,
+	armyCount,
+	PLAYERS,
 	type GameState,
-	type Player
+	type Player,
+	type CardType
 } from '../../src/lib/game';
+import { canPlayCardNow } from '../../src/lib/cards';
+import { computeTurningPoints, reconstructOwnersAtTurn } from '../../src/lib/summary';
+import { buildRecap } from '../../src/lib/recap';
 import { runAiTurn, setAiSynchronous } from '../../src/lib/ai';
 
 // The iOS JSContext has no real event loop, so cosmetic `await` pauses in the
@@ -119,6 +125,36 @@ function withState<Args extends unknown[]>(fn: (...args: Args) => void) {
 	// highlighting straight from the engine instead of re-declaring the rules.
 	selectableHexes: () => JSON.stringify(selectableHexes(latestState)),
 	cardCatalog: () => JSON.stringify(cardCatalog()),
+	canPlayCardNow: (card: CardType) => canPlayCardNow(latestState, card),
+
+	// Post-game recap: turning points + a share-link payload. `buildRecapJSON`
+	// returns plain (uncompressed) JSON — Swift base64url-encodes it itself
+	// with the 'r' (raw) format tag encodeRecap also uses, so a link built on
+	// iOS still decodes on the web /recap page. Skipping the web's gzip path
+	// entirely sidesteps CompressionStream, which JavaScriptCore doesn't have.
+	computeTurningPoints: (count: number) => JSON.stringify(computeTurningPoints(latestState, count)),
+	reconstructOwnersAtTurn: (turn: number) => JSON.stringify(reconstructOwnersAtTurn(latestState, turn)),
+	buildRecapJSON: () => {
+		if (!latestState.winner) return null;
+		const s = latestState;
+		const recap = buildRecap({
+			seed: s.seed,
+			winner: s.winner,
+			turn: s.turn,
+			turningPoints: computeTurningPoints(s, 15),
+			history: s.history,
+			stats: s.stats,
+			finalArmies: Object.fromEntries(PLAYERS.map((p) => [p, armyCount(s, p)])) as Record<Player, number>,
+			finalOwners: s.states.map((st) => st.owner),
+			conquests: s.conquests,
+			edgeEvents: s.edgeEvents,
+			hexArmyDeltas: s.hexArmyDeltas,
+			finalWalls: s.map.walls ?? [],
+			finalSeaLanes: s.map.seaLanes,
+			terrainEvents: s.terrainEvents ?? []
+		});
+		return JSON.stringify(recap);
+	},
 
 	// Fire-and-forget: `runAiTurn` is async purely for cosmetic pacing. The
 	// host installs a synchronous setTimeout shim, so by the time this

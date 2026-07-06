@@ -7,12 +7,16 @@ import SwiftUI
 struct CardHandGridView: View {
     let cards: [CardType]
     let phase: Phase
+    /// Per-card legality straight from the engine's `canPlayCardNow` (phase/
+    /// `cardPlayedThisTurn`/passive rules) — mirrors web's `canPlayCardNow`
+    /// check rather than a coarser Swift-side phase approximation.
+    let canPlay: (CardType) -> Bool
     let onTap: (Int) -> Void
 
     @State private var detailIndex: Int?
 
-    private var isPlayable: Bool {
-        phase == .action || phase == .placing || phase == .discard
+    private func isPlayable(_ card: CardType) -> Bool {
+        phase == .discard || canPlay(card)
     }
 
     var body: some View {
@@ -30,6 +34,7 @@ struct CardHandGridView: View {
 
     private func cardTile(_ card: CardType, index: Int) -> some View {
         let meta = card.meta
+        let playable = isPlayable(card)
         // A plain tile with tap/long-press gestures rather than a `Button` — a
         // Button grabs the touch-down highlight and swallows horizontal drags,
         // which stops the enclosing horizontal ScrollView from panning.
@@ -42,9 +47,9 @@ struct CardHandGridView: View {
         .background(RoundedRectangle(cornerRadius: 8).fill(meta.kind.color.opacity(0.28)))
         .overlay(RoundedRectangle(cornerRadius: 8).stroke(meta.kind.color, lineWidth: 1.5))
         .contentShape(RoundedRectangle(cornerRadius: 8))
-        .opacity(isPlayable ? 1 : 0.45)
+        .opacity(playable ? 1 : 0.45)
         .onTapGesture {
-            if isPlayable { onTap(index) }
+            if playable { onTap(index) }
         }
         .onLongPressGesture(minimumDuration: 0.35) {
             detailIndex = index

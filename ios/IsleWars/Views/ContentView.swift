@@ -102,7 +102,7 @@ private struct GameView: View {
     /// than as system sheets that slide up and add form-sheet chrome/padding).
     @ViewBuilder private var modalOverlay: some View {
         if state.phase == .gameOver {
-            PostGameStatsView(state: state, onNewGame: vm.startOver)
+            PostGameStatsView(state: state, onNewGame: vm.startOver, vm: vm)
         } else if state.phase == .attackRolling || state.phase == .attackMoveIn {
             AttackModalView(vm: vm, state: state)
         } else if let request = placeRequest {
@@ -151,6 +151,20 @@ private struct GameView: View {
                     sourceHex: sourceHexBuilder,
                     destHex: destHexBuilder,
                     onConfirm: { qty in vm.confirmAir(qty) },
+                    onCancel: { vm.cancelAction() }
+                )
+            }
+        } else if state.phase == .paratroopQty {
+            modalScrim(onTapBackdrop: { vm.cancelAction() }) {
+                QuantityPickerSheet(
+                    title: "Paratroop Attack",
+                    subtitle: "How many armies to drop?",
+                    range: 1...maxFromArmies,
+                    initial: 1,
+                    confirmLabel: "Drop",
+                    sourceHex: sourceHexBuilder,
+                    destHex: destHexBuilder,
+                    onConfirm: { qty in vm.confirmParatroop(qty) },
                     onCancel: { vm.cancelAction() }
                 )
             }
@@ -233,7 +247,7 @@ private struct GameView: View {
                 .frame(height: 72)
                 .padding(.horizontal, 18)
             } else {
-                CardHandGridView(cards: hand, phase: state.phase) { index in
+                CardHandGridView(cards: hand, phase: state.phase, canPlay: vm.canPlayCardNow) { index in
                     if state.phase == .discard {
                         vm.discardCard(index)
                     } else {

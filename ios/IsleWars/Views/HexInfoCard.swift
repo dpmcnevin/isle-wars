@@ -19,7 +19,9 @@ struct HexInfo {
 
     private static let neutralColor = Color(hex: 0x555566)
 
-    static func make(gridId: Int, map: GameMap, states: [GridState]) -> HexInfo? {
+    static func make(gridId: Int, state: GameState) -> HexInfo? {
+        let map = state.map
+        let states = state.states
         guard map.grids.indices.contains(gridId), states.indices.contains(gridId) else { return nil }
         let g = map.grids[gridId]
         let st = states[gridId]
@@ -53,7 +55,13 @@ struct HexInfo {
             modifiers.append(Modifier(name: "🛡 Fortified", desc: "+2 defense on this hex. Lost when the hex is captured."))
         }
         if st.rampart == true {
-            modifiers.append(Modifier(name: "🏰 Rampart", desc: "+1 defense on this hex. Lost when the hex is captured."))
+            modifiers.append(Modifier(name: "🧱 Rampart", desc: "+1 defense on this hex. Lost when the hex is captured."))
+        }
+        if let capitalOwner = state.capitalOwner(at: gridId) {
+            let desc = capitalOwner == st.owner
+                ? "Pays \(capitalOwner.displayName) +3 reinforcements per turn while they hold it."
+                : "Currently occupied — just a normal city for its occupier. \(capitalOwner.displayName) regains +3 reinforcements per turn by retaking it."
+            modifiers.append(Modifier(name: "★ \(capitalOwner.displayName)'s capital", desc: desc))
         }
 
         return HexInfo(
