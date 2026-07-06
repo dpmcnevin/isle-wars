@@ -1,5 +1,5 @@
 import { writable, derived, get } from 'svelte/store';
-import { generateMap, crossesRiver, wallBetween, shuffle, encodeSeed, decodeSeedSettings, hashSeedToInt, type GameMap } from './map';
+import { generateMap, crossesRiver, wallBetween, shuffle, encodeSeed, decodeSeedSettings, hashSeedToInt, type GameMap, type Terrain } from './map';
 // The card registry lives in ./cards (this module and it import each other; see
 // the note in cards.ts for why that cycle is safe). Values used by the dispatch
 // below are imported here; the public card API is re-exported near CardType so
@@ -13,6 +13,7 @@ import {
 	CARD_DEFS,
 	cardCatalog,
 	cardSelectableAt,
+	canPlayCardNow,
 	isSelectableHex,
 	selectableHexes,
 	type CardMeta,
@@ -60,7 +61,10 @@ export type CardType =
 	| 'paratroop'
 	| 'antiair'
 	| 'canal'
-	| 'spy';
+	| 'spy'
+	| 'scorched'
+	| 'navalpatrol'
+	| 'mountaineer';
 
 // Re-export the card registry's public surface so consumers keep importing it
 // from '$lib/game'. The definitions themselves live in ./cards.
@@ -70,6 +74,7 @@ export {
 	CARD_DEFS,
 	cardCatalog,
 	cardSelectableAt,
+	canPlayCardNow,
 	isSelectableHex,
 	selectableHexes
 };
@@ -98,6 +103,7 @@ export type Phase =
 	| 'invasion_to'
 	| 'deforest_select'
 	| 'oasis_select'
+	| 'scorched_select'
 	| 'storm_from'
 	| 'storm_to'
 	| 'artillery_from'
@@ -165,6 +171,10 @@ export interface GameState {
 	// Bridge card active — cancels the +1 river-crossing defender bonus for the
 	// next attack. Consumed by the first attack roll.
 	bridgeAttackActive: boolean;
+	// Mountaineering card active — the attacker rolls +1 while attacking a
+	// mountain hex, for the next attack sequence. Consumed like Elite Troops.
+	// Optional: absent on saves from before the card existed.
+	mountainAttackActive?: boolean;
 	// Water Invasion card added a temporary sea lane for this attack. If the
 	// attack succeeds it stays; if it fails, it's removed.
 	pendingInvasionLane: [number, number] | null;
@@ -195,6 +205,8 @@ export interface GameState {
 	hexArmyDeltas: HexArmyDelta[];
 	// Optional: absent on saves from before causes were tracked.
 	armyEvents?: ArmyEvent[];
+	// Optional: absent on saves from before terrain changes were tracked.
+	terrainEvents?: TerrainEvent[];
 	// Bookkeeping only (not meant for display): each hex's army count as of
 	// the start of the current turn, so beginTurn can diff against it next
 	// time to produce hexArmyDeltas without needing a full per-hex snapshot
@@ -226,6 +238,19 @@ export interface ArmyEvent {
 	delta: number; // signed: negative = lost, positive = gained
 	cause: 'bomb' | 'sabotage' | 'artillery' | 'rebellion' | 'earthquake' | 'flood' | 'production';
 	by: Player | null; // who played the card; null for world events
+}
+
+// One entry per terrain change — Deforestation, Oasis, and Scorched Earth
+// mutate map.grids[].terrain in place with no history of their own.
+// Chronological (pushed in turn order); together with the final terrain this
+// lets a replay (e.g. the shareable recap, whose map is regenerated from the
+// seed with the ORIGINAL terrain) recover the terrain as of any turn — same
+// idea as EdgeEvent below, just for hex terrain instead of edges.
+export interface TerrainEvent {
+	turn: number;
+	grid: number;
+	prev: Terrain; // terrain before the change
+	terrain: Terrain; // terrain after the change
 }
 
 // One entry per wall/sea-lane edge added or removed — Wall/Breach and
@@ -642,6 +667,7 @@ export function startGame(difficulty = 2, startingArmies = 3, seed?: string): Ga
 		pendingDiscard: false,
 		eliteAttackActive: false,
 		bridgeAttackActive: false,
+		mountainAttackActive: false,
 		pendingInvasionLane: null,
 		cardPlayedThisTurn: false,
 		usedMarshHexes: [],
@@ -662,6 +688,7 @@ export function startGame(difficulty = 2, startingArmies = 3, seed?: string): Ga
 		edgeEvents: [],
 		hexArmyDeltas: [],
 		armyEvents: [],
+		terrainEvents: [],
 		armiesAtTurnStart: []
 	};
 	// Start first turn
@@ -709,10 +736,18 @@ export function capitalBonus(s: GameState, p: Player): number {
 	return cap != null && s.states[cap].owner === p ? CAPITAL_BONUS : 0;
 }
 
+/** Extra +3 reinforcements for holding EVERY capital on the map (all four,
+ *  including your own) — on top of the own-capital bonus above. */
+export function allCapitalsBonus(s: GameState, p: Player): number {
+	const caps = Object.values(s.capitals ?? {});
+	if (caps.length < PLAYERS.length) return 0; // degenerate map or pre-capitals save
+	return caps.every((id) => s.states[id].owner === p) ? CAPITAL_BONUS : 0;
+}
+
 function computeReinforcements(s: GameState, p: Player): number {
 	const c = countryCount(s, p);
 	const base = Math.max(2, Math.floor(c / 3));
-	return base + fullIslandBonus(s, p) + capitalBonus(s, p);
+	return base + fullIslandBonus(s, p) + capitalBonus(s, p) + allCapitalsBonus(s, p);
 }
 
 export function log(s: GameState, text: string, kind: LogEntry['kind'] = 'info', player: Player | null = s.current) {
@@ -733,6 +768,15 @@ export function pushArmyEvent(
 	if (delta === 0) return;
 	if (!s.armyEvents) s.armyEvents = [];
 	s.armyEvents.push({ turn: s.turn, grid, player, delta, cause, by });
+}
+
+// Records a hex terrain change (Deforestation / Oasis / Scorched Earth), so a
+// replay against a seed-regenerated map — which has the ORIGINAL terrain — can
+// recover the terrain as of any turn (see reconstructTerrainAtTurn in summary.ts).
+export function pushTerrainEvent(s: GameState, grid: number, prev: Terrain, terrain: Terrain) {
+	if (prev === terrain) return;
+	if (!s.terrainEvents) s.terrainEvents = [];
+	s.terrainEvents.push({ turn: s.turn, grid, prev, terrain });
 }
 
 // Records a wall/sea-lane edge being built or torn down, so the post-game
@@ -952,6 +996,7 @@ function beginTurn(s: GameState): GameState {
 	s.pendingDiscard = false;
 	s.eliteAttackActive = false;
 	s.bridgeAttackActive = false;
+	s.mountainAttackActive = false;
 	s.pendingInvasionLane = null;
 	s.cardPlayedThisTurn = false;
 	s.usedMarshHexes = [];
@@ -990,7 +1035,7 @@ function beginTurn(s: GameState): GameState {
 	// Reinforcements
 	let reinf = computeReinforcements(s, s.current);
 	s.armiesToPlace = reinf;
-	log(s, `${PLAYER_NAMES[s.current]}'s turn ${s.turn}. Reinforcements: ${reinf} (${countryCount(s, s.current)} territories, +${fullIslandBonus(s, s.current)} island bonus${capitalBonus(s, s.current) ? `, +${CAPITAL_BONUS} capital` : ''}).`, 'info');
+	log(s, `${PLAYER_NAMES[s.current]}'s turn ${s.turn}. Reinforcements: ${reinf} (${countryCount(s, s.current)} territories, +${fullIslandBonus(s, s.current)} island bonus${capitalBonus(s, s.current) ? `, +${CAPITAL_BONUS} capital` : ''}${allCapitalsBonus(s, s.current) ? `, +${CAPITAL_BONUS} all capitals` : ''}).`, 'info');
 	s.phase = 'placing';
 	s.message = `${PLAYER_NAMES[s.current]}: place ${s.armiesToPlace} armies. Click one of your territories.`;
 	return s;
@@ -1362,6 +1407,7 @@ function autoConquer(s: GameState, fromId: number, toId: number): void {
 	s.lastAttackResult = 'win';
 	s.eliteAttackActive = false;
 	s.bridgeAttackActive = false;
+	s.mountainAttackActive = false;
 	s.pendingInvasionLane = null;
 	log(s, `${PLAYER_NAMES[attacker]} walked into ${gridLabel(s, toId)} unopposed.`, 'defeat');
 	// Walking in unopposed still counts as launching an attack from a marsh.
@@ -1404,7 +1450,8 @@ export function rollAttack(): void {
 		const defBonus = defenseBonus(s, s.selectedTo, s.selectedFrom);
 		const atkBonus = attackerBonus(s, s.selectedTo);
 		const eliteBonus = s.eliteAttackActive ? 2 : 0;
-		const atk = atkBase + atkBonus + eliteBonus;
+		const mountBonus = s.mountainAttackActive && s.map.grids[s.selectedTo].terrain === 'mountain' ? 1 : 0;
+		const atk = atkBase + atkBonus + eliteBonus + mountBonus;
 		const def = defBase + defBonus;
 		const attacker = from.owner!;
 		const defender = to.owner; // may be null (neutral)
@@ -1412,6 +1459,7 @@ export function rollAttack(): void {
 		const atkMods: string[] = [];
 		if (atkBonus > 0) atkMods.push(`+${atkBonus} 🌲`);
 		if (eliteBonus > 0) atkMods.push(`+${eliteBonus} elite`);
+		if (mountBonus > 0) atkMods.push(`+${mountBonus} 🧗`);
 		const atkTxt = atkMods.length ? `${atk} (${atkMods.join(', ')})` : `${atk}`;
 		const defMods: string[] = [];
 		if (s.map.grids[s.selectedTo].terrain === 'mountain') defMods.push('+1 ⛰');
@@ -1453,9 +1501,10 @@ export function rollAttack(): void {
 			s.conquests.push({ turn: s.turn, grid: s.selectedTo, attacker, defender, from: s.selectedFrom, armies: from.armies });
 			s.defeatedThisTurn = true;
 			s.lastAttackResult = 'win';
-			// Elite Troops was consumed by this successful attack.
+			// Elite Troops / Mountaineering were consumed by this successful attack.
 			s.eliteAttackActive = false;
 			s.bridgeAttackActive = false;
+			s.mountainAttackActive = false;
 			// Water Invasion succeeded — the sea lane stays permanent.
 			s.pendingInvasionLane = null;
 			log(s, `${PLAYER_NAMES[from.owner!]} conquered ${gridLabel(s, s.selectedTo)}!`, 'defeat');
@@ -1489,6 +1538,7 @@ export function rollAttack(): void {
 			s.lastAttackResult = 'loss';
 			s.eliteAttackActive = false;
 			s.bridgeAttackActive = false; // consumed regardless of outcome
+			s.mountainAttackActive = false;
 			removePendingInvasionLane(s);
 			if (!to.owner) {
 				log(s, `Attacker reduced to 1 — ${gridLabel(s, s.selectedFrom)} attack aborted.`, 'attack');

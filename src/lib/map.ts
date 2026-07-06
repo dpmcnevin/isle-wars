@@ -152,7 +152,39 @@ export function seaLanePath(a: number, b: number, grids: Grid[]): string {
 		const c = controlFor(side, arc);
 		if (clearsLand(c.cx, c.cy)) { chosen = c; break; }
 	}
-	return `M ${g1.x} ${g1.y} Q ${chosen.cx} ${chosen.cy} ${g2.x} ${g2.y}`;
+	// The curve runs hex-center to hex-center, so its first and last stretch
+	// always lie over the endpoint hexes' own land (and, when no candidate arc
+	// cleared, the middle can cross other hexes too). Sample the curve and only
+	// stroke the runs that are over open water, so lanes never paint over land.
+	const point = (t: number): [number, number] => {
+		const omt = 1 - t;
+		return [
+			omt * omt * g1.x + 2 * omt * t * chosen.cx + t * t * g2.x,
+			omt * omt * g1.y + 2 * omt * t * chosen.cy + t * t * g2.y
+		];
+	};
+	const overLand = (px: number, py: number): boolean => {
+		for (const g of grids) if (pointInPolygon(px, py, g.cell)) return true;
+		return false;
+	};
+	const STEPS = 28;
+	const parts: string[] = [];
+	let penDown = false;
+	for (let i = 0; i <= STEPS; i++) {
+		const [px, py] = point(i / STEPS);
+		if (overLand(px, py)) {
+			penDown = false;
+			continue;
+		}
+		parts.push(`${penDown ? 'L' : 'M'} ${px.toFixed(1)} ${py.toFixed(1)}`);
+		penDown = true;
+	}
+	// Degenerate (everything sampled over land): keep the old full curve rather
+	// than render nothing at all.
+	if (parts.filter((p) => p.startsWith('L')).length === 0) {
+		return `M ${g1.x} ${g1.y} Q ${chosen.cx} ${chosen.cy} ${g2.x} ${g2.y}`;
+	}
+	return parts.join(' ');
 }
 
 // Map seeds are a human-shareable 12-char uppercase-alphanumeric string, not

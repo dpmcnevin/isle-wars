@@ -7,6 +7,25 @@ struct DebugSettingsSheet: View {
     var body: some View {
         NavigationStack {
             Form {
+                if let seed = vm.state?.seed {
+                    Section("Current Seed") {
+                        HStack {
+                            Text(seed)
+                                .font(.system(.body, design: .monospaced))
+                                .textSelection(.enabled)
+                            Spacer()
+                            Button {
+                                UIPasteboard.general.string = seed
+                            } label: {
+                                Image(systemName: "doc.on.doc")
+                            }
+                            .buttonStyle(.borderless)
+                        }
+                        Text("Packs this game's map, difficulty, starting armies, and these debug settings — enter it on a New Game to reproduce it exactly.")
+                            .font(.footnote)
+                            .foregroundStyle(.secondary)
+                    }
+                }
                 if let settings = vm.debugSettings {
                     Toggle("Disable Save", isOn: Binding(
                         get: { settings.disableSave },

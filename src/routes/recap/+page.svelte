@@ -15,9 +15,15 @@
 	// Regenerated from the seed alone — see map.ts's generateMap — so the
 	// recap link doesn't need to embed the (much heavier) hex geometry.
 	let map = $state<GameMap | null>(null);
-	let openTurningPoint = $state<number | null>(null);
-	// Cross-highlighting between the turning-point list and the numbered dots
-	// on the charts: hovering either side lights up the other.
+	// The selected "key moment": 0 = the starting map (before turn 1),
+	// 1..N = the turning points in order (N being the final turn's ★ entry).
+	// The mini maps below the charts always show the selected moment, and the
+	// charts grey out everything that happens after it.
+	let selected = $state(0);
+	// Zoomed compare modal for the selected turning point (Esc closes it).
+	let zoomOpen = $state(false);
+	// Cross-highlighting between the moment chips and the numbered dots on the
+	// charts: hovering either side lights up the other (tp index, not moment).
 	let hoverTp = $state<number | null>(null);
 	// Shared hover crosshair across both charts (they share an x axis, so one
 	// index drives the vertical line + readout in both).
@@ -35,8 +41,43 @@
 			return;
 		}
 		data = decoded;
-		map = generateMap(decoded.seed);
+		const m = generateMap(decoded.seed);
+		// The seed regenerates the ORIGINAL terrain; replay the game's terrain
+		// changes (Deforestation / Oasis / Scorched Earth) forward so the map
+		// matches the final board (reconstructTerrainAtTurn can then rewind it).
+		for (const ev of decoded.terrainEvents ?? []) m.grids[ev.grid].terrain = ev.terrain;
+		map = m;
 	});
+
+	const momentCount = $derived(data ? data.turningPoints.length + 1 : 0);
+
+	function selectMoment(i: number) {
+		if (!data) return;
+		selected = Math.max(0, Math.min(momentCount - 1, i));
+		if (selected === 0) zoomOpen = false; // the start map has no compare view
+	}
+
+	// Keyboard: ← / → step through the key moments (wrapping is intentional at
+	// neither end), Esc closes the zoomed compare modal.
+	function onKey(e: KeyboardEvent) {
+		if (!data) return;
+		const tag = (e.target as HTMLElement | null)?.tagName;
+		if (tag === 'INPUT' || tag === 'TEXTAREA' || tag === 'SELECT') return;
+		if (e.key === 'Escape') {
+			if (zoomOpen) {
+				zoomOpen = false;
+				e.preventDefault();
+			}
+			return;
+		}
+		if (e.key === 'ArrowLeft') {
+			selectMoment(selected - 1);
+			e.preventDefault();
+		} else if (e.key === 'ArrowRight') {
+			selectMoment(selected + 1);
+			e.preventDefault();
+		}
+	}
 
 	// Chart plot area. The viewBox is CHART_W + 85 wide: 30px left gutter for
 	// the y axis labels, ~55px right gutter for the direct line-end labels.
@@ -54,6 +95,17 @@
 	function chartPoints(hist: RecapData['history'], p: Player, field: ChartField, max: number) {
 		return hist.map((s, i) => `${xAt(i, hist.length)},${yAt(s[field][p], max)}`).join(' ');
 	}
+
+	// The history index the selected moment has "reached": snapshots are taken
+	// at the START of each turn, so the state after turning-point turn T is the
+	// turn-T+1 snapshot. Charts grey out everything to the right of this.
+	const reachedIdx = $derived.by(() => {
+		if (!data) return 0;
+		if (selected === 0) return 0;
+		const tp = data.turningPoints[selected - 1];
+		const idx = data.history.findIndex((h) => h.turn === tp.turn + 1);
+		return idx >= 0 ? idx : data.history.length - 1; // final turn: nothing left to grey
+	});
 
 	// ~5 evenly spaced turn labels along the x axis (deduped for short games).
 	function xTicks(hist: RecapData['history']): { x: number; turn: number }[] {
@@ -133,6 +185,78 @@
 		);
 	}
 
+	// Everything the compare view needs for one turning point, computed from
+	// the replay logs. Ground truth for "what actually changed" is the
+	// before/after owner snapshots, not the raw conquest log — a grid can have
+	// a conquest event this turn and still show the same owner in both
+	// snapshots (captured then recaptured back within the turn), and
+	// highlighting it then would stripe a hex that visibly didn't change.
+	function tpView(d: RecapData, m: GameMap, tp: RecapTurningPoint) {
+		const ownersBefore = ownersAtTurn(d, tp.turn - 1);
+		const ownersAfter = ownersAtTurn(d, tp.turn);
+		const edgesBefore = edgesAtTurn(d, tp.turn - 1);
+		const edgesAfter = edgesAtTurn(d, tp.turn);
+		const netChangedGrids = m.grids.map((g) => g.id).filter((id) => ownersBefore[id] !== ownersAfter[id]);
+		const capturedFrom = Object.fromEntries(netChangedGrids.map((id) => [id, ownersBefore[id]])) as Record<
+			number,
+			Player | null
+		>;
+		const winnerInvolvedGrids = netChangedGrids.filter(
+			(id) => ownersAfter[id] === d.winner || ownersBefore[id] === d.winner
+		);
+		const turnConquests = d.conquests.filter((c) => c.turn === tp.turn);
+		const paths = turnConquests
+			.filter(
+				(c) =>
+					c.from != null &&
+					netChangedGrids.includes(c.grid) &&
+					(c.attacker === d.winner || c.defender === d.winner)
+			)
+			.map((c) => ({
+				from: c.from as number,
+				to: c.grid,
+				armies: c.armies,
+				color: c.attacker === d.winner ? '#fff' : '#ff5a5a',
+				forfeited: c.forfeited
+			}));
+		// Committed army count per captured hex. When there's no capture at all
+		// this turn (a pure army-swing turning point), fall back to the top few
+		// per-hex swings recorded that turn (see game.ts's recordHexArmyDeltas)
+		// — signed, since these are gains/losses on hexes that never changed
+		// owner, not an attack's committed force.
+		const captureArmyLabels = Object.fromEntries(
+			turnConquests.filter((c) => netChangedGrids.includes(c.grid)).map((c) => [c.grid, c.armies])
+		);
+		const hexSwingLabels = Object.fromEntries(
+			d.hexArmyDeltas.filter((e) => e.turn === tp.turn).map((e) => [e.grid, e.delta])
+		);
+		const armyLabels = Object.keys(captureArmyLabels).length > 0 ? captureArmyLabels : hexSwingLabels;
+		// Per-player totals bracketing this turn — history entries are
+		// snapshotted at the START of each turn, so the pair that brackets turn
+		// T's own actions is (T, T+1). When a snapshot is missing (the final
+		// turn has no start-of-next-turn entry), synthesize one: territories
+		// from the owner snapshot, armies from finalArmies (absent on old
+		// shared links — the modal shows a placeholder then).
+		const historyBefore =
+			d.history.find((h) => h.turn === tp.turn) ?? { territories: territoriesFromOwners(ownersBefore) };
+		const historyAfter =
+			d.history.find((h) => h.turn === tp.turn + 1) ??
+			{ territories: territoriesFromOwners(ownersAfter), armies: tp.isFinal ? d.finalArmies : undefined };
+		return {
+			ownersBefore,
+			ownersAfter,
+			edgesBefore,
+			edgesAfter,
+			paths,
+			changedGrids: netChangedGrids,
+			capturedFrom,
+			armyLabels,
+			historyBefore,
+			historyAfter,
+			otherPlayersCapture: netChangedGrids.length > 0 && winnerInvolvedGrids.length === 0
+		};
+	}
+
 	function copyLink() {
 		navigator.clipboard.writeText(window.location.href).then(() => {
 			linkCopied = true;
@@ -163,6 +287,8 @@
 <svelte:head>
 	<title>Isle Wars — Recap</title>
 </svelte:head>
+
+<svelte:window onkeydown={onKey} />
 
 <main>
 	{#if invalid}
@@ -196,241 +322,242 @@
 				<button class="ghost" onclick={startFreshAndGoHome}>Back to Main Page</button>
 			</div>
 		</section>
-		<div class="layout">
-			{#if d.turningPoints.length > 0}
-				<section class="turning-points">
-					<h3>Turning points</h3>
-					<ol>
-						{#each d.turningPoints as tp, i}
-							<li
-								class:clickable={!!map}
-								class:hl={hoverTp === i}
-								onclick={() => map && (openTurningPoint = i)}
-								onmouseenter={() => (hoverTp = i)}
-								onmouseleave={() => (hoverTp = null)}
-							>
-								<span class="tp-num" class:star={tp.isFinal}>{tp.isFinal ? '★' : i + 1}</span>
-								<span class="tp-turn">Turn {tp.turn}</span>
-								<span class="tp-headline">{#each headlineParts(tp.headline) as part}{#if part.color}<span style="color: {part.color}">{part.text}</span>{:else}{part.text}{/if}{/each}</span>
-								{#if tp.delta !== 0}
-									<span class="tp-swing" class:pos={tp.delta > 0} class:neg={tp.delta < 0} title="Change in territories, and the winner's total after this turn">
-										{tp.delta > 0 ? '+' : ''}{tp.delta} <span class="tp-total">→ {tp.territoriesAfter}</span>
-									</span>
-								{:else}
-									<!-- Big-battle pick: no hex changed hands, so show the army
-									     swing that actually earned this turn its spot instead. -->
-									<span class="tp-swing" class:pos={tp.armyDelta > 0} class:neg={tp.armyDelta < 0}>
-										{tp.armyDelta > 0 ? '+' : ''}{tp.armyDelta} armies
-									</span>
-								{/if}
-								{#if map}<span class="tp-chevron" aria-hidden="true">›</span>{/if}
-							</li>
-						{/each}
-					</ol>
-				</section>
-			{/if}
-			<section class="analytics">
-				{#snippet chart(field: 'territories' | 'armies', max: number)}
-					{@const len = d.history.length}
-					<!-- svelte-ignore a11y_no_noninteractive_element_interactions -->
-					<!-- viewBox starts above y=0: turning-point dots (r up to 9) are
-					     centered on line values as high as y=5, so without the
-					     headroom they clip at the top edge. -->
-					<svg
-						viewBox="0 -10 {CHART_W + 85} {CHART_H + 40}"
-						role="img"
-						onmousemove={(e) => chartHover(e, len)}
-						onmouseleave={() => (hoverIdx = null)}
-					>
-						<line x1="30" y1={CHART_H + 5} x2={CHART_W + 35} y2={CHART_H + 5} stroke="#345" />
-						<line x1="30" y1="5" x2="30" y2={CHART_H + 5} stroke="#345" />
-						<line x1="30" y1={yAt(max / 2, max)} x2={CHART_W + 35} y2={yAt(max / 2, max)} stroke="#1f3a52" stroke-dasharray="4 4" />
-						<text x="26" y="10" text-anchor="end" class="axis">{max}</text>
-						<text x="26" y={yAt(max / 2, max) + 3} text-anchor="end" class="axis">{Math.round(max / 2)}</text>
-						<text x="26" y={CHART_H + 8} text-anchor="end" class="axis">0</text>
-						{#each xTicks(d.history) as t}
-							<line x1={t.x} y1={CHART_H + 5} x2={t.x} y2={CHART_H + 9} stroke="#345" />
-							<text x={t.x} y={CHART_H + 19} text-anchor="middle" class="axis">{t.turn}</text>
-						{/each}
-						{#each PLAYERS as p}
-							<polyline fill="none" stroke={PLAYER_COLORS[p]} stroke-width="2" points={chartPoints(d.history, p, field, max)} />
-						{/each}
-						{#each endLabels(d.history, field, max) as l}
-							<!-- +13 keeps the labels clear of a turning-point dot sitting
-							     on the line's final point (dots reach r=9 on hover). -->
-							<text x={xAt(len - 1, len) + 13} y={l.y + 3} class="line-label" fill={PLAYER_COLORS[l.p]}>{PLAYER_NAMES[l.p]}</text>
-						{/each}
-						{#each PLAYERS as p}
-							{@const elim = elimination(d.history, p)}
-							{#if elim}
-								<text x={xAt(elim.idx, len)} y={CHART_H + 1} text-anchor="middle" class="elim-mark" fill={PLAYER_COLORS[p]}>✕<title>{PLAYER_NAMES[p]} eliminated on turn {elim.turn}</title></text>
-							{/if}
-						{/each}
-						{#if hoverIdx != null && d.history[hoverIdx]}
-							{@const hs = d.history[hoverIdx]}
-							<line x1={xAt(hoverIdx, len)} y1="5" x2={xAt(hoverIdx, len)} y2={CHART_H + 5} stroke="#6a9abf" stroke-dasharray="3 3" opacity="0.6" pointer-events="none" />
-							{#each PLAYERS as p}
-								<circle cx={xAt(hoverIdx, len)} cy={yAt(hs[field][p], max)} r="3" fill={PLAYER_COLORS[p]} pointer-events="none" />
-							{/each}
-							<text x="36" y="16" class="hover-readout" pointer-events="none">Turn {hs.turn}:{#each PLAYERS as p}<tspan dx="8" fill={PLAYER_COLORS[p]}>{hs[field][p]}</tspan>{/each}</text>
-						{/if}
-						<!-- Numbered turning-point dots on the winner's line, matching
-						     the chips in the list — hover either side to highlight the
-						     other, click to open the compare modal. -->
-						{#each d.turningPoints as tp, i}
-							{@const m = tpMarker(d, tp, field, max)}
-							{#if m}
-								<g
-									class="tp-dot"
-									role="button"
-									tabindex="0"
-									aria-label="Open turning point at turn {tp.turn}"
-									onclick={() => map && (openTurningPoint = i)}
-									onkeydown={(e) => e.key === 'Enter' && map && (openTurningPoint = i)}
-									onmouseenter={() => (hoverTp = i)}
-									onmouseleave={() => (hoverTp = null)}
-								>
-									<circle cx={m.x} cy={m.y} r={hoverTp === i ? 9 : 7} fill="#1a1408" stroke="#ffd54a" stroke-width={hoverTp === i ? 2.5 : 1.5} />
-									<text x={m.x} y={m.y + 2.8} text-anchor="middle" class="tp-dot-num">{tp.isFinal ? '★' : i + 1}</text>
-								</g>
-							{/if}
-						{/each}
-					</svg>
-				{/snippet}
-				<div class="charts">
-					{#if map}
-						<div class="chart">
-							<h3>Final board</h3>
-							<TpMiniMap {map} owners={d.finalOwners} edgeWalls={d.finalWalls} edgeSeaLanes={d.finalSeaLanes} {createdLaneKeys} />
-						</div>
+
+		{#snippet chart(field: 'territories' | 'armies', max: number)}
+			{@const len = d.history.length}
+			{@const reachedX = xAt(reachedIdx, len)}
+			<!-- svelte-ignore a11y_no_noninteractive_element_interactions -->
+			<!-- viewBox starts above y=0: turning-point dots (r up to 9) are
+			     centered on line values as high as y=5, so without the
+			     headroom they clip at the top edge. -->
+			<svg
+				viewBox="0 -10 {CHART_W + 85} {CHART_H + 40}"
+				role="img"
+				onmousemove={(e) => chartHover(e, len)}
+				onmouseleave={() => (hoverIdx = null)}
+			>
+				<defs>
+					<!-- Clips the full-color lines to everything at or before the
+					     selected key moment; the plain grey underlay shows through
+					     for the not-yet-reached future. -->
+					<clipPath id="reached-{field}">
+						<rect x="0" y="-10" width={reachedX} height={CHART_H + 40} />
+					</clipPath>
+				</defs>
+				<line x1="30" y1={CHART_H + 5} x2={CHART_W + 35} y2={CHART_H + 5} stroke="#345" />
+				<line x1="30" y1="5" x2="30" y2={CHART_H + 5} stroke="#345" />
+				<line x1="30" y1={yAt(max / 2, max)} x2={CHART_W + 35} y2={yAt(max / 2, max)} stroke="#1f3a52" stroke-dasharray="4 4" />
+				<text x="26" y="10" text-anchor="end" class="axis">{max}</text>
+				<text x="26" y={yAt(max / 2, max) + 3} text-anchor="end" class="axis">{Math.round(max / 2)}</text>
+				<text x="26" y={CHART_H + 8} text-anchor="end" class="axis">0</text>
+				{#each xTicks(d.history) as t}
+					<line x1={t.x} y1={CHART_H + 5} x2={t.x} y2={CHART_H + 9} stroke="#345" />
+					<text x={t.x} y={CHART_H + 19} text-anchor="middle" class="axis">{t.turn}</text>
+				{/each}
+				<!-- The future, greyed: full-length desaturated lines under the
+				     clipped colored ones. -->
+				{#each PLAYERS as p}
+					<polyline fill="none" stroke="#3a4a5c" stroke-width="2" opacity="0.55" points={chartPoints(d.history, p, field, max)} />
+				{/each}
+				{#each PLAYERS as p}
+					<polyline
+						fill="none"
+						stroke={PLAYER_COLORS[p]}
+						stroke-width="2"
+						points={chartPoints(d.history, p, field, max)}
+						clip-path="url(#reached-{field})"
+					/>
+				{/each}
+				<!-- "You are here" marker for the selected key moment. -->
+				<line x1={reachedX} y1="0" x2={reachedX} y2={CHART_H + 5} stroke="#ffd54a" stroke-width="1.5" stroke-dasharray="5 4" opacity="0.8" />
+				{#each endLabels(d.history, field, max) as l}
+					<!-- +13 keeps the labels clear of a turning-point dot sitting
+					     on the line's final point (dots reach r=9 on hover). -->
+					<text x={xAt(len - 1, len) + 13} y={l.y + 3} class="line-label" fill={PLAYER_COLORS[l.p]}>{PLAYER_NAMES[l.p]}</text>
+				{/each}
+				{#each PLAYERS as p}
+					{@const elim = elimination(d.history, p)}
+					{#if elim}
+						<text x={xAt(elim.idx, len)} y={CHART_H + 1} text-anchor="middle" class="elim-mark" fill={PLAYER_COLORS[p]}>✕<title>{PLAYER_NAMES[p]} eliminated on turn {elim.turn}</title></text>
 					{/if}
-					<div class="chart">
-						<h3>Territories owned</h3>
-						{@render chart('territories', maxTerr)}
-					</div>
-					<div class="chart">
-						<h3>Total armies</h3>
-						{@render chart('armies', maxArm)}
-					</div>
-					<div class="chart stat-table">
-						<h3>Stats</h3>
-						<table class="stats-table">
-							<thead>
-								<tr>
-									<th></th>
-									<th>Territories</th>
-									<th>Armies</th>
-									<th title="Attacks won / lost">Battles W–L</th>
-									<th title="Hexes captured / lost">Hexes +/−</th>
-									<th title="Cards drawn">Cards</th>
-								</tr>
-							</thead>
-							<tbody>
-								{#each PLAYERS as p}
-									{@const st = d.stats[p]}
-									{@const elim = elimination(d.history, p)}
-									<tr style={p === d.winner ? `background: color-mix(in srgb, ${PLAYER_COLORS[p]} 16%, transparent)` : ''}>
-										<td>
-											<span class="dot" style="background:{PLAYER_COLORS[p]}"></span> {PLAYER_NAMES[p]}
-											{#if elim}<span class="elim" title="{PLAYER_NAMES[p]} eliminated on turn {elim.turn}">✕ turn {elim.turn}</span>{/if}
-										</td>
-										<td>{finalTerr[p]}</td>
-										<td>{d.finalArmies?.[p] ?? last?.armies[p] ?? 0}</td>
-										<td>{st.attacksWon}/{st.attacksLost}</td>
-										<td>{st.territoriesCaptured}/{st.territoriesLost}</td>
-										<td>{st.cardsDrawn}</td>
-									</tr>
-								{/each}
-							</tbody>
-						</table>
-					</div>
-				</div>
+				{/each}
+				{#if hoverIdx != null && d.history[hoverIdx]}
+					{@const hs = d.history[hoverIdx]}
+					<line x1={xAt(hoverIdx, len)} y1="5" x2={xAt(hoverIdx, len)} y2={CHART_H + 5} stroke="#6a9abf" stroke-dasharray="3 3" opacity="0.6" pointer-events="none" />
+					{#each PLAYERS as p}
+						<circle cx={xAt(hoverIdx, len)} cy={yAt(hs[field][p], max)} r="3" fill={PLAYER_COLORS[p]} pointer-events="none" />
+					{/each}
+					<text x="36" y="16" class="hover-readout" pointer-events="none">Turn {hs.turn}:{#each PLAYERS as p}<tspan dx="8" fill={PLAYER_COLORS[p]}>{hs[field][p]}</tspan>{/each}</text>
+				{/if}
+				<!-- Numbered turning-point dots on the winner's line, matching
+				     the chips below — hover either side to highlight the other,
+				     click to jump the moment viewer there. -->
+				{#each d.turningPoints as tp, i}
+					{@const m = tpMarker(d, tp, field, max)}
+					{#if m}
+						<g
+							class="tp-dot"
+							class:reached={i + 1 <= selected}
+							role="button"
+							tabindex="0"
+							aria-label="Show turning point at turn {tp.turn}"
+							onclick={() => selectMoment(i + 1)}
+							onkeydown={(e) => e.key === 'Enter' && selectMoment(i + 1)}
+							onmouseenter={() => (hoverTp = i)}
+							onmouseleave={() => (hoverTp = null)}
+						>
+							<circle cx={m.x} cy={m.y} r={hoverTp === i ? 9 : 7} fill="#1a1408" stroke="#ffd54a" stroke-width={hoverTp === i ? 2.5 : 1.5} />
+							<text x={m.x} y={m.y + 2.8} text-anchor="middle" class="tp-dot-num">{tp.isFinal ? '★' : i + 1}</text>
+						</g>
+					{/if}
+				{/each}
+			</svg>
+		{/snippet}
+
+		<div class="top-row">
+			<section class="chart stat-table">
+				<h3>Stats</h3>
+				<table class="stats-table">
+					<thead>
+						<tr>
+							<th></th>
+							<th>Territories</th>
+							<th>Armies</th>
+							<th title="Attacks won / lost">Battles W–L</th>
+							<th title="Hexes captured / lost">Hexes +/−</th>
+							<th title="Cards drawn">Cards</th>
+						</tr>
+					</thead>
+					<tbody>
+						{#each PLAYERS as p}
+							{@const st = d.stats[p]}
+							{@const elim = elimination(d.history, p)}
+							<tr style={p === d.winner ? `background: color-mix(in srgb, ${PLAYER_COLORS[p]} 16%, transparent)` : ''}>
+								<td>
+									<span class="dot" style="background:{PLAYER_COLORS[p]}"></span> {PLAYER_NAMES[p]}
+									{#if elim}<span class="elim" title="{PLAYER_NAMES[p]} eliminated on turn {elim.turn}">✕ turn {elim.turn}</span>{/if}
+								</td>
+								<td>{finalTerr[p]}</td>
+								<td>{d.finalArmies?.[p] ?? last?.armies[p] ?? 0}</td>
+								<td>{st.attacksWon}/{st.attacksLost}</td>
+								<td>{st.territoriesCaptured}/{st.territoriesLost}</td>
+								<td>{st.cardsDrawn}</td>
+							</tr>
+						{/each}
+					</tbody>
+				</table>
+			</section>
+			<section class="chart">
+				<h3>Territories owned</h3>
+				{@render chart('territories', maxTerr)}
+			</section>
+			<section class="chart">
+				<h3>Total armies</h3>
+				{@render chart('armies', maxArm)}
 			</section>
 		</div>
-		{#if map && openTurningPoint != null && d.turningPoints[openTurningPoint]}
-			{@const tp = d.turningPoints[openTurningPoint]}
-			{@const ownersBefore = ownersAtTurn(d, tp.turn - 1)}
-			{@const ownersAfter = ownersAtTurn(d, tp.turn)}
-			{@const edgesBefore = edgesAtTurn(d, tp.turn - 1)}
-			{@const edgesAfter = edgesAtTurn(d, tp.turn)}
-			<!-- Per-player territory/army totals for this turn — the one thing
-			     that's ALWAYS informative even when the map itself is a no-op
-			     (a pure army-count swing turning point has nothing to highlight
-			     on the map, but the numbers behind it are still real data).
-			     NOTE: history entries are snapshotted at the *start* of each
-			     turn (see computeTurningPoints in summary.ts), so the pair
-			     that brackets turn tp.turn's own actions is (tp.turn, tp.turn+1)
-			     — one turn ahead of the map's own before/after convention
-			     (tp.turn-1, tp.turn), which is keyed off when a conquest event
-			     is tagged, not when a history snapshot was taken. When a
-			     snapshot is missing (the final turn has no start-of-next-turn
-			     entry), synthesize one: territories from the owner snapshot,
-			     armies from finalArmies (absent on old shared links — the
-			     modal shows a placeholder then). -->
-			{@const historyBefore =
-				d.history.find((h) => h.turn === tp.turn) ?? { territories: territoriesFromOwners(ownersBefore) }}
-			{@const historyAfter =
-				d.history.find((h) => h.turn === tp.turn + 1) ??
-				{ territories: territoriesFromOwners(ownersAfter), armies: tp.isFinal ? d.finalArmies : undefined }}
-			<!-- Ground truth for "what actually changed" is the before/after owner
-			     snapshots, not the raw conquest log — a grid can have a conquest
-			     event this turn and still show the same owner in both snapshots
-			     (e.g. captured then recaptured back within the same turn), and
-			     highlighting it then would show a capture stripe on a hex that
-			     visibly didn't change. Only net ownership flips count. -->
-			{@const netChangedGrids = map.grids.map((g) => g.id).filter((id) => ownersBefore[id] !== ownersAfter[id])}
-			{@const changedGrids = netChangedGrids}
-			{@const capturedFrom = Object.fromEntries(netChangedGrids.map((id) => [id, ownersBefore[id]])) as Record<number, Player | null>}
-			{@const winnerInvolvedGrids = netChangedGrids.filter((id) => ownersAfter[id] === d.winner || ownersBefore[id] === d.winner)}
-			{@const turnConquests = d.conquests.filter((c) => c.turn === tp.turn)}
-			{@const paths = turnConquests
-				.filter(
-					(c) =>
-						c.from != null &&
-						netChangedGrids.includes(c.grid) &&
-						(c.attacker === d.winner || c.defender === d.winner)
-				)
-				.map((c) => ({
-					from: c.from as number,
-					to: c.grid,
-					armies: c.armies,
-					color: c.attacker === d.winner ? '#fff' : '#ff5a5a',
-					forfeited: c.forfeited
-				}))}
-			<!-- Committed army count per captured hex. When there's no capture
-			     at all this turn (a pure army-swing turning point), fall back to
-			     the top few per-hex swings recorded that turn (see game.ts's
-			     recordHexArmyDeltas) — signed, since these are gains/losses on
-			     hexes that never changed owner, not an attack's committed force. -->
-			{@const captureArmyLabels = Object.fromEntries(
-				turnConquests.filter((c) => netChangedGrids.includes(c.grid)).map((c) => [c.grid, c.armies])
-			)}
-			{@const hexSwingLabels = Object.fromEntries(
-				d.hexArmyDeltas.filter((e) => e.turn === tp.turn).map((e) => [e.grid, e.delta])
-			)}
-			{@const armyLabels = Object.keys(captureArmyLabels).length > 0 ? captureArmyLabels : hexSwingLabels}
-			<TurningPointCompareModal
-				{map}
-				turn={tp.turn}
-				headline={tp.headline}
-				{ownersBefore}
-				{ownersAfter}
-				{edgesBefore}
-				{edgesAfter}
-				{createdLaneKeys}
-				{paths}
-				{changedGrids}
-				{capturedFrom}
-				{armyLabels}
-				{historyBefore}
-				{historyAfter}
-				otherPlayersCapture={netChangedGrids.length > 0 && winnerInvolvedGrids.length === 0}
-				hasPrev={openTurningPoint > 0}
-				hasNext={openTurningPoint < d.turningPoints.length - 1}
-				onClose={() => (openTurningPoint = null)}
-				onPrev={() => (openTurningPoint = (openTurningPoint ?? 0) - 1)}
-				onNext={() => (openTurningPoint = (openTurningPoint ?? 0) + 1)}
-			/>
+
+		{#if map}
+			{@const m = map}
+			<section class="moments">
+				<div class="moment-nav">
+					<button class="tp-nav-btn" disabled={selected <= 0} onclick={() => selectMoment(selected - 1)} aria-label="Previous key moment">‹</button>
+					<div class="moment-chips">
+						<button
+							class="chip chip-start"
+							class:active={selected === 0}
+							onclick={() => selectMoment(0)}
+							title="Starting positions, before turn 1"
+						>⚑ Start</button>
+						{#each d.turningPoints as tp, i}
+							<button
+								class="chip"
+								class:active={selected === i + 1}
+								class:hl={hoverTp === i}
+								class:star={tp.isFinal}
+								onclick={() => selectMoment(i + 1)}
+								onmouseenter={() => (hoverTp = i)}
+								onmouseleave={() => (hoverTp = null)}
+								title="Turn {tp.turn} — {tp.headline}"
+							>{tp.isFinal ? '★' : i + 1}</button>
+						{/each}
+					</div>
+					<button class="tp-nav-btn" disabled={selected >= momentCount - 1} onclick={() => selectMoment(selected + 1)} aria-label="Next key moment">›</button>
+				</div>
+				<p class="kbd-hint">← → step through moments · click a map to zoom · Esc closes the zoom</p>
+
+				{#if selected === 0}
+					{@const ownersStart = ownersAtTurn(d, 0)}
+					{@const edgesStart = edgesAtTurn(d, 0)}
+					<h3 class="moment-headline">Starting positions — before turn 1</h3>
+					<div class="moment-single">
+						<TpMiniMap map={m} owners={ownersStart} edgeWalls={edgesStart.walls} edgeSeaLanes={edgesStart.seaLanes} {createdLaneKeys} />
+					</div>
+				{:else}
+					{@const tp = d.turningPoints[selected - 1]}
+					{@const v = tpView(d, m, tp)}
+					<h3 class="moment-headline">
+						<span class="tp-turn">Turn {tp.turn}</span>
+						{#each headlineParts(tp.headline) as part}{#if part.color}<span style="color: {part.color}">{part.text}</span>{:else}{part.text}{/if}{/each}
+						{#if tp.delta !== 0}
+							<span class="tp-swing" class:pos={tp.delta > 0} class:neg={tp.delta < 0} title="Change in territories, and the winner's total after this turn">
+								{tp.delta > 0 ? '+' : ''}{tp.delta} <span class="tp-total">→ {tp.territoriesAfter}</span>
+							</span>
+						{:else}
+							<span class="tp-swing" class:pos={tp.armyDelta > 0} class:neg={tp.armyDelta < 0}>
+								{tp.armyDelta > 0 ? '+' : ''}{tp.armyDelta} armies
+							</span>
+						{/if}
+					</h3>
+					{#if v.otherPlayersCapture}
+						<p class="tp-no-capture">The highlighted hexes below changed hands between other players — unrelated to this turning point.</p>
+					{/if}
+					<!-- svelte-ignore a11y_click_events_have_key_events a11y_no_static_element_interactions -->
+					<div class="moment-compare" onclick={() => (zoomOpen = true)} title="Click to zoom">
+						<div class="moment-pane">
+							<div class="moment-label">Before (turn {tp.turn - 1})</div>
+							<TpMiniMap map={m} owners={v.ownersBefore} ghostGrids={v.changedGrids} edgeWalls={v.edgesBefore.walls} edgeSeaLanes={v.edgesBefore.seaLanes} {createdLaneKeys} />
+						</div>
+						<div class="moment-arrow" aria-hidden="true">
+							<svg viewBox="0 0 40 24" width="40" height="24">
+								<line x1="2" y1="12" x2="32" y2="12" stroke="#ffd54a" stroke-width="3" stroke-linecap="round" />
+								<path d="M24,3 L36,12 L24,21" fill="none" stroke="#ffd54a" stroke-width="3" stroke-linecap="round" stroke-linejoin="round" />
+							</svg>
+						</div>
+						<div class="moment-pane">
+							<div class="moment-label">After (turn {tp.turn})</div>
+							<TpMiniMap map={m} owners={v.ownersAfter} paths={v.paths} changedGrids={v.changedGrids} dimUnchanged edgeWalls={v.edgesAfter.walls} edgeSeaLanes={v.edgesAfter.seaLanes} {createdLaneKeys} capturedFrom={v.capturedFrom} armyLabels={v.armyLabels} />
+						</div>
+					</div>
+				{/if}
+			</section>
+
+			{#if zoomOpen && selected > 0 && d.turningPoints[selected - 1]}
+				{@const tp = d.turningPoints[selected - 1]}
+				{@const v = tpView(d, m, tp)}
+				<TurningPointCompareModal
+					map={m}
+					turn={tp.turn}
+					headline={tp.headline}
+					ownersBefore={v.ownersBefore}
+					ownersAfter={v.ownersAfter}
+					edgesBefore={v.edgesBefore}
+					edgesAfter={v.edgesAfter}
+					{createdLaneKeys}
+					paths={v.paths}
+					changedGrids={v.changedGrids}
+					capturedFrom={v.capturedFrom}
+					armyLabels={v.armyLabels}
+					historyBefore={v.historyBefore}
+					historyAfter={v.historyAfter}
+					otherPlayersCapture={v.otherPlayersCapture}
+					hasPrev={selected > 1}
+					hasNext={selected < momentCount - 1}
+					onClose={() => (zoomOpen = false)}
+					onPrev={() => selectMoment(selected - 1)}
+					onNext={() => selectMoment(selected + 1)}
+				/>
+			{/if}
 		{/if}
 	{/if}
 </main>
@@ -442,7 +569,7 @@
 		font-family: system-ui, sans-serif;
 	}
 	main {
-		max-width: 1200px;
+		max-width: 1500px;
 		margin: 0 auto;
 		padding: 1rem;
 	}
@@ -487,48 +614,24 @@
 	}
 	.banner-actions button.ghost:hover { background: rgba(255, 255, 255, 0.06); color: #d0e6f5; }
 
-	.layout {
+	/* Top row: overall stats table + the two shared-axis charts, side by side
+	   above the moment viewer. Charts grey out everything after the selected
+	   moment (see the clipPath in the chart snippet). */
+	.top-row {
 		display: grid;
-		grid-template-columns: 1fr 1fr;
+		grid-template-columns: minmax(320px, 1fr) 1fr 1fr;
 		align-items: start;
 		gap: 1rem;
+		margin-bottom: 1rem;
 	}
 	@media (max-width: 1100px) {
-		.layout { grid-template-columns: 1fr; }
-		.charts { grid-template-columns: 1fr !important; }
+		.top-row { grid-template-columns: 1fr; }
 	}
-
-	.turning-points {
-		padding: 0.75rem 1rem;
-		border: 1px solid #345;
-		background: #10182a;
-	}
-	.turning-points h3 { margin: 0 0 0.5rem; font-size: 0.95rem; color: #ffd54a; }
-	.turning-points ol { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 0.3rem; }
-	.turning-points li { display: flex; align-items: center; gap: 0.6rem; padding: 0.35rem 0.5rem; border-radius: 4px; }
-	.turning-points li.clickable { cursor: pointer; }
-	.turning-points li.clickable:hover, .turning-points li.hl { background: #1e2c47; }
-	.tp-num {
-		flex: none; width: 1.5rem; height: 1.5rem; border-radius: 50%;
-		background: #1a1408; border: 2px solid #ffd54a; color: #ffd54a;
-		font-weight: 700; font-size: 0.8rem;
-		display: flex; align-items: center; justify-content: center;
-	}
-	.tp-num.star { background: #ffd54a; color: #1a1408; font-size: 0.9rem; }
-	.tp-turn { flex: none; color: #8ab; font-size: 0.8rem; }
-	.tp-headline { flex: 1; }
-	.tp-swing { flex: none; font-size: 0.8rem; }
-	.tp-swing.pos { color: #7fff7f; }
-	.tp-swing.neg { color: #ff7f7f; }
-	.tp-total { color: #8ab; }
-	.tp-chevron { flex: none; color: #567; font-size: 1rem; line-height: 1; }
-
-	.analytics {
+	.chart {
 		border: 1px solid #1a3040;
 		background: #0f2035;
-		padding: 0.75rem 1rem;
+		padding: 0.6rem 0.8rem;
 	}
-	.charts { display: grid; grid-template-columns: 1fr; gap: 1rem; }
 	.chart svg { width: 100%; height: auto; }
 	.chart h3 { margin: 0 0 0.4rem; font-size: 0.85rem; color: #8ab; text-transform: uppercase; letter-spacing: 0.05em; }
 	.axis { font-size: 9px; fill: #6a9abf; }
@@ -538,10 +641,84 @@
 	.tp-dot { cursor: pointer; }
 	.tp-dot:focus { outline: none; }
 	.tp-dot:focus circle { stroke-width: 2.5; }
+	.tp-dot:not(.reached) circle { stroke: #6a5c2a; }
+	.tp-dot:not(.reached) .tp-dot-num { fill: #8a7c4a; }
 	.tp-dot-num { font-size: 8px; font-weight: 700; fill: #ffd54a; pointer-events: none; }
 	.elim { color: #c66; font-size: 0.7rem; margin-left: 0.35rem; white-space: nowrap; }
 	.stats-table { width: 100%; border-collapse: collapse; font-size: 0.8rem; }
 	.stats-table th, .stats-table td { text-align: left; padding: 0.3rem 0.5rem; border-bottom: 1px solid #1a3040; }
 	.stats-table th { color: #6a9abf; font-weight: normal; text-transform: uppercase; font-size: 0.7rem; }
 	.dot { display: inline-block; width: 9px; height: 9px; border-radius: 50%; margin-right: 0.3rem; }
+
+	/* Key-moment viewer: always-visible mini maps, stepped by the chips /
+	   arrow buttons / ← → keys. */
+	.moments {
+		border: 1px solid #345;
+		background: #10182a;
+		padding: 0.75rem 1rem 1rem;
+	}
+	.moment-nav {
+		display: flex;
+		align-items: center;
+		justify-content: center;
+		gap: 0.6rem;
+	}
+	.moment-chips { display: flex; flex-wrap: wrap; justify-content: center; gap: 0.35rem; }
+	.chip {
+		width: 2rem; height: 2rem; border-radius: 50%;
+		background: #1a1408; border: 2px solid #6a5c2a; color: #b8a45c;
+		font-weight: 700; font-size: 0.85rem;
+		display: flex; align-items: center; justify-content: center;
+		cursor: pointer; padding: 0;
+	}
+	.chip.chip-start { width: auto; border-radius: 1rem; padding: 0 0.7rem; font-size: 0.8rem; }
+	.chip:hover, .chip.hl { border-color: #ffd54a; color: #ffd54a; }
+	.chip.active { background: #ffd54a; border-color: #ffd54a; color: #1a1408; }
+	.chip.star:not(.active) { color: #ffd54a; border-color: #ffd54a; }
+	.tp-nav-btn {
+		flex: none;
+		width: 2.2rem; height: 2.2rem;
+		border-radius: 4px;
+		border: 1px solid #345;
+		background: transparent;
+		color: #cdd;
+		font-size: 1.2rem;
+		line-height: 1;
+		cursor: pointer;
+	}
+	.tp-nav-btn:hover:not(:disabled) { background: rgba(255, 255, 255, 0.08); }
+	.tp-nav-btn:disabled { opacity: 0.3; cursor: default; }
+	.kbd-hint { text-align: center; margin: 0.3rem 0 0.5rem; font-size: 0.72rem; color: #567; }
+	.moment-headline { margin: 0.2rem 0 0.5rem; font-size: 1rem; text-align: center; }
+	.moment-headline .tp-turn { color: #8ab; font-size: 0.85rem; margin-right: 0.5rem; }
+	.tp-swing { font-size: 0.85rem; margin-left: 0.5rem; }
+	.tp-swing.pos { color: #7fff7f; }
+	.tp-swing.neg { color: #ff7f7f; }
+	.tp-total { color: #8ab; }
+	.tp-no-capture { margin: 0 0 0.4rem; font-size: 0.8rem; color: #8ab; font-style: italic; text-align: center; }
+	.moment-single { max-width: 55%; margin: 0 auto; }
+	@media (max-width: 900px) { .moment-single { max-width: 100%; } }
+	.moment-compare {
+		display: flex;
+		align-items: center;
+		gap: 0.75rem;
+		cursor: zoom-in;
+	}
+	.moment-pane {
+		flex: 1 1 0;
+		min-width: 0;
+		display: flex;
+		flex-direction: column;
+		gap: 0.3rem;
+	}
+	.moment-label {
+		font-size: 0.8rem;
+		color: #8ab;
+		text-align: center;
+	}
+	.moment-arrow { flex: none; align-self: center; width: 40px; }
+	@media (max-width: 700px) {
+		.moment-compare { flex-direction: column; }
+		.moment-arrow { transform: rotate(90deg); }
+	}
 </style>

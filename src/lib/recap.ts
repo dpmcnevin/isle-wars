@@ -8,7 +8,7 @@
 // /debug settings (see map.ts's encodeSeed/decodeSeedSettings), so a "play
 // this map" link built from just `seed` reproduces the same rules too —
 // RecapData doesn't need to carry them separately.
-import type { ConquestEvent, EdgeEvent, HexArmyDelta, Player, PlayerStats, TurnSnapshot } from './game';
+import type { ConquestEvent, EdgeEvent, HexArmyDelta, Player, PlayerStats, TerrainEvent, TurnSnapshot } from './game';
 import type { TurningPoint } from './summary';
 
 export interface RecapTurningPoint {
@@ -40,6 +40,11 @@ export interface RecapData {
 	hexArmyDeltas: HexArmyDelta[];
 	finalWalls: [number, number][];
 	finalSeaLanes: [number, number][];
+	// Terrain changes (Deforestation / Oasis / Scorched Earth) in turn order —
+	// applied forward over the seed-regenerated map (which has the ORIGINAL
+	// terrain) to recover the final board's terrain. Optional: shared links
+	// from before terrain was tracked decode without it.
+	terrainEvents?: TerrainEvent[];
 }
 
 export function buildRecap(params: {
@@ -56,6 +61,7 @@ export function buildRecap(params: {
 	hexArmyDeltas: HexArmyDelta[];
 	finalWalls: [number, number][];
 	finalSeaLanes: [number, number][];
+	terrainEvents?: TerrainEvent[];
 }): RecapData {
 	return {
 		...params,

@@ -16,6 +16,7 @@ import {
 	log,
 	pushEdgeEvent,
 	pushArmyEvent,
+	pushTerrainEvent,
 	gridLabel,
 	resolveBomb,
 	resolveArtillery,
@@ -67,7 +68,11 @@ export interface CardDef {
 
 // Phase groups reused across cards.
 const PLACE_ONLY: Phase[] = ['placing'];
+// Only cards that add to the army pool / board may run during placement —
+// anything else must wait until every reinforcement is placed, because card
+// resolution lands in the action phase and any unplaced armies would be lost.
 const TURN: Phase[] = ['placing', 'action'];
+const ACTION_ONLY: Phase[] = ['action'];
 // Action phase, or while an attack is being set up (playing auto-cancels it).
 const ACTION_OR_ATTACK: Phase[] = ['action', 'attack_select_from', 'attack_select_to'];
 
@@ -135,9 +140,9 @@ export const CARD_DEFS: CardDef[] = [
 	},
 	{
 		id: 'bomb', label: 'Bomb', icon: '💣', kind: 'attack', weight: 2,
-		when: 'Placement or Action phase',
+		when: 'Action phase',
 		desc: 'Detonate on any enemy territory to destroy 3–7 of their armies.',
-		playableIn: TURN,
+		playableIn: ACTION_ONLY,
 		steps: [{ phase: 'bomb_select', prompt: 'Bomb: click any enemy territory.',
 			check: (s, id) => (!s.states[id].owner || s.states[id].owner === s.current) ? 'Bomb an enemy territory.' : null }],
 		onResolve: (s, [id], idx) => resolveBomb(s, id, idx)
@@ -156,7 +161,14 @@ export const CARD_DEFS: CardDef[] = [
 		onResolve: (s, [id], idx) => {
 			s.states[id].armies += 3; consumeCard(s, idx);
 			log(s, `${PLAYER_NAMES[s.current]} reinforced ${gridLabel(s, id)} (+3 armies).`, 'card');
-			s.phase = 'action'; s.message = 'Attack, move, or pass.';
+			// Playable mid-placement — return there if armies are still owed, or
+			// they'd be silently lost (placement only ends when the pool hits 0).
+			if (s.armiesToPlace > 0) {
+				s.phase = 'placing';
+				s.message = `Place ${s.armiesToPlace} armies.`;
+			} else {
+				s.phase = 'action'; s.message = 'Attack, move, or pass.';
+			}
 		}
 	},
 	{
@@ -173,8 +185,8 @@ export const CARD_DEFS: CardDef[] = [
 	},
 	{
 		id: 'sabotage', label: 'Sabotage', icon: '☠', kind: 'attack', weight: 1,
-		when: 'Placement or Action phase', desc: 'Halve the armies of any enemy territory (rounded down, min 1).',
-		playableIn: TURN,
+		when: 'Action phase', desc: 'Halve the armies of any enemy territory (rounded down, min 1).',
+		playableIn: ACTION_ONLY,
 		steps: [{ phase: 'sabotage_select', prompt: 'Sabotage: click any enemy territory to halve its armies.',
 			check: (s, id) => (!s.states[id].owner || s.states[id].owner === s.current) ? 'Sabotage an enemy territory.' : null }],
 		onResolve: (s, [id], idx) => {
@@ -187,9 +199,9 @@ export const CARD_DEFS: CardDef[] = [
 	},
 	{
 		id: 'fortify', label: 'Fortify', icon: '⛩', kind: 'defense', weight: 1,
-		when: 'Placement or Action phase',
+		when: 'Action phase',
 		desc: 'Give one of your hexes a permanent +2 defense bonus. Lost when the hex is captured.',
-		playableIn: TURN,
+		playableIn: ACTION_ONLY,
 		steps: [{ phase: 'fortify_select', prompt: 'Fortify: click one of your territories to fortify it (+2 defense).',
 			check: (s, id) => s.states[id].owner !== s.current ? 'Fortify one of your territories.'
 				: s.states[id].fortified ? 'Already fortified.' : null }],
@@ -201,9 +213,9 @@ export const CARD_DEFS: CardDef[] = [
 	},
 	{
 		id: 'ferry', label: 'Ferry Route', icon: '⚓', kind: 'movement', weight: 1,
-		when: 'Placement or Action phase',
+		when: 'Action phase',
 		desc: 'Open a permanent sea lane between two of your territories over clear water.',
-		playableIn: TURN,
+		playableIn: ACTION_ONLY,
 		steps: [
 			{ phase: 'ferry_from', prompt: 'Ferry: choose the first of your territories to link by sea.',
 				check: (s, id) => s.states[id].owner !== s.current ? 'Choose one of your territories.' : null },
@@ -238,6 +250,19 @@ export const CARD_DEFS: CardDef[] = [
 				check: (s, id, from) => !canInvasionConnect(s, from as number, id) ? 'No clear water path — invasion needs open sea.' : null }
 		],
 		onResolve: (s, [from, to], idx) => {
+			// Naval Patrol on the defender sinks the landing fleet before a lane
+			// ever opens — invasion card spent, patrol spent, no attack.
+			const defender = s.states[to].owner;
+			if (defender && s.hands[defender].includes('navalpatrol')) {
+				s.hands[defender] = s.hands[defender].filter((c) => c !== 'navalpatrol');
+				consumeCard(s, idx);
+				s.stats[s.current].attacksLost++;
+				s.lastAttackResult = 'loss';
+				log(s, `${PLAYER_NAMES[defender]}'s Naval Patrol sank ${PLAYER_NAMES[s.current]}'s Water Invasion fleet!`, 'card');
+				s.phase = 'action'; s.selectedFrom = null; s.selectedTo = null;
+				s.message = 'Attack, move, or pass.';
+				return;
+			}
 			s.map.seaLanes.push([from, to]);
 			pushEdgeEvent(s, 'seaLane', from, to, true);
 			s.map.adj[from].push(to); s.map.adj[to].push(from);
@@ -249,12 +274,13 @@ export const CARD_DEFS: CardDef[] = [
 	},
 	{
 		id: 'deforest', label: 'Deforestation', icon: '🪓', kind: 'terrain', weight: 1,
-		when: 'Placement or Action phase',
+		when: 'Action phase',
 		desc: 'Clear any forest hex on the map. Removes the +1 attacker bonus that forests provide.',
-		playableIn: TURN,
+		playableIn: ACTION_ONLY,
 		steps: [{ phase: 'deforest_select', prompt: 'Deforestation: click any forest hex to clear it.',
 			check: (s, id) => s.map.grids[id].terrain !== 'forest' ? 'Pick a forest hex.' : null }],
 		onResolve: (s, [id], idx) => {
+			pushTerrainEvent(s, id, s.map.grids[id].terrain, 'plain');
 			s.map.grids[id].terrain = 'plain'; consumeCard(s, idx);
 			log(s, `${PLAYER_NAMES[s.current]} cleared the forest at ${gridLabel(s, id)}.`, 'card');
 			s.phase = 'action'; s.message = 'Attack, move, or pass.';
@@ -262,8 +288,8 @@ export const CARD_DEFS: CardDef[] = [
 	},
 	{
 		id: 'storm', label: 'Storm', icon: '🌩', kind: 'terrain', weight: 1,
-		when: 'Placement or Action phase', desc: 'Destroy any existing sea lane. Pick both endpoints of the route to sever.',
-		playableIn: TURN,
+		when: 'Action phase', desc: 'Destroy any existing sea lane. Pick both endpoints of the route to sever.',
+		playableIn: ACTION_ONLY,
 		steps: [
 			{ phase: 'storm_from', prompt: 'Storm: click one endpoint of the sea route you want to destroy.',
 				check: (s, id) => s.map.seaLanes.some(([a, b]) => a === id || b === id) ? null : 'Pick a hex that anchors a sea route.' },
@@ -310,13 +336,14 @@ export const CARD_DEFS: CardDef[] = [
 	},
 	{
 		id: 'oasis', label: 'Oasis', icon: '🌴', kind: 'terrain', weight: 1,
-		when: 'Placement or Action phase',
+		when: 'Action phase',
 		desc: 'Irrigate a desert hex you control, turning it back into plains. Removes the heat attrition (1 army lost per move into it).',
-		playableIn: TURN,
+		playableIn: ACTION_ONLY,
 		steps: [{ phase: 'oasis_select', prompt: 'Oasis: click one of your desert hexes to convert it to plains.',
 			check: (s, id) => s.map.grids[id].terrain !== 'desert' ? 'Pick a desert hex.'
 				: s.states[id].owner !== s.current ? 'Oasis only works on a desert you control.' : null }],
 		onResolve: (s, [id], idx) => {
+			pushTerrainEvent(s, id, s.map.grids[id].terrain, 'plain');
 			s.map.grids[id].terrain = 'plain'; consumeCard(s, idx);
 			log(s, `${PLAYER_NAMES[s.current]} irrigated the desert at ${gridLabel(s, id)}.`, 'card');
 			s.phase = 'action'; s.message = 'Attack, move, or pass.';
@@ -324,9 +351,9 @@ export const CARD_DEFS: CardDef[] = [
 	},
 	{
 		id: 'rampart', label: 'Rampart (+1)', icon: '🏰', kind: 'defense', weight: 2,
-		when: 'Placement or Action phase',
+		when: 'Action phase',
 		desc: 'Give one of your hexes a permanent +1 defense bonus. Stacks with Fortify. Lost when the hex is captured.',
-		playableIn: TURN,
+		playableIn: ACTION_ONLY,
 		steps: [{ phase: 'rampart_select', prompt: 'Rampart: click one of your territories to reinforce it (+1 defense).',
 			check: (s, id) => s.states[id].owner !== s.current ? 'Raise a rampart on one of your territories.'
 				: s.states[id].rampart ? 'Already has a rampart.' : null }],
@@ -338,9 +365,9 @@ export const CARD_DEFS: CardDef[] = [
 	},
 	{
 		id: 'wall', label: 'Wall', icon: '🧱', kind: 'defense', weight: 2,
-		when: 'Placement or Action phase',
+		when: 'Action phase',
 		desc: 'Build a wall on one edge of a hex you own. Blocks all movement and attacks across that edge (both ways). Cannot be placed on a river edge. Permanent.',
-		playableIn: TURN,
+		playableIn: ACTION_ONLY,
 		steps: [
 			{ phase: 'wall_from', prompt: 'Wall: click one of your territories to build a wall on its edge.',
 				check: (s, id) => s.states[id].owner !== s.current ? 'Build the wall on a hex you own.' : null },
@@ -366,9 +393,9 @@ export const CARD_DEFS: CardDef[] = [
 	},
 	{
 		id: 'breach', label: 'Breach', icon: '🔨', kind: 'attack', weight: 1,
-		when: 'Placement or Action phase',
+		when: 'Action phase',
 		desc: 'Demolish a wall on an edge of a hex you occupy — reopening it to movement and attacks (both ways). You must own one side of the wall.',
-		playableIn: TURN,
+		playableIn: ACTION_ONLY,
 		steps: [
 			{ phase: 'breach_from', prompt: 'Breach: click one of your territories that has a wall on one of its edges.',
 				check: (s, id) => {
@@ -393,9 +420,9 @@ export const CARD_DEFS: CardDef[] = [
 	},
 	{
 		id: 'canal', label: 'Canal', icon: '🚧', kind: 'terrain', weight: 1,
-		when: 'Placement or Action phase',
+		when: 'Action phase',
 		desc: 'Dig a river along one edge of a hex you own. Attacks across it suffer the +1 river-crossing defender bonus (both ways). Cannot be placed on an existing river or wall edge. Permanent.',
-		playableIn: TURN,
+		playableIn: ACTION_ONLY,
 		steps: [
 			{ phase: 'canal_from', prompt: 'Canal: click one of your territories to dig a river on its edge.',
 				check: (s, id) => s.states[id].owner !== s.current ? 'Dig the canal from a hex you own.' : null },
@@ -422,9 +449,9 @@ export const CARD_DEFS: CardDef[] = [
 	},
 	{
 		id: 'spy', label: 'Spy', icon: '🕵', kind: 'attack', weight: 1,
-		when: 'Placement or Action phase',
+		when: 'Action phase',
 		desc: 'Steal a random card from the player holding the most cards. Not consumed if no opponent has any.',
-		playableIn: TURN,
+		playableIn: ACTION_ONLY,
 		onPlay: (s, idx) => {
 			// Rob the richest hand among living opponents; break ties randomly.
 			const rivals = PLAYERS.filter((p) => p !== s.current && s.alive[p] && s.hands[p].length > 0);
@@ -472,6 +499,42 @@ export const CARD_DEFS: CardDef[] = [
 		id: 'antiair', label: 'Anti-Air', icon: '🚫', kind: 'defense', weight: 2,
 		when: 'Passive', passive: true, playableIn: [],
 		desc: 'Automatically shoots down the next Paratroop Attack targeting one of your hexes. No action needed.'
+	},
+	{
+		id: 'scorched', label: 'Scorched Earth', icon: '🔥', kind: 'terrain', weight: 1,
+		when: 'Action phase',
+		desc: 'Burn any plains or forest hex into desert. Every move into it (conquest, move, or air move) costs 1 army to the heat. Cities cannot be burned.',
+		playableIn: ACTION_ONLY,
+		steps: [{ phase: 'scorched_select', prompt: 'Scorched Earth: click any plains or forest hex to burn it to desert.',
+			check: (s, id) => {
+				const t = s.map.grids[id].terrain;
+				if (t !== 'plain' && t !== 'forest') return 'Only plains or forest can burn to desert.';
+				if (s.map.grids[id].production) return 'Cities cannot be burned.';
+				return null;
+			} }],
+		onResolve: (s, [id], idx) => {
+			pushTerrainEvent(s, id, s.map.grids[id].terrain, 'desert');
+			s.map.grids[id].terrain = 'desert'; consumeCard(s, idx);
+			log(s, `${PLAYER_NAMES[s.current]} burned ${gridLabel(s, id)} to desert.`, 'card');
+			s.phase = 'action'; s.message = 'Attack, move, or pass.';
+		}
+	},
+	{
+		id: 'navalpatrol', label: 'Naval Patrol', icon: '⛵', kind: 'defense', weight: 1,
+		when: 'Passive', passive: true, playableIn: [],
+		desc: 'Automatically sinks the next Water Invasion targeting one of your hexes before it lands. No action needed.'
+	},
+	{
+		id: 'mountaineer', label: 'Mountaineering', icon: '🧗', kind: 'attack', weight: 1,
+		when: 'Action phase, before attacking',
+		desc: 'Your next attack sequence rolls +1 while attacking a mountain hex. Consumed by the first attack.',
+		playableIn: ACTION_OR_ATTACK,
+		onPlay: (s, idx) => {
+			s.phase = 'action'; s.selectedFrom = null; s.selectedTo = null;
+			s.mountainAttackActive = true; consumeCard(s, idx);
+			log(s, `${PLAYER_NAMES[s.current]} sent up mountaineers (+1 attacking mountains next battle).`, 'card');
+			s.message = 'Mountaineering active. Your next attack rolls +1 against a mountain hex.';
+		}
 	}
 ];
 
@@ -499,6 +562,18 @@ export const CARD_POOL: CardType[] = CARD_DEFS.flatMap((c) => Array<CardType>(c.
 // over the bridge so it never re-declares card labels/icons in Swift.
 export function cardCatalog(): { id: CardType; label: string; icon: string; kind: string; when: string; desc: string }[] {
 	return CARD_DEFS.map((c) => ({ id: c.id, label: c.label, icon: c.icon, kind: c.kind, when: c.when, desc: c.desc }));
+}
+
+// Whether the active player could start playing `card` right now — the exact
+// preconditions playCard() enforces (one card per turn, phase gating), so the
+// UI can grey out unplayable cards instead of letting a click bounce off with
+// an error message. Passive cards report true: clicking one shows its
+// "protects automatically" note, which is intentional.
+export function canPlayCardNow(s: GameState, card: CardType): boolean {
+	const def = CARD_BY_ID[card];
+	if (def.passive) return true;
+	if (s.cardPlayedThisTurn) return false;
+	return def.playableIn.includes(s.phase);
 }
 
 // When the current phase is a card-selection step, whether `gridId` is a legal

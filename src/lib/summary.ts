@@ -3,7 +3,8 @@
 // post-game view, and can reconstruct map ownership at any earlier turn.
 // Pure functions — call once after checkWin() sets s.winner.
 
-import type { GameState, ConquestEvent, EdgeEvent, ArmyEvent, Player } from './game';
+import type { GameState, ConquestEvent, EdgeEvent, ArmyEvent, TerrainEvent, Player } from './game';
+import type { Terrain } from './map';
 import { PLAYERS, PLAYER_NAMES, PLAYER_COLORS, countryCount, armyCount } from './game';
 
 export interface TurningPoint {
@@ -178,6 +179,10 @@ export interface EdgeReplayState {
 	map: { walls?: [number, number][]; seaLanes: [number, number][] };
 	edgeEvents?: EdgeEvent[];
 }
+export interface TerrainReplayState {
+	map: { grids: { terrain: Terrain }[] };
+	terrainEvents?: TerrainEvent[];
+}
 
 /**
  * Reconstructs hex ownership as of the end of `turn` by starting from the
@@ -228,6 +233,25 @@ export function reconstructEdgesAtTurn(
 		else target.set(key, ev.edge); // torn down after `turn` — was still there
 	}
 	return { walls: [...walls.values()], seaLanes: [...seaLanes.values()] };
+}
+
+/**
+ * Reconstructs each hex's terrain as of the end of `turn` by starting from
+ * the map's CURRENT (final) terrain and undoing every terrain-changing card
+ * (Deforestation / Oasis / Scorched Earth) played after that turn, in reverse
+ * chronological order — the terrain twin of the two reconstructors above.
+ * A replayer whose map was regenerated from the seed (original terrain, e.g.
+ * the shareable recap) must first roll the map FORWARD by applying all
+ * terrainEvents in order, so its grids match the final board this starts from.
+ */
+export function reconstructTerrainAtTurn(s: TerrainReplayState, turn: number): Terrain[] {
+	const terrains = s.map.grids.map((g) => g.terrain);
+	const events = s.terrainEvents ?? [];
+	for (let i = events.length - 1; i >= 0; i--) {
+		const ev = events[i];
+		if (ev.turn > turn) terrains[ev.grid] = ev.prev;
+	}
+	return terrains;
 }
 
 /**

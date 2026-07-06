@@ -38,6 +38,8 @@
 		PLAYER_NAMES,
 		CARD_LABELS,
 		CARD_META,
+		CARD_DEFS,
+		canPlayCardNow,
 		type Player,
 		type CardType,
 		type GameState
@@ -179,6 +181,11 @@
 	let showMenu = $state(false);
 
 	const HUMAN: Player = 'blue';
+
+	// Every card-targeting selection phase, derived from the registry — used to
+	// decide when the generic Cancel button applies (instead of a hand-written
+	// phase list that goes stale every time a card is added).
+	const CARD_SELECT_PHASES = new Set(CARD_DEFS.flatMap((d) => d.steps?.map((st) => st.phase) ?? []));
 
 	let aiRunning = $state(false);
 	// AI speed: 1× (deliberate) | 2× (fast) | 0 (instant, no ticks)
@@ -559,7 +566,8 @@
 			edgeEvents: $game.edgeEvents,
 			hexArmyDeltas: $game.hexArmyDeltas,
 			finalWalls: $game.map.walls ?? [],
-			finalSeaLanes: $game.map.seaLanes
+			finalSeaLanes: $game.map.seaLanes,
+			terrainEvents: $game.terrainEvents ?? []
 		});
 		return `${base}/recap/#d=${await encodeRecap(recap)}`;
 	}
@@ -861,31 +869,37 @@
 {/snippet}
 {#snippet hexBadge(gridId: number, cx: number, cy: number, scale: number, showCityLabel: boolean, armiesOverride: number | null)}
 	{@const g = $game.map.grids[gridId]}
-	{@const st = $game.states[gridId]}
+	<!-- Primitives, NOT the GridState object: the engine mutates states[] in
+	     place, so an object-valued {@const} keeps the same reference across
+	     store updates and Svelte's derived-equality check stops downstream
+	     {#if}s from ever re-running — a freshly played Rampart/Fortify ring
+	     would not appear on the live map until a full remount. -->
+	{@const fortified = !!$game.states[gridId].fortified}
+	{@const rampart = !!$game.states[gridId].rampart}
 	{@const capitalOf = PLAYERS.find((p) => $game.capitals?.[p] === gridId) ?? null}
-	{@const shownArmies = armiesOverride ?? st.armies}
+	{@const shownArmies = armiesOverride ?? $game.states[gridId].armies}
 	{@const badgeR = 20 * scale}
 	{@const fortR1 = 30 * scale}
 	{@const fortR2 = 34 * scale}
 	<g pointer-events="none">
-		{#if st.fortified}
+		{#if fortified}
 			<circle cx={cx} cy={cy} r={fortR1} fill="none" stroke="#7fcfff" stroke-width={3 * scale} stroke-dasharray="{6 * scale} {4 * scale}" opacity="0.95" />
 			<circle cx={cx} cy={cy} r={fortR2} fill="none" stroke="#7fcfff" stroke-width={1.5 * scale} opacity="0.55" />
 		{/if}
-		{#if st.rampart}
-			<circle cx={cx} cy={cy} r={(st.fortified ? 38 : 30) * scale} fill="none" stroke="#4fcf7f" stroke-width={2 * scale} opacity="0.85" />
+		{#if rampart}
+			<circle cx={cx} cy={cy} r={(fortified ? 38 : 30) * scale} fill="none" stroke="#4fcf7f" stroke-width={2 * scale} opacity="0.85" />
 		{/if}
 		<circle cx={cx} cy={cy} r={badgeR} fill="#000" fill-opacity="0.6"
-			stroke={st.fortified ? '#7fcfff' : g.production ? '#ffe14a' : '#fff'}
-			stroke-width={(st.fortified ? 3 : g.production ? 2.5 : 1.5) * scale} />
+			stroke={fortified ? '#7fcfff' : g.production ? '#ffe14a' : '#fff'}
+			stroke-width={(fortified ? 3 : g.production ? 2.5 : 1.5) * scale} />
 		<text x={cx} y={cy + 7 * scale} text-anchor="middle"
 			font-family="monospace" font-weight="bold"
 			font-size={20 * scale} fill="#fff">{shownArmies}</text>
-		{#if st.fortified}
+		{#if fortified}
 			<text x={cx - 18 * scale} y={cy - 14 * scale} text-anchor="middle"
 				font-size={16 * scale} style="filter: drop-shadow(0 0 {3 * scale}px #7fcfff);">🛡</text>
 		{/if}
-		{#if st.rampart}
+		{#if rampart}
 			<text x={cx - 18 * scale} y={cy + 24 * scale} text-anchor="middle"
 				font-size={14 * scale} style="filter: drop-shadow(0 0 {3 * scale}px #4fcf7f);">🏰</text>
 		{/if}
@@ -1265,7 +1279,7 @@
 					<p class="hint">Roll the dice in the attack modal.</p>
 				{/if}
 
-				{#if $game.current === HUMAN && ($game.phase === 'move_select_from' || $game.phase === 'move_select_to' || $game.phase === 'bomb_select' || $game.phase === 'air_from' || $game.phase === 'air_to' || $game.phase === 'reinforce_select' || $game.phase === 'sabotage_select' || $game.phase === 'fortify_select' || $game.phase === 'rampart_select' || $game.phase === 'ferry_from' || $game.phase === 'ferry_to' || $game.phase === 'invasion_from' || $game.phase === 'invasion_to' || $game.phase === 'artillery_from' || $game.phase === 'artillery_to' || $game.phase === 'deforest_select' || $game.phase === 'oasis_select' || $game.phase === 'storm_from' || $game.phase === 'storm_to' || $game.phase === 'wall_from' || $game.phase === 'wall_to')}
+				{#if $game.current === HUMAN && ($game.phase === 'move_select_from' || $game.phase === 'move_select_to' || CARD_SELECT_PHASES.has($game.phase))}
 					<div class="row">
 						<button onclick={cancelAction}>Cancel</button>
 					</div>
@@ -1292,7 +1306,11 @@
 						{#each $game.hands[HUMAN] as c, i}
 							{@const meta = CARD_META[c]}
 							{@const isDiscarding = $game.current === HUMAN && $game.phase === 'discard'}
-							{@const disabled = !isDiscarding && $game.cardPlayedThisTurn && !meta.passive}
+							<!-- Greyed whenever the card can't be started right now — most
+							     visibly during placement, where only army cards are legal
+							     (playing anything else used to silently forfeit the armies
+							     still waiting to be placed). -->
+							{@const disabled = !isDiscarding && ($game.current !== HUMAN || !canPlayCardNow($game, c))}
 							<button
 								class="card-tile kind-{meta.kind}"
 								class:disabled

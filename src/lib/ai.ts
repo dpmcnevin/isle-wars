@@ -10,6 +10,7 @@ import {
 	cancelAction,
 	confirmMoveInAfterConquest,
 	confirmMove,
+	confirmParatroop,
 	discardCard,
 	endTurn,
 	forceEndTurn,
@@ -619,86 +620,9 @@ function tryPlayCardPlacement(p: Player) {
 			return;
 		}
 	}
-	// Fortify weakest border.
-	s = get(game);
-	{
-		const idx = s.hands[p].findIndex((c) => c === 'fortify');
-		const target = findWeakestBorder(s, p);
-		if (idx >= 0 && target != null && !s.cardPlayedThisTurn) {
-			playCard(idx);
-			if (get(game).phase === 'fortify_select') selectGrid(target);
-			return;
-		}
-	}
-	// Rampart weakest border (+1 defense).
-	s = get(game);
-	{
-		const idx = s.hands[p].findIndex((c) => c === 'rampart');
-		const target = findWeakestBorder(s, p);
-		if (idx >= 0 && target != null && !s.cardPlayedThisTurn) {
-			playCard(idx);
-			if (get(game).phase === 'rampart_select') selectGrid(target);
-			return;
-		}
-	}
-	// Wall off a threatening enemy edge.
-	s = get(game);
-	{
-		const idx = s.hands[p].findIndex((c) => c === 'wall');
-		const target = findWallPlacement(s, p);
-		if (idx >= 0 && target != null && !s.cardPlayedThisTurn) {
-			playCard(idx);
-			if (get(game).phase === 'wall_from') selectGrid(target.from);
-			if (get(game).phase === 'wall_to') selectGrid(target.to);
-			return;
-		}
-	}
-	// Canal: same "seal the scariest border edge" logic as Wall, but with the
-	// +1 river-crossing bonus instead of a hard block (identical edge
-	// constraints, so findWallPlacement's choice is always canal-legal).
-	s = get(game);
-	{
-		const idx = s.hands[p].findIndex((c) => c === 'canal');
-		const target = findWallPlacement(s, p);
-		if (idx >= 0 && target != null && !s.cardPlayedThisTurn) {
-			playCard(idx);
-			if (get(game).phase === 'canal_from') selectGrid(target.from);
-			if (get(game).phase === 'canal_to') selectGrid(target.to);
-			return;
-		}
-	}
-	// Sabotage a big enemy hex.
-	s = get(game);
-	{
-		const idx = s.hands[p].findIndex((c) => c === 'sabotage');
-		const target = findStrongestBorderEnemy(s, p);
-		if (idx >= 0 && target != null && s.states[target].armies >= 5 && !s.cardPlayedThisTurn) {
-			playCard(idx);
-			if (get(game).phase === 'sabotage_select') selectGrid(target);
-			return;
-		}
-	}
-	// Spy: steal from the richest hand as soon as anyone has cards to take.
-	s = get(game);
-	{
-		const idx = s.hands[p].findIndex((c) => c === 'spy');
-		const anyLoot = PLAYERS.some((q) => q !== p && s.alive[q] && s.hands[q].length > 0);
-		if (idx >= 0 && anyLoot && !s.cardPlayedThisTurn) {
-			playCard(idx);
-			return;
-		}
-	}
-	// Deforest an adjacent enemy forest.
-	s = get(game);
-	{
-		const idx = s.hands[p].findIndex((c) => c === 'deforest');
-		const target = findForestNeighbor(s, p);
-		if (idx >= 0 && target != null && !s.cardPlayedThisTurn) {
-			playCard(idx);
-			if (get(game).phase === 'deforest_select') selectGrid(target);
-			return;
-		}
-	}
+	// Everything else (fortify, walls, sabotage, spy, …) is action-only now:
+	// non-boost cards can't be played until all reinforcements are placed
+	// (see cards.ts's ACTION_ONLY) — tryPlayCardAction handles them.
 }
 
 // Try to play one card during the action phase. Elite before big attacks;
@@ -720,6 +644,27 @@ function tryPlayCardAction(p: Player) {
 		const idx = s.hands[p].findIndex((c) => c === 'bridge');
 		if (idx >= 0 && opp && crossesRiver(s.map, opp.from, opp.to)) {
 			playCard(idx);
+			return;
+		}
+	}
+	// Mountaineering before an attack on a mountain hex.
+	{
+		const idx = s.hands[p].findIndex((c) => c === 'mountaineer');
+		if (idx >= 0 && opp && s.map.grids[opp.to].terrain === 'mountain') {
+			playCard(idx);
+			return;
+		}
+	}
+	// Paratroop a strong stack onto a weak, valuable enemy hex.
+	{
+		const idx = s.hands[p].findIndex((c) => c === 'paratroop');
+		const plan = idx >= 0 ? bestParatroopPlan(s, p) : null;
+		if (idx >= 0 && plan) {
+			playCard(idx);
+			if (get(game).phase === 'paratroop_from') selectGrid(plan.from);
+			if (get(game).phase === 'paratroop_to') selectGrid(plan.to);
+			if (get(game).phase === 'paratroop_qty') confirmParatroop(plan.qty);
+			else cancelAction();
 			return;
 		}
 	}
@@ -791,6 +736,16 @@ function tryPlayCardAction(p: Player) {
 			return;
 		}
 	}
+	// Spy: steal from the richest hand as soon as anyone has cards to take.
+	s = get(game);
+	{
+		const idx = s.hands[p].findIndex((c) => c === 'spy');
+		const anyLoot = PLAYERS.some((q) => q !== p && s.alive[q] && s.hands[q].length > 0);
+		if (idx >= 0 && anyLoot) {
+			playCard(idx);
+			return;
+		}
+	}
 	// Wall off a threatening enemy edge if nothing else applies.
 	s = get(game);
 	{
@@ -803,4 +758,51 @@ function tryPlayCardAction(p: Player) {
 			return;
 		}
 	}
+	// Canal: same "seal the scariest border edge" logic as Wall, but with the
+	// +1 river-crossing bonus instead of a hard block (identical edge
+	// constraints, so findWallPlacement's choice is always canal-legal).
+	s = get(game);
+	{
+		const idx = s.hands[p].findIndex((c) => c === 'canal');
+		const target = findWallPlacement(s, p);
+		if (idx >= 0 && target != null) {
+			playCard(idx);
+			if (get(game).phase === 'canal_from') selectGrid(target.from);
+			if (get(game).phase === 'canal_to') selectGrid(target.to);
+			return;
+		}
+	}
+}
+
+// The best paratroop drop, or null when none is worth the card: launch from
+// our single biggest stack, onto the enemy hex where a committed force with
+// ~2:1 odds (paratroopers fight to the death — no retreating between rolls)
+// is affordable and the prize is best. Cities and hexes we can't reach by
+// land/lane score extra, since the drop ignores adjacency entirely.
+function bestParatroopPlan(s: GameState, p: Player): { from: number; to: number; qty: number } | null {
+	let from = -1, fromArm = 0;
+	for (const g of s.map.grids) {
+		if (s.states[g.id].owner === p && s.states[g.id].armies > fromArm) {
+			fromArm = s.states[g.id].armies;
+			from = g.id;
+		}
+	}
+	if (from < 0 || fromArm < 8) return null; // don't gut a thin front line for a stunt
+	const maxCommit = fromArm - 1;
+	let best: { from: number; to: number; qty: number } | null = null;
+	let bestScore = -Infinity;
+	for (const t of s.map.grids) {
+		const st = s.states[t.id];
+		if (!st.owner || st.owner === p) continue; // enemy-held hexes only — the card is too rare for neutrals
+		const needed = Math.ceil(st.armies * 2) + 3;
+		if (needed > maxCommit) continue;
+		let score = -st.armies;
+		if (t.production) score += 6;
+		if (!s.map.adj[t.id].some((n) => s.states[n].owner === p)) score += 8; // unreachable by land: prime target
+		if (score > bestScore) {
+			bestScore = score;
+			best = { from, to: t.id, qty: Math.min(maxCommit, needed) };
+		}
+	}
+	return best;
 }

@@ -179,6 +179,23 @@ Both bridge functions are declared in `ios/bridge/entry.ts` and consumed in
   there. The AI drives the same public functions (`playCard`, `selectGrid`), so it
   automatically respects `check` validation.
 
+## Placement gating
+
+Only cards that add armies (`kind: 'boost'` — the bonus/Double/Reinforce family) are
+playable during the placement phase. Everything else uses `ACTION_ONLY` (or
+`ACTION_OR_ATTACK`): card resolution lands in the action phase, so a card played
+mid-placement would silently forfeit the armies still waiting to be placed. The web
+hand greys unplayable cards via `canPlayCardNow` (cards.ts) — the same predicate
+`playCard` enforces. Reinforce, the one targeting card playable while placing,
+returns to `placing` in its `onResolve` when armies remain.
+
+## Terrain-changing cards
+
+Any card that mutates `map.grids[].terrain` (Deforestation, Oasis, Scorched Earth)
+must call `pushTerrainEvent(s, id, prev, next)` before mutating, so the shareable
+recap — whose map is regenerated from the seed with the *original* terrain — can
+replay terrain to any turn (`reconstructTerrainAtTurn` in summary.ts).
+
 ## Checklist: adding a card
 
 1. **`CardType` union** (`src/lib/game.ts`) — add the id.
