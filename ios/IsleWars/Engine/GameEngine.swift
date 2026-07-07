@@ -260,4 +260,16 @@ final class GameEngine {
         let result = try rawCall("buildRecapJSON")
         return result.isNull ? nil : result.toString()
     }
+
+    /// Hex ownership as of the end of `turn`, for a turning point's
+    /// before/after mini-map compare (see `reconstructOwnersAtTurn` in
+    /// `src/lib/summary.ts`).
+    func reconstructOwnersAtTurn(_ turn: Int) throws -> [Player?] {
+        try call("reconstructOwnersAtTurn", args: [turn], as: [Player?].self)
+    }
+
+    /// Walls/sea-lanes as of the end of `turn`, for the same compare view.
+    func reconstructEdgesAtTurn(_ turn: Int) throws -> ReconstructedEdges {
+        try call("reconstructEdgesAtTurn", args: [turn], as: ReconstructedEdges.self)
+    }
 }

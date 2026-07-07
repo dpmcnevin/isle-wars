@@ -105,9 +105,8 @@ struct PostGameStatsView: View {
     }
 
     /// Moment stepper over the game's turning points — mirrors the web
-    /// recap page's chip stepper, minus its before/after mini-map compare
-    /// (a bigger lift: replaying `reconstructOwnersAtTurn` into a second
-    /// rendered map), which is left for a follow-up.
+    /// recap page's chip stepper, including its before/after mini-map
+    /// compare (capture arrows + changed-hex highlighting).
     private func turningPointsSection(_ vm: GameViewModel) -> some View {
         let points = vm.turningPoints()
         return Group {
@@ -151,6 +150,34 @@ struct PostGameStatsView: View {
                             turningPointIndex = min(points.count - 1, idx + 1)
                         } label: { Image(systemName: "chevron.right") }
                             .disabled(idx == points.count - 1)
+                    }
+
+                    if let compare = vm.turningPointCompare(for: point) {
+                        HStack(alignment: .top, spacing: 10) {
+                            VStack(spacing: 4) {
+                                Text("Before").font(.caption2).foregroundStyle(.secondary)
+                                TurningPointMiniMapView(
+                                    map: state.map,
+                                    owners: compare.ownersBefore,
+                                    walls: compare.edgesBefore.walls,
+                                    seaLanes: compare.edgesBefore.seaLanes,
+                                    changedGrids: compare.changedGrids
+                                )
+                            }
+                            VStack(spacing: 4) {
+                                Text("After").font(.caption2).foregroundStyle(.secondary)
+                                TurningPointMiniMapView(
+                                    map: state.map,
+                                    owners: compare.ownersAfter,
+                                    walls: compare.edgesAfter.walls,
+                                    seaLanes: compare.edgesAfter.seaLanes,
+                                    changedGrids: compare.changedGrids,
+                                    arrows: compare.arrows,
+                                    armyLabels: compare.armyLabels
+                                )
+                            }
+                        }
+                        .frame(height: 220)
                     }
                 }
                 .frame(maxWidth: 560)

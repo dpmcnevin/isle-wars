@@ -96,6 +96,13 @@ struct TurningPoint: Codable, Identifiable {
     var id: Int { turn }
 }
 
+/// Walls/sea-lanes as of a given turn — mirrors `reconstructEdgesAtTurn`'s
+/// return shape in `src/lib/summary.ts`.
+struct ReconstructedEdges: Codable {
+    let walls: [[Int]]
+    let seaLanes: [[Int]]
+}
+
 struct ConquestEvent: Codable {
     let turn: Int
     let grid: Int

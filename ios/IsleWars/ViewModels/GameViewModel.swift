@@ -164,6 +164,27 @@ final class GameViewModel: ObservableObject {
         (try? engine.computeTurningPoints(count: count)) ?? []
     }
 
+    /// Before/after board compare for one turning point (mini-maps + capture
+    /// arrows), computed from the engine's turn-indexed replay so Swift never
+    /// re-derives ownership/edge history itself.
+    func turningPointCompare(for point: TurningPoint) -> TurningPointCompare? {
+        guard let state,
+              let ownersBefore = try? engine.reconstructOwnersAtTurn(point.turn - 1),
+              let ownersAfter = try? engine.reconstructOwnersAtTurn(point.turn),
+              let edgesBefore = try? engine.reconstructEdgesAtTurn(point.turn - 1),
+              let edgesAfter = try? engine.reconstructEdgesAtTurn(point.turn)
+        else { return nil }
+        return TurningPointCompare.build(
+            point: point,
+            winner: state.winner,
+            state: state,
+            ownersBefore: ownersBefore,
+            ownersAfter: ownersAfter,
+            edgesBefore: edgesBefore,
+            edgesAfter: edgesAfter
+        )
+    }
+
     /// A shareable recap link pointing at the web app's `/recap` page —
     /// mirrors the web's own `recapUrl()`/`encodeRecap` (see entry.ts's
     /// `buildRecapJSON` for why this is uncompressed 'r' rather than gzip 'z').

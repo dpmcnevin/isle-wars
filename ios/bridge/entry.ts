@@ -45,7 +45,7 @@ import {
 	type CardType
 } from '../../src/lib/game';
 import { canPlayCardNow } from '../../src/lib/cards';
-import { computeTurningPoints, reconstructOwnersAtTurn } from '../../src/lib/summary';
+import { computeTurningPoints, reconstructOwnersAtTurn, reconstructEdgesAtTurn } from '../../src/lib/summary';
 import { buildRecap } from '../../src/lib/recap';
 import { runAiTurn, setAiSynchronous } from '../../src/lib/ai';
 
@@ -134,6 +134,7 @@ function withState<Args extends unknown[]>(fn: (...args: Args) => void) {
 	// entirely sidesteps CompressionStream, which JavaScriptCore doesn't have.
 	computeTurningPoints: (count: number) => JSON.stringify(computeTurningPoints(latestState, count)),
 	reconstructOwnersAtTurn: (turn: number) => JSON.stringify(reconstructOwnersAtTurn(latestState, turn)),
+	reconstructEdgesAtTurn: (turn: number) => JSON.stringify(reconstructEdgesAtTurn(latestState, turn)),
 	buildRecapJSON: () => {
 		if (!latestState.winner) return null;
 		const s = latestState;
