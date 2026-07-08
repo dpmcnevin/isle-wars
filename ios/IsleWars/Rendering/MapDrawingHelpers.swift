@@ -31,10 +31,15 @@ enum DragActionKind {
     }
 }
 
-/// `M ${g1.x} ${g1.y} Q ${cx} ${cy} ${g2.x} ${g2.y}` from +page.svelte's
-/// `seaLanePath`: control point = segment midpoint offset by
-/// `min(22, 0.06 * len)` along the unit perpendicular, side flipped by
-/// `(a+b) % 2` parity.
+/// Ported from `src/lib/map.ts`'s `seaLanePath`: a quadratic curve between
+/// two hex centers, bowed off to one side, that (a) tries a handful of
+/// candidate bows to find one whose curve doesn't cut across a third hex's
+/// land, and (b) even then only strokes the sampled points that land in open
+/// water — a lane's own first/last stretch always overlaps its two endpoint
+/// hexes, and a card-opened lane hugging a coastline can still clip land in
+/// the middle despite the widest candidate bow. Returns possibly-disjoint
+/// subpaths (pen lifted over any land sample) rather than one continuous
+/// curve, so lanes never paint over a hex fill regardless of draw order.
 func seaLanePath(a: Int, b: Int, map: GameMap, transform: MapTransform) -> Path {
     guard map.grids.indices.contains(a), map.grids.indices.contains(b) else { return Path() }
     let g1 = map.grids[a], g2 = map.grids[b]
@@ -42,16 +47,75 @@ func seaLanePath(a: Int, b: Int, map: GameMap, transform: MapTransform) -> Path 
     let dx = g2.x - g1.x, dy = g2.y - g1.y
     let len = max(1, (dx * dx + dy * dy).squareRoot())
     let perpX = -dy / len, perpY = dx / len
-    let arc = min(22, len * 0.06)
-    let side: Double = (a + b) % 2 == 0 ? 1 : -1
-    let cx = midX + perpX * arc * side
-    let cy = midY + perpY * arc * side
+    let defaultSide: Double = (a + b) % 2 == 0 ? 1 : -1
+
+    func control(side: Double, arc: Double) -> Point {
+        Point(x: midX + perpX * arc * side, y: midY + perpY * arc * side)
+    }
+    func quadPoint(_ c: Point, _ t: Double) -> Point {
+        let omt = 1 - t
+        return Point(
+            x: omt * omt * g1.x + 2 * omt * t * c.x + t * t * g2.x,
+            y: omt * omt * g1.y + 2 * omt * t * c.y + t * t * g2.y
+        )
+    }
+    func clearsLand(_ c: Point) -> Bool {
+        let steps = 14
+        for i in 0...steps {
+            let t = 0.15 + 0.7 * Double(i) / Double(steps)
+            let p = quadPoint(c, t)
+            for g in map.grids where g.id != a && g.id != b {
+                if pointInPolygon(p, polygon: g.cell) { return false }
+            }
+        }
+        return true
+    }
+
+    let defaultArc = min(22, len * 0.06)
+    var chosen = control(side: defaultSide, arc: defaultArc)
+    var candidates: [(Double, Double)] = [(defaultSide, defaultArc), (-defaultSide, defaultArc)]
+    for f in [0.15, 0.28, 0.45] {
+        let arc = min(130, len * f)
+        candidates.append((defaultSide, arc))
+        candidates.append((-defaultSide, arc))
+    }
+    for (side, arc) in candidates {
+        let c = control(side: side, arc: arc)
+        if clearsLand(c) { chosen = c; break }
+    }
+
+    func overLand(_ p: Point) -> Bool {
+        for g in map.grids where pointInPolygon(p, polygon: g.cell) { return true }
+        return false
+    }
+
+    let steps = 28
     var path = Path()
-    path.move(to: transform.point(Point(x: g1.x, y: g1.y)))
-    path.addQuadCurve(
-        to: transform.point(Point(x: g2.x, y: g2.y)),
-        control: transform.point(Point(x: cx, y: cy))
-    )
+    var penDown = false
+    var anyStroked = false
+    for i in 0...steps {
+        let p = quadPoint(chosen, Double(i) / Double(steps))
+        if overLand(p) {
+            penDown = false
+            continue
+        }
+        let vp = transform.point(p)
+        if penDown {
+            path.addLine(to: vp)
+        } else {
+            path.move(to: vp)
+        }
+        penDown = true
+        anyStroked = true
+    }
+    // Degenerate (everything sampled over land): keep the old full curve
+    // rather than render nothing at all.
+    if !anyStroked {
+        var fallback = Path()
+        fallback.move(to: transform.point(Point(x: g1.x, y: g1.y)))
+        fallback.addQuadCurve(to: transform.point(Point(x: g2.x, y: g2.y)), control: transform.point(chosen))
+        return fallback
+    }
     return path
 }
 

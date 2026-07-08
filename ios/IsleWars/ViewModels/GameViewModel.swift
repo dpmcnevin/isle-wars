@@ -38,6 +38,7 @@ final class GameViewModel: ObservableObject {
     // MARK: - Lifecycle
 
     func startNewGame(difficulty: Int = 2, startingArmies: Int = 3, seed: String? = nil) {
+        clearRecapCaches()
         run { try $0.startGame(difficulty: difficulty, startingArmies: startingArmies, seed: seed) }
         // Skip the "Ready to play" gate and drop straight into the game (the AI
         // takes over too, if auto-play is on).
@@ -55,6 +56,7 @@ final class GameViewModel: ObservableObject {
     func startOver() {
         aiTask?.cancel()
         SaveStore.clear()
+        clearRecapCaches()
         state = nil
     }
 
@@ -160,21 +162,41 @@ final class GameViewModel: ObservableObject {
         (try? engine.canPlayCardNow(card: card)) ?? false
     }
 
+    /// Both post-game recap calls below hit the JS engine (JSON-encoding the
+    /// full owner/edge arrays each time) and were previously recomputed on
+    /// *every* SwiftUI body evaluation — the `TabView` in `PostGameStatsView`
+    /// builds all pages up front, so each tap/swipe recomputed all ~15
+    /// turning points' before/after compares (4 engine round-trips each),
+    /// which is exactly the kind of per-render cost that reads as UI
+    /// choppiness. Cached here since a finished game's turning points never
+    /// change; `clearRecapCaches()` drops them when a new game starts.
+    private var turningPointsCache: [TurningPoint]?
+    private var turningPointCompareCache: [Int: TurningPointCompare] = [:]
+
+    private func clearRecapCaches() {
+        turningPointsCache = nil
+        turningPointCompareCache.removeAll()
+    }
+
     func turningPoints(count: Int = 15) -> [TurningPoint] {
-        (try? engine.computeTurningPoints(count: count)) ?? []
+        if let cached = turningPointsCache { return cached }
+        let result = (try? engine.computeTurningPoints(count: count)) ?? []
+        turningPointsCache = result
+        return result
     }
 
     /// Before/after board compare for one turning point (mini-maps + capture
     /// arrows), computed from the engine's turn-indexed replay so Swift never
     /// re-derives ownership/edge history itself.
     func turningPointCompare(for point: TurningPoint) -> TurningPointCompare? {
+        if let cached = turningPointCompareCache[point.turn] { return cached }
         guard let state,
               let ownersBefore = try? engine.reconstructOwnersAtTurn(point.turn - 1),
               let ownersAfter = try? engine.reconstructOwnersAtTurn(point.turn),
               let edgesBefore = try? engine.reconstructEdgesAtTurn(point.turn - 1),
               let edgesAfter = try? engine.reconstructEdgesAtTurn(point.turn)
         else { return nil }
-        return TurningPointCompare.build(
+        let compare = TurningPointCompare.build(
             point: point,
             winner: state.winner,
             state: state,
@@ -183,6 +205,8 @@ final class GameViewModel: ObservableObject {
             edgesBefore: edgesBefore,
             edgesAfter: edgesAfter
         )
+        turningPointCompareCache[point.turn] = compare
+        return compare
     }
 
     /// A shareable recap link pointing at the web app's `/recap` page —
@@ -194,7 +218,7 @@ final class GameViewModel: ObservableObject {
             .replacingOccurrences(of: "+", with: "-")
             .replacingOccurrences(of: "/", with: "_")
             .replacingOccurrences(of: "=", with: "")
-        return URL(string: "https://dpmcnevin.github.io/isle-wars/recap/#d=r\(encoded)")
+        return URL(string: "https://corrupt.net/isle-wars/recap/#d=r\(encoded)")
     }
 
     // MARK: - Debug settings
@@ -268,8 +292,15 @@ final class GameViewModel: ObservableObject {
         aiTask?.cancel()
         isAiThinking = true
         let player = state.current
+        // The 400ms pause gives a human watching a normal opponent turn a
+        // beat to see the board settle; in auto-play (every player is AI,
+        // used for headless/debug playthroughs) that pause has no one to
+        // serve and only slows a run down turn after turn, so cut it to a
+        // frame-scale delay instead of skipping it entirely — still yields
+        // to SwiftUI/the engine between turns rather than busy-looping.
+        let delayNs: UInt64 = autoPlay ? 16_000_000 : 400_000_000
         aiTask = Task { [weak self] in
-            try? await Task.sleep(nanoseconds: 400_000_000)
+            try? await Task.sleep(nanoseconds: delayNs)
             guard let self, !Task.isCancelled else { return }
             self.runAiTurn(for: player)
         }

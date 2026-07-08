@@ -1,8 +1,10 @@
 <script lang="ts">
 	import { onMount, tick } from 'svelte';
+	import { get } from 'svelte/store';
 	import {
 		game,
 		newGame,
+		forceEndTurn,
 		placeArmies,
 		beginAttack,
 		beginMove,
@@ -45,7 +47,7 @@
 		type GameState
 	} from '$lib/game';
 	import { wallBetween, polygonPoints, wallSegmentsFor, seaLanePath, type GameMap } from '$lib/map';
-	import { runAiTurn } from '$lib/ai';
+	import { runAiTurn, setValueNetPlayers } from '$lib/ai';
 	import { computeTurningPoints } from '$lib/summary';
 	import { buildRecap, encodeRecap } from '$lib/recap';
 	import { base } from '$app/paths';
@@ -181,6 +183,12 @@
 	let showMenu = $state(false);
 
 	const HUMAN: Player = 'blue';
+	// Trained value-network evaluator (see ml/, src/lib/valueNet.ts) beat the
+	// original hand-tuned heuristic ~55% vs ~25% in head-to-head sims, so the
+	// AI opponents use it here. It's a module-level switch in ai.ts, not tied
+	// to a particular game, so setting it once at startup covers every
+	// newGame() call (new game, restart, shared-seed load) below.
+	setValueNetPlayers(PLAYERS.filter((p) => p !== HUMAN));
 
 	// Every card-targeting selection phase, derived from the registry — used to
 	// decide when the generic Cancel button applies (instead of a hand-written
@@ -477,9 +485,20 @@
 		if (s.current === HUMAN && !debugAutoPlay) return;
 		aiRunning = true;
 		(async () => {
-			await new Promise((r) => setTimeout(r, aiSpeed === 0 ? 40 : 200));
-			await runAiTurn(s.current, aiTickMs());
-			aiRunning = false;
+			try {
+				await new Promise((r) => setTimeout(r, aiSpeed === 0 ? 40 : 200));
+				await runAiTurn(s.current, aiTickMs());
+			} catch (err) {
+				// An uncaught exception here used to leave `aiRunning` stuck
+				// true forever — this $effect's guard (`if (aiRunning) return`)
+				// then permanently blocked every future AI turn, freezing the
+				// game mid-turn with no error shown (e.g. stuck on "place N
+				// armies" with the "is thinking" hint spinning indefinitely).
+				console.error('AI turn threw; ending its turn to avoid a permanent freeze.', err);
+				if (get(game).current === s.current) forceEndTurn();
+			} finally {
+				aiRunning = false;
+			}
 		})();
 	});
 

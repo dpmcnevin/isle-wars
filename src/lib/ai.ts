@@ -23,6 +23,7 @@ import {
 	type GameState
 } from './game';
 import { crossesRiver, wallBetween } from './map';
+import { predictWinProb } from './valueNet';
 
 /**
  * When true, `runAiTurn` skips every cosmetic `await wait()` pause, so its
@@ -36,6 +37,18 @@ import { crossesRiver, wallBetween } from './map';
 let synchronousAi = false;
 export function setAiSynchronous(v: boolean) {
 	synchronousAi = v;
+}
+
+/**
+ * Players whose main attack-selection loop uses the trained value network
+ * (src/lib/valueNet.ts) instead of the hand-tuned heuristic in
+ * `findBestAttack`. Per-player rather than a single global switch so a
+ * headless sim can pit the two policies against each other in the same game
+ * (see scripts/simulate.mjs's --value-net-players).
+ */
+let valueNetPlayers = new Set<Player>();
+export function setValueNetPlayers(players: Player[]) {
+	valueNetPlayers = new Set(players);
 }
 
 /**
@@ -129,7 +142,7 @@ export async function runAiTurn(p: Player, tickMs = 90) {
 	// needs to own the hex — so a launch site on its own islet still fills up.)
 	while (get(game).phase === 'placing' && get(game).current === p) {
 		const s = get(game);
-		const target = staging ? invasionPlan!.from : pickPlacementTarget(s, p);
+		const target = staging ? invasionPlan!.from : choosePlacementTarget(s, p);
 		if (target == null) break;
 		// Place all remaining on best target (simple but decisive)
 		placeArmies(target, s.armiesToPlace);
@@ -140,7 +153,7 @@ export async function runAiTurn(p: Player, tickMs = 90) {
 	let attackAttempts = 0;
 	while (get(game).phase === 'action' && get(game).current === p && attackAttempts < 20) {
 		const s = get(game);
-		const opp = findBestAttack(s, p);
+		const opp = valueNetPlayers.has(p) ? findBestAttackWithValueNet(s, p) : findBestAttack(s, p);
 		if (!opp) break;
 		beginAttack();
 		selectGrid(opp.from);
@@ -232,7 +245,7 @@ export async function runAiTurn(p: Player, tickMs = 90) {
 	let placeSafety = 0;
 	while (get(game).phase === 'placing' && get(game).current === p && placeSafety++ < 100) {
 		const s = get(game);
-		const target = pickPlacementTarget(s, p);
+		const target = choosePlacementTarget(s, p);
 		if (target == null) break;
 		placeArmies(target, s.armiesToPlace);
 	}
@@ -502,6 +515,37 @@ function pickPlacementTarget(s: GameState, p: Player): number | null {
 	return best;
 }
 
+// Same "must border an enemy" candidate set as pickPlacementTarget, but ranks
+// candidates by the value network's predicted win probability after dumping
+// this turn's reinforcements there, rather than the hand-tuned threat score.
+function pickPlacementTargetWithValueNet(s: GameState, p: Player): number | null {
+	let best = -1;
+	let bestScore = -Infinity;
+	for (const g of s.map.grids) {
+		if (s.states[g.id].owner !== p) continue;
+		const borders = s.map.adj[g.id].some((n) => s.states[n].owner && s.states[n].owner !== p);
+		if (!borders) continue;
+
+		const hypothetical: GameState = {
+			...s,
+			states: s.states.map((state, id) =>
+				id === g.id ? { owner: p, armies: state.armies + s.armiesToPlace } : state
+			)
+		};
+		const score = predictWinProb(hypothetical, p);
+		if (score > bestScore) { bestScore = score; best = g.id; }
+	}
+	if (best < 0) {
+		for (const g of s.map.grids) if (s.states[g.id].owner === p) return g.id;
+		return null;
+	}
+	return best;
+}
+
+function choosePlacementTarget(s: GameState, p: Player): number | null {
+	return valueNetPlayers.has(p) ? pickPlacementTargetWithValueNet(s, p) : pickPlacementTarget(s, p);
+}
+
 interface AttackChoice { from: number; to: number; }
 function findBestAttack(s: GameState, p: Player): AttackChoice | null {
 	let best: AttackChoice | null = null;
@@ -522,6 +566,42 @@ function findBestAttack(s: GameState, p: Player): AttackChoice | null {
 			// Neutrals are effectively free real estate; weight them so the AI
 			// prefers scooping up an empty hex over grinding an enemy.
 			const score = st.owner ? margin * 4 - st.armies : margin * 4 + 20;
+			if (score > bestScore) { bestScore = score; best = { from: g.id, to: n }; }
+		}
+	}
+	return best;
+}
+
+// Same candidate generation/legality as findBestAttack, but ranks candidates
+// by the value network's predicted win probability of the post-conquest
+// board rather than the hand-tuned margin heuristic. The post-conquest state
+// is approximate (assumes the attack succeeds and moves in half the stack —
+// mirroring the move-in the attack loop actually performs) since we can't
+// know the real dice outcome ahead of time; this is a 1-ply lookahead over
+// "what if I take this hex," not a full attack simulation.
+function findBestAttackWithValueNet(s: GameState, p: Player): AttackChoice | null {
+	let best: AttackChoice | null = null;
+	let bestScore = -Infinity;
+	for (const g of s.map.grids) {
+		const myArmies = s.states[g.id].armies;
+		if (s.states[g.id].owner !== p || myArmies < 3) continue;
+		for (const n of s.map.adj[g.id]) {
+			const st = s.states[n];
+			if (st.owner === p) continue;
+			if (wallBetween(s.map, g.id, n)) continue;
+			const margin = myArmies - st.armies;
+			if (margin < 2) continue;
+
+			const movedIn = Math.max(1, Math.floor(myArmies / 2));
+			const hypothetical: GameState = {
+				...s,
+				states: s.states.map((state, id) => {
+					if (id === g.id) return { owner: p, armies: myArmies - movedIn };
+					if (id === n) return { owner: p, armies: movedIn };
+					return state;
+				})
+			};
+			const score = predictWinProb(hypothetical, p);
 			if (score > bestScore) { bestScore = score; best = { from: g.id, to: n }; }
 		}
 	}

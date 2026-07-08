@@ -47,7 +47,7 @@ import {
 import { canPlayCardNow } from '../../src/lib/cards';
 import { computeTurningPoints, reconstructOwnersAtTurn, reconstructEdgesAtTurn } from '../../src/lib/summary';
 import { buildRecap } from '../../src/lib/recap';
-import { runAiTurn, setAiSynchronous } from '../../src/lib/ai';
+import { runAiTurn, setAiSynchronous, setValueNetPlayers } from '../../src/lib/ai';
 
 // The iOS JSContext has no real event loop, so cosmetic `await` pauses in the
 // AI turn can suspend and never resume (freezing the AI mid-turn). Run the AI
@@ -165,5 +165,13 @@ function withState<Args extends unknown[]>(fn: (...args: Args) => void) {
 	// rather than relying on this function's own return value.
 	runAiTurn: (player: Player) => {
 		void runAiTurn(player, 0);
+	},
+
+	// Lets a headless sim (or, later, a Swift debug toggle) put a subset of
+	// players on the trained value-network attack evaluator instead of the
+	// hand-tuned heuristic, so the two policies can be pitted against each
+	// other within the same game. `players` is a JSON array of player names.
+	setValueNetPlayers: (playersJson: string) => {
+		setValueNetPlayers(JSON.parse(playersJson));
 	}
 };

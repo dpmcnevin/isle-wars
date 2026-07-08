@@ -27,3 +27,10 @@ ios/IsleWars.xcodeproj
 ios/IsleWars/Resources/game-bundle.js
 ios/*.xcworkspace
 ios/DerivedData
+
+# Training
+training-data/
+training-data-gen2/
+ml/.venv/
+ml/checkpoints/
+ml/__pycache__/
