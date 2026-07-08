@@ -1,6 +1,6 @@
 <script lang="ts">
 	import type { GameMap } from '$lib/map';
-	import { polygonPoints, wallSegmentsFor, seaLanePath } from '$lib/map';
+	import { polygonPoints, wallSegmentsFor, seaLanePath, seaLaneControl } from '$lib/map';
 	import { PLAYER_COLORS, type Player } from '$lib/game';
 
 	interface Path {
@@ -12,7 +12,27 @@
 		 *  ground down) rather than a successful capture — marked with an X
 		 *  instead of a normal arrowhead. */
 		forfeited?: boolean;
+		/** What non-default mechanic (if any) decided this capture — mirrors
+		 *  ConquestEvent.via. 'paratroop'/'invasion' bypass normal adjacency
+		 *  (drawn dotted, since the arrow itself can span the whole map);
+		 *  'elite'/'bridge'/'mountaineer' are ordinary adjacent attacks,
+		 *  just called out with the card's icon for flavor. */
+		via?: 'paratroop' | 'invasion' | 'elite' | 'bridge' | 'mountaineer' | 'tunnel';
 	}
+
+	// Mirrors each card's icon in cards.ts's CARD_DEFS so the marker reads as
+	// "that card" at a glance. Elite carries U+FE0F: bare U+2694 is a
+	// text-presentation glyph, which SVG <text> paints with `fill` (default
+	// black) — invisible on the dark badge circle.
+	const VIA_ICON: Record<string, string> = {
+		paratroop: '🪂',
+		invasion: '🚢',
+		elite: '⚔️',
+		bridge: '🌉',
+		mountaineer: '🧗',
+		tunnel: '🕳'
+	};
+	const BYPASSES_ADJACENCY = new Set(['paratroop', 'invasion', 'tunnel']);
 
 	let {
 		map,
@@ -98,27 +118,75 @@
 	// Conquest arrows run hex-center to hex-center, but the army badges sit
 	// exactly there — so trim each end back to the badge's rim (plus room for
 	// the arrowhead at the target) instead of burying the arrowhead under the
-	// badge circle.
-	function trimmedPath(p: Path): { x1: number; y1: number; x2: number; y2: number } {
+	// badge circle. Returned as fractions of the from→to span so both the
+	// straight arrows and the curved invasion arrows trim identically.
+	function trimFractions(p: Path): { s: number; e: number } {
 		const from = map.grids[p.from];
 		const to = map.grids[p.to];
-		const dx = to.x - from.x;
-		const dy = to.y - from.y;
-		const dist = Math.hypot(dx, dy);
-		if (dist < 1) return { x1: from.x, y1: from.y, x2: to.x, y2: to.y };
+		const dist = Math.hypot(to.x - from.x, to.y - from.y);
+		if (dist < 1) return { s: 0, e: 0 };
 		const w = tpArrowWidth(p.armies);
 		const startTrim = badgeRadius(p.from) === 0 ? 0 : badgeRadius(p.from) + 3;
 		const endTrim = badgeRadius(p.to) === 0 ? 0 : badgeRadius(p.to) + w + 3;
 		// Never trim the line away entirely (adjacent hexes with big badges).
 		const scale = Math.min(1, (dist - 8) / Math.max(startTrim + endTrim, 1));
-		const s = (startTrim * scale) / dist;
-		const e = (endTrim * scale) / dist;
+		return { s: (startTrim * scale) / dist, e: (endTrim * scale) / dist };
+	}
+
+	function trimmedPath(p: Path): { x1: number; y1: number; x2: number; y2: number } {
+		const from = map.grids[p.from];
+		const to = map.grids[p.to];
+		const { s, e } = trimFractions(p);
+		const dx = to.x - from.x;
+		const dy = to.y - from.y;
 		return {
 			x1: from.x + dx * s,
 			y1: from.y + dy * s,
 			x2: to.x - dx * e,
 			y2: to.y - dy * e
 		};
+	}
+
+	// A Water Invasion travels its sea lane, so its arrow follows the same
+	// quadratic bow the lane is drawn with (seaLaneControl) instead of a
+	// straight chord that could cut across land. Returns the trim-adjusted
+	// curve as an SVG path `d`, or null for every other arrow kind.
+	function invasionArrowD(p: Path): string | null {
+		// Forfeited attacks keep the straight red X treatment even for an
+		// invasion — the failure styling matters more than the route.
+		if (p.via !== 'invasion' || p.forfeited) return null;
+		const from = map.grids[p.from];
+		const to = map.grids[p.to];
+		const c = seaLaneControl(p.from, p.to, map.grids);
+		const { s, e } = trimFractions(p);
+		// De Casteljau subrange [t0, t1] of the quadratic, so the trimmed ends
+		// still lie exactly on the lane's curve.
+		const t0 = s;
+		const t1 = 1 - e;
+		const B = (t: number): [number, number] => {
+			const omt = 1 - t;
+			return [
+				omt * omt * from.x + 2 * omt * t * c.cx + t * t * to.x,
+				omt * omt * from.y + 2 * omt * t * c.cy + t * t * to.y
+			];
+		};
+		const [q0x, q0y] = B(t0);
+		const [q2x, q2y] = B(t1);
+		const q1x = from.x * (1 - t0) * (1 - t1) + c.cx * (t0 * (1 - t1) + t1 * (1 - t0)) + to.x * t0 * t1;
+		const q1y = from.y * (1 - t0) * (1 - t1) + c.cy * (t0 * (1 - t1) + t1 * (1 - t0)) + to.y * t0 * t1;
+		return `M ${q0x.toFixed(1)} ${q0y.toFixed(1)} Q ${q1x.toFixed(1)} ${q1y.toFixed(1)} ${q2x.toFixed(1)} ${q2y.toFixed(1)}`;
+	}
+
+	// Where the via badge sits: halfway along the arrow — on the lane's curve
+	// for an invasion, on the straight chord for everything else.
+	function viaBadgeMid(p: Path): { x: number; y: number } {
+		const from = map.grids[p.from];
+		const to = map.grids[p.to];
+		if (p.via === 'invasion') {
+			const c = seaLaneControl(p.from, p.to, map.grids);
+			return { x: 0.25 * from.x + 0.5 * c.cx + 0.25 * to.x, y: 0.25 * from.y + 0.5 * c.cy + 0.25 * to.y };
+		}
+		return { x: (from.x + to.x) / 2, y: (from.y + to.y) / 2 };
 	}
 </script>
 
@@ -223,18 +291,47 @@
 		</g>
 	{/each}
 	{#each paths as p, i}
-		{@const t = trimmedPath(p)}
-		<line
-			x1={t.x1} y1={t.y1}
-			x2={t.x2} y2={t.y2}
-			stroke={p.forfeited ? '#ff3b3b' : (p.color ?? '#fff')}
-			stroke-width={tpArrowWidth(p.armies)}
-			stroke-linecap="round"
-			stroke-dasharray={p.forfeited ? '5 4' : undefined}
-			marker-end="url(#tp-path-arrowhead-{i})"
-			opacity="0.9"
-			pointer-events="none"
-		/>
+		{@const curveD = invasionArrowD(p)}
+		{#if curveD}
+			<!-- Water Invasion sails its sea lane — bow the arrow along the same
+			     curve the lane is drawn with rather than a straight chord that
+			     could cut across land. -->
+			<path
+				d={curveD}
+				fill="none"
+				stroke={p.color ?? '#fff'}
+				stroke-width={tpArrowWidth(p.armies)}
+				stroke-linecap="round"
+				stroke-dasharray="2 7"
+				marker-end="url(#tp-path-arrowhead-{i})"
+				opacity="0.9"
+				pointer-events="none"
+			/>
+		{:else}
+			{@const t = trimmedPath(p)}
+			<line
+				x1={t.x1} y1={t.y1}
+				x2={t.x2} y2={t.y2}
+				stroke={p.forfeited ? '#ff3b3b' : (p.color ?? '#fff')}
+				stroke-width={tpArrowWidth(p.armies)}
+				stroke-linecap="round"
+				stroke-dasharray={p.forfeited ? '5 4' : p.via && BYPASSES_ADJACENCY.has(p.via) ? '2 7' : undefined}
+				marker-end="url(#tp-path-arrowhead-{i})"
+				opacity="0.9"
+				pointer-events="none"
+			/>
+		{/if}
+	{/each}
+	<!-- Paratroop Attack / Water Invasion both bypass normal adjacency, so
+	     their arrows can span the whole map — label the midpoint with the
+	     card's icon so that reads as "here's what happened" rather than an
+	     unexplained long line / rendering bug. -->
+	{#each paths as p}
+		{#if p.via}
+			{@const mid = viaBadgeMid(p)}
+			<circle cx={mid.x} cy={mid.y} r="19" fill="#0a1420" fill-opacity="0.92" stroke="#ffe980" stroke-width="2.5" pointer-events="none" />
+			<text x={mid.x} y={mid.y} text-anchor="middle" dominant-baseline="central" font-size="26" fill="#fff" pointer-events="none">{VIA_ICON[p.via]}</text>
+		{/if}
 	{/each}
 	<!-- Army count per changed hex — for a capture this is the committed
 	     attacking force (always positive); for a pure army-swing turn (no

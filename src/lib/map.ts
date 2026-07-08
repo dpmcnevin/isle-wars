@@ -38,6 +38,7 @@ export interface GameMap {
 	waterFeatures: WaterFeature[]; // named lakes and bays
 	rivers: [number, number][]; // unordered land-land edge pairs (a < b)
 	walls: [number, number][]; // Wall-card barriers on shared hex edges (a < b); block movement/attack across that edge
+	tunnels?: [number, number][]; // Tunnel-card underground routes: extra adjacency between two land hexes up to 3 apart (also present in `adj`). Optional: absent on saves from before tunnels existed.
 	width: number;
 	height: number;
 	viewBox: { x: number; y: number; w: number; h: number }; // tight bbox around land
@@ -57,6 +58,16 @@ export function wallBetween(map: GameMap, a: number, b: number): boolean {
 	const walls = map.walls ?? [];
 	const lo = Math.min(a, b), hi = Math.max(a, b);
 	for (const [x, y] of walls) if (x === lo && y === hi) return true;
+	return false;
+}
+
+/** True if a Tunnel (from the Tunnel card) links two hexes directly. The pair
+ *  is also present in `map.adj`; this identifies WHICH adjacencies are tunnels
+ *  so they can be drawn and removed by Collapse. Symmetric in a/b. */
+export function tunnelBetween(map: GameMap, a: number, b: number): boolean {
+	const tunnels = map.tunnels ?? [];
+	const lo = Math.min(a, b), hi = Math.max(a, b);
+	for (const [x, y] of tunnels) if (x === lo && y === hi) return true;
 	return false;
 }
 
@@ -102,7 +113,11 @@ function pointInPolygon(px: number, py: number, poly: [number, number][]): boole
 	return inside;
 }
 
-export function seaLanePath(a: number, b: number, grids: Grid[]): string {
+// The quadratic control point a lane between `a` and `b` bows through —
+// exported so anything else that wants to follow a lane's water route (the
+// recap's Water Invasion arrows) can trace the exact same curve the lane is
+// drawn with, instead of cutting a straight chord across land.
+export function seaLaneControl(a: number, b: number, grids: Grid[]): { cx: number; cy: number } {
 	const g1 = grids[a];
 	const g2 = grids[b];
 	const midX = (g1.x + g2.x) / 2;
@@ -152,6 +167,13 @@ export function seaLanePath(a: number, b: number, grids: Grid[]): string {
 		const c = controlFor(side, arc);
 		if (clearsLand(c.cx, c.cy)) { chosen = c; break; }
 	}
+	return chosen;
+}
+
+export function seaLanePath(a: number, b: number, grids: Grid[]): string {
+	const g1 = grids[a];
+	const g2 = grids[b];
+	const chosen = seaLaneControl(a, b, grids);
 	// The curve runs hex-center to hex-center, so its first and last stretch
 	// always lie over the endpoint hexes' own land (and, when no candidate arc
 	// cleared, the middle can cross other hexes too). Sample the curve and only
@@ -1230,6 +1252,7 @@ export function generateMap(seed: string = encodeSeed(DEFAULT_SEED_SETTINGS)): G
 		waterFeatures,
 		rivers,
 		walls: [],
+		tunnels: [],
 		width,
 		height,
 		viewBox: { x: vbX, y: vbY, w: vbW, h: vbH },

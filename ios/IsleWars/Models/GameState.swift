@@ -111,6 +111,9 @@ struct ConquestEvent: Codable {
     let from: Int?
     let armies: Int
     let forfeited: Bool?
+    /// Set when the capture bypassed normal adjacency (Paratroop Attack) —
+    /// mirrors game.ts's ConquestEvent.via.
+    let via: String?
 }
 
 struct GameState: Codable {

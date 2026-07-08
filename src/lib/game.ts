@@ -1,5 +1,5 @@
 import { writable, derived, get } from 'svelte/store';
-import { generateMap, crossesRiver, wallBetween, shuffle, encodeSeed, decodeSeedSettings, hashSeedToInt, type GameMap, type Terrain } from './map';
+import { generateMap, crossesRiver, wallBetween, wallSegmentsFor, shuffle, encodeSeed, decodeSeedSettings, hashSeedToInt, type GameMap, type Terrain } from './map';
 // The card registry lives in ./cards (this module and it import each other; see
 // the note in cards.ts for why that cycle is safe). Values used by the dispatch
 // below are imported here; the public card API is re-exported near CardType so
@@ -64,7 +64,9 @@ export type CardType =
 	| 'spy'
 	| 'scorched'
 	| 'navalpatrol'
-	| 'mountaineer';
+	| 'mountaineer'
+	| 'tunnel'
+	| 'collapse';
 
 // Re-export the card registry's public surface so consumers keep importing it
 // from '$lib/game'. The definitions themselves live in ./cards.
@@ -118,6 +120,10 @@ export type Phase =
 	| 'paratroop_from'
 	| 'paratroop_to'
 	| 'paratroop_qty'
+	| 'tunnel_from'
+	| 'tunnel_to'
+	| 'collapse_from'
+	| 'collapse_to'
 	| 'discard'
 	| 'game_over';
 
@@ -178,6 +184,11 @@ export interface GameState {
 	// Water Invasion card added a temporary sea lane for this attack. If the
 	// attack succeeds it stays; if it fails, it's removed.
 	pendingInvasionLane: [number, number] | null;
+	// Tunnel card dug an underground route for this attack. While set, the
+	// attack across [from, to] bypasses ALL of the defender's defense bonuses.
+	// If the attack succeeds the tunnel stays (permanent adjacency you can also
+	// move through); if it fails, it collapses. Optional: absent on old saves.
+	pendingTunnel?: [number, number] | null;
 	// Whether the current player has already played a non-passive card this turn.
 	cardPlayedThisTurn: boolean;
 	// Grid IDs of marsh hexes that were used as an attack source this turn.
@@ -291,6 +302,16 @@ export interface ConquestEvent {
 	// the original attack's perspective. Lets the UI mark it as a failed
 	// attack (X) instead of a successful conquest (arrow).
 	forfeited?: boolean;
+	// What non-default mechanic (if any) was in effect for this capture. Only
+	// one can ever apply — these are all "one card per turn" plays — so a
+	// single field suffices:
+	//   - 'paratroop' / 'invasion': bypassed normal adjacency entirely, so
+	//     `from`/`grid` can be arbitrarily far apart on the map. The recap's
+	//     turning-point arrows label these so a long line reads as "here's
+	//     what happened" instead of looking like a rendering bug.
+	//   - 'elite' / 'bridge' / 'mountaineer': ordinary adjacent attack, just
+	//     called out for flavor (which combat-boost card decided this fight).
+	via?: 'paratroop' | 'invasion' | 'elite' | 'bridge' | 'mountaineer' | 'tunnel';
 }
 
 export interface PlayerStats {
@@ -485,9 +506,20 @@ export function crossingDefenseBonus(s: GameState, fromId: number, toId: number)
 	return 0;
 }
 
+/** True when an attack across [fromId → gridId] is being launched down this
+ *  turn's freshly-dug Tunnel — the one attack that bypasses ALL of the
+ *  defender's defense bonuses. Once the tunnel becomes permanent (attack won),
+ *  later attacks across it are ordinary and this returns false. */
+export function isPendingTunnelAttack(s: GameState, fromId: number, gridId: number): boolean {
+	const t = s.pendingTunnel;
+	return !!t && ((t[0] === fromId && t[1] === gridId) || (t[0] === gridId && t[1] === fromId));
+}
+
 /** Defense bonus for a hex: mountain terrain (+1) + fortification (+2) +
- *  crossing bonus (sea lane +2 / river +1) when a from hex is supplied. */
+ *  crossing bonus (sea lane +2 / river +1) when a from hex is supplied. A
+ *  Tunnel assault emerges beneath the defenders, bypassing every bonus. */
 export function defenseBonus(s: GameState, gridId: number, fromId?: number): number {
+	if (fromId != null && isPendingTunnelAttack(s, fromId, gridId)) return 0;
 	let b = 0;
 	if (s.map.grids[gridId].terrain === 'mountain') b += 1;
 	if (s.states[gridId].fortified) b += 2;
@@ -554,6 +586,100 @@ export function canInvasionConnect(s: GameState, fromId: number, toId: number): 
 	if (s.map.adj[fromId].includes(toId)) return false;
 	if (s.states[fromId].armies < 2) return false;
 	return hasClearWaterPath(s, fromId, toId);
+}
+
+/** How many hexes a Tunnel may span (source → target, inclusive of the target
+ *  step). "Up to 3 hexes away." */
+export const TUNNEL_MAX_STEPS = 3;
+
+/** Two land hexes are tunnel-adjacent when a tunnel could be dug straight
+ *  between them: same island, no river on the edge, no wall, and the edge
+ *  isn't a sea lane (a tunnel goes under land, never under open water). */
+function tunnelStepOk(s: GameState, a: number, b: number): boolean {
+	if (s.map.grids[a].island !== s.map.grids[b].island) return false;
+	if (crossesRiver(s.map, a, b)) return false;
+	if (wallBetween(s.map, a, b)) return false;
+	// A sea-lane edge crosses water — a tunnel can't follow it.
+	if (s.map.seaLanes.some(([x, y]) => (x === a && y === b) || (x === b && y === a))) return false;
+	return true;
+}
+
+// Do the two 2D segments p1→p2 and p3→p4 cross? (proper intersection via
+// orientation signs — used to test a straight tunnel against a river edge.)
+function segmentsIntersect(
+	p1: [number, number], p2: [number, number],
+	p3: [number, number], p4: [number, number]
+): boolean {
+	const d = (a: [number, number], b: [number, number], c: [number, number]) =>
+		(b[0] - a[0]) * (c[1] - a[1]) - (b[1] - a[1]) * (c[0] - a[0]);
+	const d1 = d(p3, p4, p1), d2 = d(p3, p4, p2), d3 = d(p1, p2, p3), d4 = d(p1, p2, p4);
+	return ((d1 > 0 && d2 < 0) || (d1 < 0 && d2 > 0)) && ((d3 > 0 && d4 < 0) || (d3 < 0 && d4 > 0));
+}
+
+/**
+ * A tunnel is drawn as a straight line between the two hex centers, so — to
+ * match what the player sees and honour "no water or rivers" — that straight
+ * line must stay over land the whole way and cross no river edge. (The BFS
+ * below caps the hop distance; this guards the geometry the BFS's zig-zag
+ * routing could otherwise sneak a straight line across.)
+ */
+function straightTunnelClear(s: GameState, fromId: number, toId: number): boolean {
+	const a = s.map.grids[fromId], b = s.map.grids[toId];
+	const A: [number, number] = [a.x, a.y], B: [number, number] = [b.x, b.y];
+	// Stay over land: every sampled point along the segment must fall inside
+	// some land hex — if one lands in open water (a bay/lake between them), the
+	// tunnel would run under the sea, which isn't allowed.
+	const STEPS = 24;
+	for (let i = 1; i < STEPS; i++) {
+		const t = i / STEPS;
+		const px = a.x + (b.x - a.x) * t;
+		const py = a.y + (b.y - a.y) * t;
+		let onLand = false;
+		for (const g of s.map.grids) {
+			if (pointInPoly(px, py, g.cell)) { onLand = true; break; }
+		}
+		if (!onLand) return false;
+	}
+	// Cross no river: test the segment against every river edge's drawn span.
+	for (const seg of wallSegmentsFor(s.map.rivers ?? [], s.map.grids)) {
+		if (segmentsIntersect(A, B, seg.a, seg.b)) return false;
+	}
+	return true;
+}
+
+/**
+ * Tunnel: friendly source (2+ armies), enemy/neutral target NOT already
+ * adjacent, reachable by a land path of at most TUNNEL_MAX_STEPS hexes whose
+ * every step stays on the same island and crosses no water, river, or wall,
+ * AND whose straight center-to-center line (the drawn tunnel) crosses no river
+ * or open water. The tunnel bores under any hexes in between, whoever owns them.
+ */
+export function canTunnelConnect(s: GameState, fromId: number, toId: number): boolean {
+	if (fromId === toId) return false;
+	if (s.states[fromId].owner !== s.current) return false;
+	if (s.states[fromId].armies < 2) return false;
+	if (!s.states[toId].owner || s.states[toId].owner === s.current) return false;
+	// Already reachable overland/existing route — nothing to tunnel to.
+	if (s.map.adj[fromId].includes(toId)) return false;
+	// BFS over tunnel-legal land edges, capped at TUNNEL_MAX_STEPS.
+	const dist = new Map<number, number>([[fromId, 0]]);
+	const queue = [fromId];
+	let reachable = false;
+	bfs: while (queue.length) {
+		const cur = queue.shift()!;
+		const d = dist.get(cur)!;
+		if (d >= TUNNEL_MAX_STEPS) continue;
+		for (const nb of s.map.adj[cur]) {
+			if (dist.has(nb)) continue;
+			if (!tunnelStepOk(s, cur, nb)) continue;
+			if (nb === toId) { reachable = true; break bfs; }
+			dist.set(nb, d + 1);
+			queue.push(nb);
+		}
+	}
+	if (!reachable) return false;
+	// The straight drawn tunnel must itself cross no river or open water.
+	return straightTunnelClear(s, fromId, toId);
 }
 
 export function clearSavedGame() {
@@ -669,6 +795,7 @@ export function startGame(difficulty = 2, startingArmies = 3, seed?: string): Ga
 		bridgeAttackActive: false,
 		mountainAttackActive: false,
 		pendingInvasionLane: null,
+		pendingTunnel: null,
 		cardPlayedThisTurn: false,
 		usedMarshHexes: [],
 		gameStarted: false,
@@ -921,6 +1048,25 @@ function devLogGameEnd(s: GameState) {
 	devLogGameId = null;
 }
 
+// Water Invasion resolves through the same rollAttack/autoConquer paths as a
+// normal attack (see cards.ts's 'invasion' onResolve, which just opens a lane
+// and drops into attack_rolling), so the only signal at conquest time that
+// this particular capture was an invasion is the still-pending lane matching
+// this exact from/to pair — checked before the win branch clears it.
+// What (if anything) made this capture non-default, for ConquestEvent.via.
+// At most one of these can ever be true for a given attack — Water
+// Invasion/Elite Troops/Bridge/Mountaineering are each a card play, and only
+// one non-passive card can be played per turn — so first-match is safe.
+function conquestVia(s: GameState, fromId: number | null, toId: number): ConquestEvent['via'] {
+	const lane = s.pendingInvasionLane;
+	if (lane && fromId != null && lane[0] === fromId && lane[1] === toId) return 'invasion';
+	if (fromId != null && isPendingTunnelAttack(s, fromId, toId)) return 'tunnel';
+	if (s.eliteAttackActive) return 'elite';
+	if (s.bridgeAttackActive) return 'bridge';
+	if (s.mountainAttackActive) return 'mountaineer';
+	return undefined;
+}
+
 function removePendingInvasionLane(s: GameState) {
 	if (!s.pendingInvasionLane) return;
 	const [a, b] = s.pendingInvasionLane;
@@ -930,6 +1076,46 @@ function removePendingInvasionLane(s: GameState) {
 	s.map.adj[b] = s.map.adj[b].filter((n) => n !== a);
 	log(s, `Water Invasion failed — sea route ${gridLabel(s, a)} ↔ ${gridLabel(s, b)} collapsed.`, 'card');
 	s.pendingInvasionLane = null;
+}
+
+// Tear down the pending Tunnel after a failed assault: pull it out of both
+// map.tunnels and the adjacency it added, so nothing lingers. On a SUCCESSFUL
+// attack the tunnel is instead kept (just clear s.pendingTunnel).
+function removePendingTunnel(s: GameState) {
+	if (!s.pendingTunnel) return;
+	const [a, b] = s.pendingTunnel;
+	s.map.tunnels = (s.map.tunnels ?? []).filter(([x, y]) => !((x === a && y === b) || (x === b && y === a)));
+	s.map.adj[a] = s.map.adj[a].filter((n) => n !== b);
+	s.map.adj[b] = s.map.adj[b].filter((n) => n !== a);
+	log(s, `The tunnel between ${gridLabel(s, a)} and ${gridLabel(s, b)} collapsed — the assault failed.`, 'card');
+	s.pendingTunnel = null;
+}
+
+// A tunnel and a river can't share space: after a Canal digs a new river on
+// the edge (from,to), collapse every existing tunnel whose straight line now
+// crosses that river edge. Returns the number of tunnels destroyed.
+export function severTunnelsCrossingCanal(s: GameState, from: number, to: number): number {
+	const tunnels = s.map.tunnels ?? [];
+	if (tunnels.length === 0) return 0;
+	const lo = Math.min(from, to), hi = Math.max(from, to);
+	const [canalSeg] = wallSegmentsFor([[lo, hi]], s.map.grids);
+	if (!canalSeg) return 0;
+	const survivors: [number, number][] = [];
+	let destroyed = 0;
+	for (const [a, b] of tunnels) {
+		const ca = s.map.grids[a], cb = s.map.grids[b];
+		const crosses = segmentsIntersect([ca.x, ca.y], [cb.x, cb.y], canalSeg.a, canalSeg.b);
+		if (crosses) {
+			s.map.adj[a] = s.map.adj[a].filter((n) => n !== b);
+			s.map.adj[b] = s.map.adj[b].filter((n) => n !== a);
+			log(s, `The new canal cut through the tunnel between ${gridLabel(s, a)} and ${gridLabel(s, b)}, collapsing it.`, 'card');
+			destroyed++;
+		} else {
+			survivors.push([a, b]);
+		}
+	}
+	s.map.tunnels = survivors;
+	return destroyed;
 }
 
 function snapshot(s: GameState) {
@@ -998,6 +1184,7 @@ function beginTurn(s: GameState): GameState {
 	s.bridgeAttackActive = false;
 	s.mountainAttackActive = false;
 	s.pendingInvasionLane = null;
+	s.pendingTunnel = null;
 	s.cardPlayedThisTurn = false;
 	s.usedMarshHexes = [];
 	s.doubleActive = false;
@@ -1402,13 +1589,14 @@ function autoConquer(s: GameState, fromId: number, toId: number): void {
 	to.rampart = false;
 	s.stats[attacker].territoriesCaptured++;
 	if (defender) s.stats[defender].territoriesLost++;
-	s.conquests.push({ turn: s.turn, grid: toId, attacker, defender, from: fromId, armies: from.armies });
+	s.conquests.push({ turn: s.turn, grid: toId, attacker, defender, from: fromId, armies: from.armies, via: conquestVia(s, fromId, toId) });
 	s.defeatedThisTurn = true;
 	s.lastAttackResult = 'win';
 	s.eliteAttackActive = false;
 	s.bridgeAttackActive = false;
 	s.mountainAttackActive = false;
 	s.pendingInvasionLane = null;
+	s.pendingTunnel = null; // tunnel stays on an unopposed capture
 	log(s, `${PLAYER_NAMES[attacker]} walked into ${gridLabel(s, toId)} unopposed.`, 'defeat');
 	// Walking in unopposed still counts as launching an attack from a marsh.
 	if (s.map.grids[fromId].terrain === 'marsh' && !s.usedMarshHexes.includes(fromId)) {
@@ -1461,10 +1649,15 @@ export function rollAttack(): void {
 		if (eliteBonus > 0) atkMods.push(`+${eliteBonus} elite`);
 		if (mountBonus > 0) atkMods.push(`+${mountBonus} 🧗`);
 		const atkTxt = atkMods.length ? `${atk} (${atkMods.join(', ')})` : `${atk}`;
+		const tunneling = isPendingTunnelAttack(s, s.selectedFrom, s.selectedTo);
 		const defMods: string[] = [];
-		if (s.map.grids[s.selectedTo].terrain === 'mountain') defMods.push('+1 ⛰');
-		if (s.states[s.selectedTo].fortified) defMods.push('+2 fort');
-		if (s.states[s.selectedTo].rampart) defMods.push('+1 rampart');
+		if (tunneling) {
+			defMods.push('tunnel: bonuses bypassed');
+		} else {
+			if (s.map.grids[s.selectedTo].terrain === 'mountain') defMods.push('+1 ⛰');
+			if (s.states[s.selectedTo].fortified) defMods.push('+2 fort');
+			if (s.states[s.selectedTo].rampart) defMods.push('+1 rampart');
+		}
 		const defTxt = defMods.length ? `${def} (${defMods.join(', ')})` : `${def}`;
 		devLog({
 			type: 'attack_roll',
@@ -1498,7 +1691,7 @@ export function rollAttack(): void {
 			to.rampart = false;
 			s.stats[attacker].territoriesCaptured++;
 			if (defender) s.stats[defender].territoriesLost++;
-			s.conquests.push({ turn: s.turn, grid: s.selectedTo, attacker, defender, from: s.selectedFrom, armies: from.armies });
+			s.conquests.push({ turn: s.turn, grid: s.selectedTo, attacker, defender, from: s.selectedFrom, armies: from.armies, via: conquestVia(s, s.selectedFrom, s.selectedTo) });
 			s.defeatedThisTurn = true;
 			s.lastAttackResult = 'win';
 			// Elite Troops / Mountaineering were consumed by this successful attack.
@@ -1507,6 +1700,9 @@ export function rollAttack(): void {
 			s.mountainAttackActive = false;
 			// Water Invasion succeeded — the sea lane stays permanent.
 			s.pendingInvasionLane = null;
+			// Tunnel assault succeeded — the tunnel stays as a permanent route
+			// you can attack or move through (just clear the pending marker).
+			s.pendingTunnel = null;
 			log(s, `${PLAYER_NAMES[from.owner!]} conquered ${gridLabel(s, s.selectedTo)}!`, 'defeat');
 			// move at least 1 in
 			from.armies -= 1;
@@ -1540,6 +1736,7 @@ export function rollAttack(): void {
 			s.bridgeAttackActive = false; // consumed regardless of outcome
 			s.mountainAttackActive = false;
 			removePendingInvasionLane(s);
+			removePendingTunnel(s);
 			if (!to.owner) {
 				log(s, `Attacker reduced to 1 — ${gridLabel(s, s.selectedFrom)} attack aborted.`, 'attack');
 				s.phase = 'action';
@@ -1585,6 +1782,7 @@ export function quitAttack() {
 		if (s.phase === 'attack_rolling' && s.lastAttackResult !== 'win') {
 			s.lastAttackResult = 'loss';
 			removePendingInvasionLane(s);
+			removePendingTunnel(s);
 		}
 		s.phase = 'action';
 		s.selectedFrom = null;
@@ -1856,7 +2054,7 @@ export function resolveParatroop(s: GameState, fromId: number, toId: number, qty
 		to.armies = Math.max(1, attackers);
 		s.stats[attacker].territoriesCaptured++;
 		if (defender) s.stats[defender].territoriesLost++;
-		s.conquests.push({ turn: s.turn, grid: toId, attacker, defender, from: fromId, armies: qty });
+		s.conquests.push({ turn: s.turn, grid: toId, attacker, defender, from: fromId, armies: qty, via: 'paratroop' });
 		s.defeatedThisTurn = true;
 		s.lastAttackResult = 'win';
 		s.stats[attacker].attacksWon++;

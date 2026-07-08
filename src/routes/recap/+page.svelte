@@ -217,7 +217,8 @@
 				to: c.grid,
 				armies: c.armies,
 				color: c.attacker === d.winner ? '#fff' : '#ff5a5a',
-				forfeited: c.forfeited
+				forfeited: c.forfeited,
+				via: c.via
 			}));
 		// Committed army count per captured hex. When there's no capture at all
 		// this turn (a pure army-swing turning point), fall back to the top few

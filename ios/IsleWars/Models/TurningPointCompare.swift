@@ -8,6 +8,10 @@ struct TurningPointArrow {
     let armies: Int?
     let color: Color
     let forfeited: Bool
+    /// Set when the capture bypassed normal adjacency (Paratroop Attack) —
+    /// mirrors web's `Path.via`; drawn with a 🪂 marker instead of looking
+    /// like an unexplained cross-map line.
+    let via: String?
 }
 
 /// View-model for one turning point's before/after mini-map compare —
@@ -60,7 +64,7 @@ struct TurningPointCompare {
             guard let from = c.from, changed.contains(c.grid),
                   c.attacker == winner || c.defender == winner else { return nil }
             let color: Color = c.attacker == winner ? .white : Color(red: 1.0, green: 0.35, blue: 0.35)
-            return TurningPointArrow(from: from, to: c.grid, armies: c.armies, color: color, forfeited: c.forfeited ?? false)
+            return TurningPointArrow(from: from, to: c.grid, armies: c.armies, color: color, forfeited: c.forfeited ?? false, via: c.via)
         }
 
         let captureLabels = Dictionary(

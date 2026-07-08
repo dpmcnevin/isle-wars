@@ -8,7 +8,7 @@
 // imports the registry. That cycle is safe because the closures only *call*
 // those helpers at runtime, never at module-load, and ES modules finish
 // evaluating this module before game.ts's own body runs.
-import { crossesRiver, wallBetween } from './map';
+import { crossesRiver, wallBetween, tunnelBetween } from './map';
 import {
 	PLAYERS,
 	PLAYER_NAMES,
@@ -23,6 +23,8 @@ import {
 	canFerryConnect,
 	canInvasionConnect,
 	canArtilleryTarget,
+	canTunnelConnect,
+	severTunnelsCrossingCanal,
 	type CardType,
 	type Phase,
 	type GameState
@@ -442,6 +444,9 @@ export const CARD_DEFS: CardDef[] = [
 			// (its mini maps don't draw rivers), and the canal itself persists
 			// through save/load via the serialized map.
 			s.map.rivers.push([lo, hi]);
+			// A tunnel can't survive a river cutting across it — collapse any the
+			// new canal now crosses.
+			severTunnelsCrossingCanal(s, from, to);
 			consumeCard(s, idx);
 			log(s, `${PLAYER_NAMES[s.current]} dug a canal between ${gridLabel(s, from)} and ${gridLabel(s, to)}.`, 'card');
 			s.phase = 'action'; s.selectedFrom = null; s.selectedTo = null; s.message = 'Attack, move, or pass.';
@@ -534,6 +539,58 @@ export const CARD_DEFS: CardDef[] = [
 			s.mountainAttackActive = true; consumeCard(s, idx);
 			log(s, `${PLAYER_NAMES[s.current]} sent up mountaineers (+1 attacking mountains next battle).`, 'card');
 			s.message = 'Mountaineering active. Your next attack rolls +1 against a mountain hex.';
+		}
+	},
+	{
+		id: 'tunnel', label: 'Tunnel', icon: '🕳', kind: 'attack', weight: 1,
+		when: 'Action phase',
+		// NOTE: keep TUNNEL_MAX_STEPS (game.ts) and the "3" in these static
+		// strings in sync — the number is inlined here on purpose. cards.ts is
+		// evaluated before game.ts's body in the module cycle, so referencing
+		// game.ts's `const` at load time (as these string literals do) would hit
+		// the temporal dead zone and throw. Only runtime closures may read it.
+		desc: `Dig an underground tunnel to an enemy/neutral hex up to 3 hexes away over land (no water or rivers) and attack through it, bypassing ALL of the defender's bonuses. If you conquer the target the tunnel stays as a permanent route you can attack or move through.`,
+		playableIn: ACTION_OR_ATTACK,
+		steps: [
+			{ phase: 'tunnel_from', prompt: 'Tunnel: choose one of your territories to dig from (2+ armies).',
+				check: (s, id) => s.states[id].owner !== s.current ? 'Dig from one of your territories.'
+					: s.states[id].armies < 2 ? 'Need at least 2 armies to dig a tunnel.' : null },
+			{ phase: 'tunnel_to', prompt: 'Tunnel: choose an enemy/neutral hex within 3 hexes over land.',
+				check: (s, id, from) => !canTunnelConnect(s, from as number, id)
+					? 'No land tunnel route — target must be an enemy/neutral hex within 3 hexes, no water or rivers between.' : null }
+		],
+		onResolve: (s, [from, to], idx) => {
+			const lo = Math.min(from, to), hi = Math.max(from, to);
+			if (!s.map.tunnels) s.map.tunnels = [];
+			s.map.tunnels.push([lo, hi]);
+			// Add the tunnel to adjacency so attacks AND moves can use it. No
+			// pushEdgeEvent: like the Canal, the recap mini-maps don't draw
+			// tunnels (they persist through save/load via the serialized map).
+			s.map.adj[from].push(to); s.map.adj[to].push(from);
+			s.pendingTunnel = [from, to];
+			consumeCard(s, idx);
+			log(s, `${PLAYER_NAMES[s.current]} tunnelled from ${gridLabel(s, from)} to ${gridLabel(s, to)} — the attack bypasses all defenses.`, 'card');
+			s.selectedTo = to; s.phase = 'attack_rolling'; s.message = 'Tunnel assault — rolling…';
+		}
+	},
+	{
+		id: 'collapse', label: 'Collapse', icon: '⛏', kind: 'terrain', weight: 1,
+		when: 'Action phase', desc: 'Cave in an existing tunnel, severing it. Pick both endpoints of the tunnel to destroy.',
+		playableIn: ACTION_ONLY,
+		steps: [
+			{ phase: 'collapse_from', prompt: 'Collapse: click one endpoint of the tunnel you want to cave in.',
+				check: (s, id) => (s.map.tunnels ?? []).some(([a, b]) => a === id || b === id) ? null : 'Pick a hex that anchors a tunnel.' },
+			{ phase: 'collapse_to', prompt: 'Collapse: click the other end of the tunnel to cave in.',
+				check: (s, id, from) => tunnelBetween(s.map, from as number, id) ? null : 'No tunnel between those hexes.' }
+		],
+		onResolve: (s, [from, to], idx) => {
+			const lo = Math.min(from, to), hi = Math.max(from, to);
+			s.map.tunnels = (s.map.tunnels ?? []).filter(([a, b]) => !(a === lo && b === hi));
+			s.map.adj[from] = s.map.adj[from].filter((n) => n !== to);
+			s.map.adj[to] = s.map.adj[to].filter((n) => n !== from);
+			consumeCard(s, idx);
+			log(s, `${PLAYER_NAMES[s.current]} collapsed the tunnel between ${gridLabel(s, from)} and ${gridLabel(s, to)}.`, 'card');
+			s.phase = 'action'; s.selectedFrom = null; s.selectedTo = null; s.message = 'Attack, move, or pass.';
 		}
 	}
 ];

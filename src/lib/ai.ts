@@ -16,6 +16,8 @@ import {
 	forceEndTurn,
 	playCard,
 	canInvasionConnect,
+	canTunnelConnect,
+	defenseBonus,
 	hasClearWaterPath,
 	PLAYERS,
 	type Player,
@@ -771,6 +773,36 @@ function tryPlayCardAction(p: Player) {
 			return;
 		}
 	}
+	// Tunnel under a fortified/mountain hex (or one we can't reach overland)
+	// and storm it with every defense bonus stripped away. Drives the roll
+	// out just like a Water Invasion, since it also drops into attack_rolling.
+	s = get(game);
+	{
+		const idx = s.hands[p].findIndex((c) => c === 'tunnel');
+		const plan = idx >= 0 ? bestTunnelPlan(s, p) : null;
+		if (idx >= 0 && plan) {
+			playCard(idx);
+			if (get(game).phase !== 'tunnel_from') { cancelAction(); return; }
+			selectGrid(plan.from);
+			if (get(game).phase !== 'tunnel_to') { cancelAction(); return; }
+			selectGrid(plan.to);
+			if (get(game).phase === 'attack_rolling') rollOutCurrentAttack();
+			else cancelAction();
+			return;
+		}
+	}
+	// Collapse an enemy tunnel that opens onto us before they can exploit it.
+	s = get(game);
+	{
+		const idx = s.hands[p].findIndex((c) => c === 'collapse');
+		const target = idx >= 0 ? bestCollapseTarget(s, p) : null;
+		if (idx >= 0 && target) {
+			playCard(idx);
+			if (get(game).phase === 'collapse_from') selectGrid(target.from);
+			if (get(game).phase === 'collapse_to') selectGrid(target.to);
+			return;
+		}
+	}
 	// Breach a wall blocking an attack — critical when an enemy has sealed
 	// itself in behind Wall cards, since that's otherwise unconquerable and
 	// would deadlock the game (see findBreachTarget).
@@ -920,6 +952,59 @@ function bestParatroopPlan(s: GameState, p: Player): { from: number; to: number;
 			bestScore = score;
 			best = { from, to: t.id, qty: Math.min(maxCommit, needed) };
 		}
+	}
+	return best;
+}
+
+// The best Tunnel assault, or null when none is worth the card. A tunnel is
+// worth digging when it lets us hit a hex we CAN'T reach overland (the card
+// only connects non-adjacent hexes) AND either the target is a fortified /
+// mountainous / rampart'd hex whose bonuses we'd bypass, or a city worth the
+// reach. We need a comfortable army margin because the assault is a normal
+// retreatable dice sequence — just with the defender stripped of every bonus.
+function bestTunnelPlan(s: GameState, p: Player): { from: number; to: number } | null {
+	let best: { from: number; to: number } | null = null;
+	let bestScore = -Infinity;
+	for (const g of s.map.grids) {
+		if (s.states[g.id].owner !== p) continue;
+		const myArmies = s.states[g.id].armies;
+		if (myArmies < 5) continue; // keep a garrison and still field a real force
+		for (const t of s.map.grids) {
+			if (!canTunnelConnect(s, g.id, t.id)) continue; // enforces reach, non-adjacency, land-only
+			const st = s.states[t.id];
+			// Bonus stripped by the tunnel (mountain/fortify/rampart; the pair
+			// isn't adjacent so there's no crossing term).
+			const bypassed = defenseBonus(s, t.id, g.id);
+			// With bonuses gone the fight is ~army-vs-army; want a clear edge.
+			const margin = myArmies - st.armies;
+			if (margin < 3) continue;
+			// Prefer stripping real defenses and taking cities we otherwise
+			// couldn't touch; enemy hexes over neutrals.
+			let score = bypassed * 4 + margin;
+			if (s.map.grids[t.id].production) score += 6;
+			if (st.owner) score += 3;
+			if (score > bestScore) { bestScore = score; best = { from: g.id, to: t.id }; }
+		}
+	}
+	return best;
+}
+
+// A tunnel worth caving in with Collapse: an enemy-held tunnel that opens
+// straight onto one of our hexes (they can pour through it), preferring the
+// one where the enemy end most out-guns the hex it threatens.
+function bestCollapseTarget(s: GameState, p: Player): { from: number; to: number } | null {
+	let best: { from: number; to: number } | null = null;
+	let bestScore = -Infinity;
+	for (const [a, b] of s.map.tunnels ?? []) {
+		const oa = s.states[a].owner, ob = s.states[b].owner;
+		// One end ours, the other an enemy's — that's a live invasion route in.
+		let mine = -1, foe = -1;
+		if (oa === p && ob && ob !== p) { mine = a; foe = b; }
+		else if (ob === p && oa && oa !== p) { mine = b; foe = a; }
+		else continue;
+		const threat = s.states[foe].armies - s.states[mine].armies;
+		if (threat < 2) continue; // not a real threat — leave it (it's also our route out)
+		if (threat > bestScore) { bestScore = threat; best = { from: a, to: b }; }
 	}
 	return best;
 }

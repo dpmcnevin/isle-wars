@@ -29,6 +29,18 @@ struct TurningPointMiniMapView: View {
     /// The single largest `armyLabels` entry — drawn bigger/bolder.
     var biggestGrid: Int? = nil
 
+    /// Mirrors web's VIA_ICON — one icon per ConquestEvent.via, matching that
+    /// card's icon in CARD_DEFS. Elite carries U+FE0F so it renders as a
+    /// color emoji instead of a text-presentation glyph tinted by the
+    /// environment foreground color (near-invisible on the dark badge).
+    static let viaIcon: [String: String] = [
+        "paratroop": "🪂",
+        "invasion": "🚢",
+        "elite": "⚔️",
+        "bridge": "🌉",
+        "mountaineer": "🧗"
+    ]
+
     var body: some View {
         GeometryReader { geo in
             let transform = MapTransform(viewBox: map.viewBox, containerSize: geo.size)
@@ -169,9 +181,11 @@ struct TurningPointMiniMapView: View {
         var line = Path()
         line.move(to: p1)
         line.addLine(to: p2)
+        let bypassesAdjacency = arrow.via == "paratroop" || arrow.via == "invasion"
+        let dash: [CGFloat] = arrow.forfeited ? [5, 4] : (bypassesAdjacency ? [2, 7] : [])
         context.stroke(
             line, with: .color(color.opacity(0.9)),
-            style: StrokeStyle(lineWidth: w * scale, lineCap: .round, dash: arrow.forfeited ? [5, 4] : [])
+            style: StrokeStyle(lineWidth: w * scale, lineCap: .round, dash: dash)
         )
 
         // Arrowhead: a filled triangle at the target end (or an X for a
@@ -194,6 +208,20 @@ struct TurningPointMiniMapView: View {
             head.addLine(to: CGPoint(x: back.x - perp.x * half, y: back.y - perp.y * half))
             head.closeSubpath()
             context.fill(head, with: .color(color))
+        }
+
+        // Paratroop/Invasion bypass normal adjacency, so their arrow can span
+        // the whole map; Elite/Bridge/Mountaineering are ordinary adjacent
+        // attacks just called out for flavor. Either way, label the midpoint
+        // with the card's icon (mirrors web's VIA_ICON).
+        if let via = arrow.via {
+            let icon = TurningPointMiniMapView.viaIcon[via] ?? "❓"
+            let mid = CGPoint(x: (p1.x + p2.x) / 2, y: (p1.y + p2.y) / 2)
+            let r: CGFloat = 19 * scale
+            let badge = Path(ellipseIn: CGRect(x: mid.x - r, y: mid.y - r, width: r * 2, height: r * 2))
+            context.fill(badge, with: .color(Color(red: 0.04, green: 0.08, blue: 0.13).opacity(0.92)))
+            context.stroke(badge, with: .color(Color(red: 1.0, green: 0.91, blue: 0.5)), lineWidth: 2.5 * scale)
+            context.draw(Text(icon).font(.system(size: 26 * scale)), at: mid)
         }
     }
 

@@ -31,6 +31,7 @@
 		canFerryConnect,
 		canInvasionConnect,
 		canArtilleryTarget,
+		canTunnelConnect,
 		countryCount,
 		armyCount,
 		fullIslandBonus,
@@ -301,6 +302,9 @@
 		if (s.phase === 'artillery_from') {
 			return s.states[id].owner === HUMAN && s.states[id].armies >= 2 && s.map.grids[id].production;
 		}
+		if (s.phase === 'tunnel_from') {
+			return s.states[id].owner === HUMAN && s.states[id].armies >= 2;
+		}
 		return false;
 	}
 
@@ -344,10 +348,16 @@
 		return canArtilleryTarget(s, from, to);
 	}
 
+	function isValidTunnelTarget(from: number, to: number): boolean {
+		const s = $game;
+		if (s.phase !== 'tunnel_from' && s.phase !== 'tunnel_to') return false;
+		return canTunnelConnect(s, from, to);
+	}
+
 	function isValidDragTarget(from: number, to: number): boolean {
 		return isValidAttackTarget(from, to) || isValidMoveTarget(from, to)
 			|| isValidFerryTarget(from, to) || isValidInvasionTarget(from, to)
-			|| isValidArtilleryTarget(from, to);
+			|| isValidArtilleryTarget(from, to) || isValidTunnelTarget(from, to);
 	}
 
 	function svgPoint(e: PointerEvent): { x: number; y: number } | null {
@@ -413,6 +423,9 @@
 				selectGrid(from);
 				selectGrid(to);
 			} else if (isValidArtilleryTarget(from, to)) {
+				selectGrid(from);
+				selectGrid(to);
+			} else if (isValidTunnelTarget(from, to)) {
 				selectGrid(from);
 				selectGrid(to);
 			}
@@ -1182,6 +1195,20 @@
 					{@const created = createdLaneKeys.has(a < b ? `${a},${b}` : `${b},${a}`)}
 					<path d={seaLanePath(a, b, $game.map.grids)} fill="none" stroke={created ? '#c68fff' : '#a0d8ff'} stroke-width="2.5" stroke-dasharray="6 4" stroke-opacity="0.85" pointer-events="none" />
 				{/each}
+				<!-- Tunnels (Tunnel card): a bold underground channel straight between
+				     the two linked hex centers — a dark casing under a bright amber
+				     dashed core with capped ends, so it reads clearly as a tunnel and
+				     not a sea lane or river. -->
+				{#each ($game.map.tunnels ?? []) as [a, b]}
+					{@const ga = $game.map.grids[a]}
+					{@const gb = $game.map.grids[b]}
+					<g pointer-events="none">
+						<line x1={ga.x} y1={ga.y} x2={gb.x} y2={gb.y} stroke="#241206" stroke-width="9" stroke-linecap="round" stroke-opacity="0.95" />
+						<line x1={ga.x} y1={ga.y} x2={gb.x} y2={gb.y} stroke="#ffb454" stroke-width="4" stroke-dasharray="7 6" stroke-linecap="round" />
+						<circle cx={ga.x} cy={ga.y} r="4.5" fill="#241206" stroke="#ffb454" stroke-width="2" />
+						<circle cx={gb.x} cy={gb.y} r="4.5" fill="#241206" stroke="#ffb454" stroke-width="2" />
+					</g>
+				{/each}
 				<!-- Rivers: thick layered strokes (dark banks + mid + highlight) with
 				     a soft glow, straddling the shared edge between two land hexes. -->
 				<defs>
@@ -1259,7 +1286,8 @@
 					{@const overFerry = hoveredGrid != null && isValidFerryTarget(dragFrom, hoveredGrid)}
 					{@const overInvade = hoveredGrid != null && isValidInvasionTarget(dragFrom, hoveredGrid)}
 					{@const overArt = hoveredGrid != null && isValidArtilleryTarget(dragFrom, hoveredGrid)}
-					{@const arrowColor = overAttack ? '#ffe14a' : overMove ? '#7fcfff' : overFerry ? '#c68fff' : overInvade ? '#ff6a6a' : overArt ? '#ff8a00' : '#fff'}
+					{@const overTunnel = hoveredGrid != null && isValidTunnelTarget(dragFrom, hoveredGrid)}
+					{@const arrowColor = overAttack ? '#ffe14a' : overMove ? '#7fcfff' : overFerry ? '#c68fff' : overInvade ? '#ff6a6a' : overArt ? '#ff8a00' : overTunnel ? '#c98a4b' : '#fff'}
 					<defs>
 						<marker id="drag-arrowhead" markerWidth="10" markerHeight="10" refX="8" refY="5" orient="auto">
 							<path d="M0,0 L10,5 L0,10 Z" fill={arrowColor} />
@@ -1271,7 +1299,7 @@
 						stroke={arrowColor}
 						stroke-width="4"
 						stroke-linecap="round"
-						stroke-dasharray={(overAttack || overMove || overFerry || overInvade || overArt) ? 'none' : '8 6'}
+						stroke-dasharray={(overAttack || overMove || overFerry || overInvade || overArt || overTunnel) ? 'none' : '8 6'}
 						marker-end="url(#drag-arrowhead)"
 						pointer-events="none"
 					/>
