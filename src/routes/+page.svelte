@@ -762,6 +762,11 @@
 	let debugStarterCards = $state(false);
 	let debugAutoPlay = $state(false);
 	let debugDieSides = $state(10);
+	// Not part of DebugSettings/the shareable seed (those are about map
+	// generation + game rules) — this is a pure AI-implementation switch, so
+	// it just resets to the default (on) every reload rather than round-
+	// tripping through localStorage or seed-packing for one dev toggle.
+	let debugUseValueNet = $state(true);
 
 	function loadDebugUi() {
 		const d = getDebugSettings();
@@ -769,6 +774,11 @@
 		debugStarterCards = d.starterCards;
 		debugAutoPlay = d.autoPlay;
 		debugDieSides = d.dieSides;
+	}
+
+	function toggleDebugUseValueNet() {
+		debugUseValueNet = !debugUseValueNet;
+		setValueNetPlayers(debugUseValueNet ? PLAYERS.filter((p) => p !== HUMAN) : []);
 	}
 
 	function setDebugDieSides(v: number) {
@@ -1029,6 +1039,14 @@
 					<div class="toggle-text">
 						<div class="toggle-title">Auto-play the whole game</div>
 						<div class="toggle-desc">The AI controls all four players so you can watch a game play itself. Turn off to take over Blue again.</div>
+					</div>
+				</label>
+				<label class="toggle-card" class:on={debugUseValueNet}>
+					<input type="checkbox" checked={debugUseValueNet} onchange={toggleDebugUseValueNet} />
+					<div class="toggle-slot"><div class="toggle-thumb"></div></div>
+					<div class="toggle-text">
+						<div class="toggle-title">Value-net AI</div>
+						<div class="toggle-desc">AI opponents use the trained value network for attacks/placement (~55% vs. the plain heuristic's ~25% in sims). Turn off to fall back to the original hand-tuned heuristic.</div>
 					</div>
 				</label>
 				<div class="toggle-card">
