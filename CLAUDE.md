@@ -83,7 +83,17 @@ for the full structure, why that cycle is safe, and an add-a-card checklist.
 
 ## Verifying changes
 
-There's no unit-test harness. To exercise game logic headlessly, eval the built bundle
-in Node and drive `globalThis.IsleWars` (start a game, `runAiTurn`, assert on state).
-This is the fastest way to confirm a rules change end-to-end without launching either UI.
-Always run `npm run check` and, for iOS-affecting changes, an `xcodebuild`.
+```bash
+npm test   # rebuilds the iOS bundle, then node --test tests/*.test.mjs
+```
+
+`tests/` is a minimal `node:test` suite covering attack resolution and the
+"nasty interaction" cards (Bridge/river, Wall/Breach, Canal/Levee, Tunnel/Collapse,
+Water Invasion). It works the same way ad hoc headless checks always have in this repo:
+eval the compiled `ios/IsleWars/Resources/game-bundle.js` in Node and drive
+`globalThis.IsleWars` (`tests/helpers/engine.mjs`) — start a game, `loadState(...)` to
+force an exact board (owners/armies/walls/rivers/tunnels), drive `playCard`/`selectGrid`/
+`rollAttack`, assert on the returned state. `withFixedRolls` in the same helper
+monkey-patches `Math.random` for deterministic dice, since `rollDie()` has no seedable
+RNG. Not a substitute for `npm run check` and, for iOS-affecting changes, an
+`xcodebuild` — run those too.

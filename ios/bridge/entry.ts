@@ -34,6 +34,7 @@ import {
 	canFerryConnect,
 	canInvasionConnect,
 	canArtilleryTarget,
+	canTunnelConnect,
 	countryCount,
 	fullIslandBonus,
 	selectableHexes,
@@ -118,6 +119,7 @@ function withState<Args extends unknown[]>(fn: (...args: Args) => void) {
 	canFerryConnect: (fromId: number, toId: number) => canFerryConnect(latestState, fromId, toId),
 	canInvasionConnect: (fromId: number, toId: number) => canInvasionConnect(latestState, fromId, toId),
 	canArtilleryTarget: (fromId: number, toId: number) => canArtilleryTarget(latestState, fromId, toId),
+	canTunnelConnect: (fromId: number, toId: number) => canTunnelConnect(latestState, fromId, toId),
 	countryCount: (player: Player) => countryCount(latestState, player),
 	fullIslandBonus: (player: Player) => fullIslandBonus(latestState, player),
 
