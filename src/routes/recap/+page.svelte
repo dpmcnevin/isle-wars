@@ -3,7 +3,7 @@
 	import { decodeRecap, type RecapData, type RecapTurningPoint } from '$lib/recap';
 	import { headlineParts, reconstructOwnersAtTurn, reconstructEdgesAtTurn } from '$lib/summary';
 	import { PLAYERS, PLAYER_COLORS, PLAYER_NAMES, newGame, clearSavedGame, type Player } from '$lib/game';
-	import { generateMap, type GameMap } from '$lib/map';
+	import { generateMap, isCustomMapSeed, buildCustomMapFromSeed, type GameMap } from '$lib/map';
 	import { base } from '$app/paths';
 	import { goto } from '$app/navigation';
 	import TurningPointCompareModal from '$lib/components/TurningPointCompareModal.svelte';
@@ -41,7 +41,14 @@
 			return;
 		}
 		data = decoded;
-		const m = generateMap(decoded.seed);
+		// The seed rebuilds the exact board either way: procedural seeds via
+		// generateMap, editor maps via the packed CUSTOM- format (which encodes
+		// the whole painted map in the seed string — see map.ts).
+		const m = isCustomMapSeed(decoded.seed) ? buildCustomMapFromSeed(decoded.seed) : generateMap(decoded.seed);
+		if (!m) {
+			invalid = true;
+			return;
+		}
 		// The seed regenerates the ORIGINAL terrain; replay the game's terrain
 		// changes (Deforestation / Oasis / Scorched Earth) forward so the map
 		// matches the final board (reconstructTerrainAtTurn can then rewind it).

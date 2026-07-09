@@ -312,6 +312,17 @@ export function decodeSeedSettings(seed: string): SeedSettings | null {
 	return unpackSettings(packed);
 }
 
+/** Prefix of the placeholder seed label given to games started from a
+ *  hand-built editor map (see game.ts's startGameFromMap). Such a "seed" is
+ *  only a display label — generateMap() cannot reproduce the board from it,
+ *  so anything that replays a map from its seed (the recap page, "Play Same
+ *  Map") must special-case these. */
+export const CUSTOM_SEED_PREFIX = 'CUSTOM-';
+
+export function isCustomMapSeed(seed: string): boolean {
+	return seed.toUpperCase().startsWith(CUSTOM_SEED_PREFIX);
+}
+
 /** djb2 string hash, folded to an unsigned 32-bit int for mulberry32.
  *  Case-normalizes first so a seed typed in lowercase still hits the same
  *  map — canonical display/storage is still uppercase. Exported so game.ts's
@@ -436,7 +447,7 @@ const CITY_NAMES = [
 // s = side length (also circumradius). w = √3·s, h = 2·s. Row-spacing = 1.5·s.
 // -----------------------------------------------------------------------------
 
-interface Hex {
+export interface Hex {
 	col: number;
 	row: number;
 	x: number;
@@ -444,7 +455,7 @@ interface Hex {
 	poly: [number, number][];
 }
 
-function hexPolygon(cx: number, cy: number, s: number): [number, number][] {
+export function hexPolygon(cx: number, cy: number, s: number): [number, number][] {
 	const pts: [number, number][] = [];
 	for (let i = 0; i < 6; i++) {
 		const a = ((60 * i - 30) * Math.PI) / 180;
@@ -453,7 +464,7 @@ function hexPolygon(cx: number, cy: number, s: number): [number, number][] {
 	return pts;
 }
 
-function buildHexGrid(width: number, height: number, s: number): Hex[][] {
+export function buildHexGrid(width: number, height: number, s: number): Hex[][] {
 	const w = Math.sqrt(3) * s;
 	const rowH = 1.5 * s;
 	// Ensure the entire hex (which extends ±w/2 horizontally and ±s vertically
@@ -474,7 +485,7 @@ function buildHexGrid(width: number, height: number, s: number): Hex[][] {
 }
 
 // Odd-r offset neighbors: 6 hex neighbors depending on row parity.
-function hexNeighbors(col: number, row: number): [number, number][] {
+export function hexNeighbors(col: number, row: number): [number, number][] {
 	if (row % 2 === 0) {
 		return [
 			[col - 1, row], [col + 1, row],
@@ -565,7 +576,7 @@ function growIsland(
 // draw a coastline on top of the territory hexes.
 // -----------------------------------------------------------------------------
 
-function unionHexes(hexes: Hex[]): [number, number][] {
+function unionHexes(hexes: { poly: [number, number][] }[]): [number, number][] {
 	if (hexes.length === 0) return [];
 	if (hexes.length === 1) return hexes[0].poly;
 	let acc: [number, number][][][] = [[[...hexes[0].poly, hexes[0].poly[0]]]];
@@ -598,6 +609,187 @@ function polygonArea(poly: [number, number][]): number {
 		a += (poly[j][0] + poly[i][0]) * (poly[j][1] - poly[i][1]);
 	}
 	return a / 2;
+}
+
+// -----------------------------------------------------------------------------
+// Cross-island connectivity: connects each island to its 2 nearest neighbor
+// islands via the closest hex pair whose curved sea-lane path avoids other
+// islands' land, then guarantees every island is reachable from every other
+// (falling back to a through-land pair as a last resort). Shared by
+// `generateMap` and `buildCustomMap` so both produce fully-connected maps.
+// -----------------------------------------------------------------------------
+function computeSeaLanes(islands: Island[], grids: Grid[], adj: number[][]): [number, number][] {
+	const seaLanes: [number, number][] = [];
+	function addLane(a: number, b: number) {
+		if (a === b) return;
+		if (seaLanes.some(([x, y]) => (x === a && y === b) || (x === b && y === a))) return;
+		seaLanes.push([a, b]);
+		if (!adj[a].includes(b)) adj[a].push(b);
+		if (!adj[b].includes(a)) adj[b].push(a);
+	}
+	function pathClearsOtherIslands(aId: number, bId: number): boolean {
+		const a = grids[aId], b = grids[bId];
+		const dx = b.x - a.x, dy = b.y - a.y;
+		const dist = Math.hypot(dx, dy) || 1;
+		const steps = Math.max(6, Math.ceil(dist / 15));
+		const startT = 0.08, endT = 0.92;
+		// Same curve the renderer draws — arc height 6% of length, up to 22px,
+		// perpendicular, with a deterministic side from the endpoint ids.
+		const arc = Math.min(22, dist * 0.06);
+		const side = ((aId + bId) % 2 === 0) ? 1 : -1;
+		const perpX = (-dy / dist) * arc * side;
+		const perpY = (dx / dist) * arc * side;
+		const midX = (a.x + b.x) / 2 + perpX;
+		const midY = (a.y + b.y) / 2 + perpY;
+		function pointClear(px: number, py: number): boolean {
+			for (const g of grids) {
+				if (g.id === aId || g.id === bId) continue;
+				if (pointInPolygon(px, py, g.cell)) return false;
+			}
+			return true;
+		}
+		for (let i = 0; i <= steps; i++) {
+			const t = startT + (endT - startT) * (i / steps);
+			// Straight-line sample
+			if (!pointClear(a.x + dx * t, a.y + dy * t)) return false;
+			// Quadratic Bezier sample matching the rendered curve
+			const omt = 1 - t;
+			const bx = omt * omt * a.x + 2 * omt * t * midX + t * t * b.x;
+			const by = omt * omt * a.y + 2 * omt * t * midY + t * t * b.y;
+			if (!pointClear(bx, by)) return false;
+		}
+		return true;
+	}
+	function nearestCross(iA: Island, iB: Island, allowThroughLand = false): [number, number] | null {
+		const gsA = grids.filter((g) => g.island === iA.id);
+		const gsB = grids.filter((g) => g.island === iB.id);
+		if (gsA.length === 0 || gsB.length === 0) return null;
+		const pairs: Array<{ a: number; b: number; d: number }> = [];
+		for (const a of gsA) for (const b of gsB) {
+			pairs.push({ a: a.id, b: b.id, d: Math.hypot(a.x - b.x, a.y - b.y) });
+		}
+		pairs.sort((p, q) => p.d - q.d);
+		for (const p of pairs) {
+			if (pathClearsOtherIslands(p.a, p.b)) return [p.a, p.b];
+		}
+		// No clear-water pair. Only fall back when the caller says land is OK
+		// (used by the last-ditch connectivity guarantee).
+		if (allowThroughLand && pairs.length) return [pairs[0].a, pairs[0].b];
+		return null;
+	}
+	for (const isl of islands) {
+		const others = islands
+			.filter((o) => o.id !== isl.id)
+			.map((o) => ({ o, d: Math.hypot(o.center[0] - isl.center[0], o.center[1] - isl.center[1]) }))
+			.sort((a, b) => a.d - b.d);
+		for (const { o } of others.slice(0, 2)) {
+			const cross = nearestCross(isl, o);
+			if (cross) addLane(cross[0], cross[1]);
+		}
+	}
+	// Guarantee connectivity across all islands
+	function componentCheck(): boolean {
+		if (islands.length === 0) return true;
+		const seen = new Set<number>([islands[0].id]);
+		const stk = [islands[0].id];
+		while (stk.length) {
+			const cur = stk.pop()!;
+			for (const g of grids.filter((x) => x.island === cur)) {
+				for (const n of adj[g.id]) {
+					const nIsl = grids[n].island;
+					if (!seen.has(nIsl)) { seen.add(nIsl); stk.push(nIsl); }
+				}
+			}
+		}
+		return seen.size === islands.length;
+	}
+	let safety = 0;
+	while (!componentCheck() && safety++ < 20) {
+		const seen = new Set<number>([islands[0].id]);
+		const stk = [islands[0].id];
+		while (stk.length) {
+			const cur = stk.pop()!;
+			for (const g of grids.filter((x) => x.island === cur)) {
+				for (const n of adj[g.id]) {
+					const nIsl = grids[n].island;
+					if (!seen.has(nIsl)) { seen.add(nIsl); stk.push(nIsl); }
+				}
+			}
+		}
+		const inside = islands.filter((i) => seen.has(i.id));
+		const outside = islands.filter((i) => !seen.has(i.id));
+		let bestPair: [Island, Island, number] = [inside[0], outside[0], Infinity];
+		for (const a of inside) for (const b of outside) {
+			const d = Math.hypot(a.center[0] - b.center[0], a.center[1] - b.center[1]);
+			if (d < bestPair[2]) bestPair = [a, b, d];
+		}
+		// Connectivity fallback — allow through-land as a last resort so no
+		// island becomes totally unreachable.
+		const cross = nearestCross(bestPair[0], bestPair[1], true);
+		if (!cross) break;
+		addLane(cross[0], cross[1]);
+	}
+	return seaLanes;
+}
+
+// Picks a label position for each island: a hex-vertex where multiple island
+// hexes meet, preferring interior vertices (3 hexes meet) over border ones (2
+// hexes + water), so the label sits between hex centers instead of on a city
+// name. Mutates `isl.labelPos` in place. Shared by `generateMap` and
+// `buildCustomMap`.
+function computeIslandLabelPositions(islands: Island[], grids: Grid[]): void {
+	for (const isl of islands) {
+		const gs = grids.filter((g) => g.island === isl.id);
+		if (gs.length === 0) { isl.labelPos = isl.center; continue; }
+		let sx = 0, sy = 0;
+		for (const g of gs) { sx += g.x; sy += g.y; }
+		const cx = sx / gs.length;
+		const cy = sy / gs.length;
+		if (gs.length === 1) {
+			// Single-hex island: put the label at the top of the hex above the
+			// army badge so both are visible.
+			isl.labelPos = [gs[0].x, gs[0].y - 34];
+			continue;
+		}
+		// Group hex vertices by rounded coordinates so shared vertices collapse.
+		const vertexHits = new Map<string, { x: number; y: number; count: number; productionAdj: number }>();
+		for (const g of gs) {
+			for (const [vx, vy] of g.cell) {
+				const key = `${Math.round(vx * 10)},${Math.round(vy * 10)}`;
+				const entry = vertexHits.get(key);
+				if (entry) {
+					entry.count++;
+					if (g.production) entry.productionAdj++;
+				} else {
+					vertexHits.set(key, { x: vx, y: vy, count: 1, productionAdj: g.production ? 1 : 0 });
+				}
+			}
+		}
+		// Score: higher count = better (interior). Penalize production adjacency
+		// so the label doesn't get placed next to a city name. Prefer close to centroid.
+		let best: { x: number; y: number } | null = null;
+		let bestScore = -Infinity;
+		for (const v of vertexHits.values()) {
+			if (v.count < 2) continue; // coastline vertex — skip
+			const dist = Math.hypot(v.x - cx, v.y - cy);
+			const score = v.count * 100 - dist - v.productionAdj * 40;
+			if (score > bestScore) { bestScore = score; best = v; }
+		}
+		isl.labelPos = best ? [best.x, best.y] : [cx, cy];
+	}
+}
+
+// Assigns a unique city name to every production-center hex that doesn't
+// already have one. Shared by `generateMap` and `buildCustomMap`.
+function assignCityNames(grids: Grid[], rnd: () => number): void {
+	const cityPool = shuffle(CITY_NAMES, rnd);
+	let cityIdx = 0;
+	for (const g of grids) {
+		if (g.production && !g.cityName) {
+			g.cityName = cityPool[cityIdx % cityPool.length];
+			cityIdx++;
+		}
+	}
 }
 
 // -----------------------------------------------------------------------------
@@ -792,128 +984,7 @@ export function generateMap(seed: string = encodeSeed(DEFAULT_SEED_SETTINGS)): G
 		}
 	}
 
-	// Cross-island sea lanes: for each island, connect to its 2 nearest neighbor
-	// islands via the closest hex pair. Ensures global connectivity.
-	const seaLanes: [number, number][] = [];
-	function addLane(a: number, b: number) {
-		if (a === b) return;
-		if (seaLanes.some(([x, y]) => (x === a && y === b) || (x === b && y === a))) return;
-		seaLanes.push([a, b]);
-		if (!adj[a].includes(b)) adj[a].push(b);
-		if (!adj[b].includes(a)) adj[b].push(a);
-	}
-	function pathInPoly(px: number, py: number, poly: [number, number][]): boolean {
-		let inside = false;
-		for (let i = 0, j = poly.length - 1; i < poly.length; j = i++) {
-			const xi = poly[i][0], yi = poly[i][1];
-			const xj = poly[j][0], yj = poly[j][1];
-			if (((yi > py) !== (yj > py)) &&
-				(px < ((xj - xi) * (py - yi)) / (yj - yi) + xi)) inside = !inside;
-		}
-		return inside;
-	}
-	function pathClearsOtherIslands(aId: number, bId: number): boolean {
-		const a = grids[aId], b = grids[bId];
-		const dx = b.x - a.x, dy = b.y - a.y;
-		const dist = Math.hypot(dx, dy) || 1;
-		const steps = Math.max(6, Math.ceil(dist / 15));
-		const startT = 0.08, endT = 0.92;
-		// Same curve the renderer draws — arc height 6% of length, up to 22px,
-		// perpendicular, with a deterministic side from the endpoint ids.
-		const arc = Math.min(22, dist * 0.06);
-		const side = ((aId + bId) % 2 === 0) ? 1 : -1;
-		const perpX = (-dy / dist) * arc * side;
-		const perpY = (dx / dist) * arc * side;
-		const midX = (a.x + b.x) / 2 + perpX;
-		const midY = (a.y + b.y) / 2 + perpY;
-		function pointClear(px: number, py: number): boolean {
-			for (const g of grids) {
-				if (g.id === aId || g.id === bId) continue;
-				if (pathInPoly(px, py, g.cell)) return false;
-			}
-			return true;
-		}
-		for (let i = 0; i <= steps; i++) {
-			const t = startT + (endT - startT) * (i / steps);
-			// Straight-line sample
-			if (!pointClear(a.x + dx * t, a.y + dy * t)) return false;
-			// Quadratic Bezier sample matching the rendered curve
-			const omt = 1 - t;
-			const bx = omt * omt * a.x + 2 * omt * t * midX + t * t * b.x;
-			const by = omt * omt * a.y + 2 * omt * t * midY + t * t * b.y;
-			if (!pointClear(bx, by)) return false;
-		}
-		return true;
-	}
-	function nearestCross(iA: Island, iB: Island, allowThroughLand = false): [number, number] | null {
-		const gsA = grids.filter((g) => g.island === iA.id);
-		const gsB = grids.filter((g) => g.island === iB.id);
-		if (gsA.length === 0 || gsB.length === 0) return null;
-		const pairs: Array<{ a: number; b: number; d: number }> = [];
-		for (const a of gsA) for (const b of gsB) {
-			pairs.push({ a: a.id, b: b.id, d: Math.hypot(a.x - b.x, a.y - b.y) });
-		}
-		pairs.sort((p, q) => p.d - q.d);
-		for (const p of pairs) {
-			if (pathClearsOtherIslands(p.a, p.b)) return [p.a, p.b];
-		}
-		// No clear-water pair. Only fall back when the caller says land is OK
-		// (used by the last-ditch connectivity guarantee).
-		if (allowThroughLand && pairs.length) return [pairs[0].a, pairs[0].b];
-		return null;
-	}
-	for (const isl of islands) {
-		const others = islands
-			.filter((o) => o.id !== isl.id)
-			.map((o) => ({ o, d: Math.hypot(o.center[0] - isl.center[0], o.center[1] - isl.center[1]) }))
-			.sort((a, b) => a.d - b.d);
-		for (const { o } of others.slice(0, 2)) {
-			const cross = nearestCross(isl, o);
-			if (cross) addLane(cross[0], cross[1]);
-		}
-	}
-	// Guarantee connectivity across all islands
-	function componentCheck(): boolean {
-		if (islands.length === 0) return true;
-		const seen = new Set<number>([islands[0].id]);
-		const stk = [islands[0].id];
-		while (stk.length) {
-			const cur = stk.pop()!;
-			for (const g of grids.filter((x) => x.island === cur)) {
-				for (const n of adj[g.id]) {
-					const nIsl = grids[n].island;
-					if (!seen.has(nIsl)) { seen.add(nIsl); stk.push(nIsl); }
-				}
-			}
-		}
-		return seen.size === islands.length;
-	}
-	let safety = 0;
-	while (!componentCheck() && safety++ < 20) {
-		const seen = new Set<number>([islands[0].id]);
-		const stk = [islands[0].id];
-		while (stk.length) {
-			const cur = stk.pop()!;
-			for (const g of grids.filter((x) => x.island === cur)) {
-				for (const n of adj[g.id]) {
-					const nIsl = grids[n].island;
-					if (!seen.has(nIsl)) { seen.add(nIsl); stk.push(nIsl); }
-				}
-			}
-		}
-		const inside = islands.filter((i) => seen.has(i.id));
-		const outside = islands.filter((i) => !seen.has(i.id));
-		let bestPair: [Island, Island, number] = [inside[0], outside[0], Infinity];
-		for (const a of inside) for (const b of outside) {
-			const d = Math.hypot(a.center[0] - b.center[0], a.center[1] - b.center[1]);
-			if (d < bestPair[2]) bestPair = [a, b, d];
-		}
-		// Connectivity fallback — allow through-land as a last resort so no
-		// island becomes totally unreachable.
-		const cross = nearestCross(bestPair[0], bestPair[1], true);
-		if (!cross) break;
-		addLane(cross[0], cross[1]);
-	}
+	const seaLanes = computeSeaLanes(islands, grids, adj);
 
 	// Mountain ranges: for each island with ≥3 hexes, ~45% chance to seed a
 	// mountain range of 2..4 connected hexes. Mountain defenders get +1 to
@@ -1107,62 +1178,8 @@ export function generateMap(seed: string = encodeSeed(DEFAULT_SEED_SETTINGS)): G
 		}
 	}
 
-	// Assign a unique city name to every production-center hex.
-	const cityPool = shuffle(CITY_NAMES, rnd);
-	let cityIdx = 0;
-	for (const g of grids) {
-		if (g.production) {
-			g.cityName = cityPool[cityIdx % cityPool.length];
-			cityIdx++;
-		}
-	}
-
-	// Choose a label position for each island: a spot in the water just
-	// outside its bounding box. Prefer above; fall back to below, left, right
-	// if above would run off the canvas or collide with another island.
-	// Label positioning: put each label on a hex-vertex where multiple island
-	// hexes meet (an intersection point). Prefer interior vertices (3 island
-	// hexes meet) over border vertices (2 island hexes + water). Sitting on a
-	// vertex means the label lands between hex centers, not on a city name.
-	for (const isl of islands) {
-		const gs = grids.filter((g) => g.island === isl.id);
-		if (gs.length === 0) { isl.labelPos = isl.center; continue; }
-		let sx = 0, sy = 0;
-		for (const g of gs) { sx += g.x; sy += g.y; }
-		const cx = sx / gs.length;
-		const cy = sy / gs.length;
-		if (gs.length === 1) {
-			// Single-hex island: put the label at the top of the hex above the
-			// army badge so both are visible.
-			isl.labelPos = [gs[0].x, gs[0].y - 34];
-			continue;
-		}
-		// Group hex vertices by rounded coordinates so shared vertices collapse.
-		const vertexHits = new Map<string, { x: number; y: number; count: number; productionAdj: number }>();
-		for (const g of gs) {
-			for (const [vx, vy] of g.cell) {
-				const key = `${Math.round(vx * 10)},${Math.round(vy * 10)}`;
-				const entry = vertexHits.get(key);
-				if (entry) {
-					entry.count++;
-					if (g.production) entry.productionAdj++;
-				} else {
-					vertexHits.set(key, { x: vx, y: vy, count: 1, productionAdj: g.production ? 1 : 0 });
-				}
-			}
-		}
-		// Score: higher count = better (interior). Penalize production adjacency
-		// so the label doesn't get placed next to a city name. Prefer close to centroid.
-		let best: { x: number; y: number } | null = null;
-		let bestScore = -Infinity;
-		for (const v of vertexHits.values()) {
-			if (v.count < 2) continue; // coastline vertex — skip
-			const dist = Math.hypot(v.x - cx, v.y - cy);
-			const score = v.count * 100 - dist - v.productionAdj * 40;
-			if (score > bestScore) { bestScore = score; best = v; }
-		}
-		isl.labelPos = best ? [best.x, best.y] : [cx, cy];
-	}
+	assignCityNames(grids, rnd);
+	computeIslandLabelPositions(islands, grids);
 
 	// Water hexes: every hex cell in the grid not claimed by any island.
 	const waterHexes: [number, number][][] = [];
@@ -1290,6 +1307,427 @@ export function generateMap(seed: string = encodeSeed(DEFAULT_SEED_SETTINGS)): G
 		viewBox: { x: vbX, y: vbY, w: vbW, h: vbH },
 		winThreshold: Math.min(30, Math.floor(grids.length * 0.66))
 	};
+}
+
+// -----------------------------------------------------------------------------
+// Custom maps: build a GameMap from a hand-painted set of hexes (the map
+// editor), instead of procedural growth. Islands are simply the connected
+// components of the painted hexes (no water-buffer rule — a mapmaker can
+// place two islands hex-adjacent if they want a land bridge, or split one
+// landmass into two by leaving a gap). Reuses the same fixed hex geometry
+// (s=70, 1400x900 canvas) as `generateMap` so custom maps render identically,
+// and the same sea-lane/label/city-naming helpers so the two producers stay
+// in sync.
+// -----------------------------------------------------------------------------
+
+/** The fixed canvas every custom map is painted on — identical to the
+ *  procedural generator's, so hex geometry (and buildHexGrid cell order)
+ *  matches the live board exactly. The packed custom seed format below
+ *  addresses cells by index into this grid, so these must never change
+ *  without versioning the seed format. */
+export const CUSTOM_MAP_CANVAS = { width: 1400, height: 900, s: 70 } as const;
+
+// Grid dimensions derived exactly as buildHexGrid derives them.
+const CUSTOM_COLS = Math.floor(
+	(CUSTOM_MAP_CANVAS.width - (Math.sqrt(3) * CUSTOM_MAP_CANVAS.s) / 2) / (Math.sqrt(3) * CUSTOM_MAP_CANVAS.s)
+);
+const CUSTOM_ROWS = Math.floor((CUSTOM_MAP_CANVAS.height - 2 * CUSTOM_MAP_CANVAS.s) / (1.5 * CUSTOM_MAP_CANVAS.s)) + 1;
+
+export interface CustomMapHexInput {
+	col: number;
+	row: number;
+	terrain: Terrain;
+	production: boolean;
+	cityName?: string;
+}
+
+export interface CustomMapEdgeInput {
+	a: [number, number]; // [col, row]
+	b: [number, number]; // [col, row]
+}
+
+export function buildCustomMap(
+	hexes: CustomMapHexInput[],
+	riverEdges: CustomMapEdgeInput[] = [],
+	wallEdges: CustomMapEdgeInput[] = [],
+	// Seeds the cosmetic RNG (island/city names). Rebuilding the same map from
+	// its packed seed (see decodeCustomMapSeed) passes the seed here so replays
+	// get the same names; the editor omits it for fresh variety per build.
+	nameSeed?: string
+): GameMap {
+	const { width, height, s } = CUSTOM_MAP_CANVAS;
+	const rnd = mulberry32(hashSeedToInt(nameSeed ?? `custom-${Date.now()}-${Math.floor(Math.random() * 1e9)}`));
+
+	const byKey = new Map<string, CustomMapHexInput>();
+	for (const h of hexes) byKey.set(hexKey(h.col, h.row), h);
+
+	// Islands = connected components of the painted hexes (plain hex adjacency).
+	const islandOf = new Map<string, number>();
+	let nextIsland = 0;
+	for (const h of hexes) {
+		const startKey = hexKey(h.col, h.row);
+		if (islandOf.has(startKey)) continue;
+		const compId = nextIsland++;
+		const stack = [startKey];
+		islandOf.set(startKey, compId);
+		while (stack.length) {
+			const cur = stack.pop()!;
+			const [c, r] = cur.split(',').map(Number);
+			for (const [nc, nr] of hexNeighbors(c, r)) {
+				const nk = hexKey(nc, nr);
+				if (byKey.has(nk) && !islandOf.has(nk)) {
+					islandOf.set(nk, compId);
+					stack.push(nk);
+				}
+			}
+		}
+	}
+
+	const w = Math.sqrt(3) * s;
+	const rowH = 1.5 * s;
+	const hexCenter = (col: number, row: number): [number, number] => [
+		w * col + (row % 2) * (w / 2) + w / 2,
+		rowH * row + s
+	];
+
+	const grids: Grid[] = [];
+	const hexToGrid = new Map<string, number>();
+	const islandHexKeys = new Map<number, string[]>();
+	for (const h of hexes) {
+		const k = hexKey(h.col, h.row);
+		const [x, y] = hexCenter(h.col, h.row);
+		const gridId = grids.length;
+		hexToGrid.set(k, gridId);
+		const islandIdx = islandOf.get(k)!;
+		grids.push({
+			id: gridId,
+			island: islandIdx + 1, // island ids are 1-based, matching generateMap
+			x, y,
+			production: h.production,
+			terrain: h.terrain,
+			cityName: h.cityName,
+			cell: hexPolygon(x, y, s)
+		});
+		if (!islandHexKeys.has(islandIdx)) islandHexKeys.set(islandIdx, []);
+		islandHexKeys.get(islandIdx)!.push(k);
+	}
+
+	const namePool = shuffle(ISLAND_NAMES, rnd);
+	const islands: Island[] = [];
+	for (let i = 0; i < nextIsland; i++) {
+		const keys = islandHexKeys.get(i) ?? [];
+		if (keys.length === 0) continue;
+		const memberGrids = keys.map((k) => grids[hexToGrid.get(k)!]);
+		let sx = 0, sy = 0;
+		for (const g of memberGrids) { sx += g.x; sy += g.y; }
+		const cx = sx / memberGrids.length;
+		const cy = sy / memberGrids.length;
+		const value = Math.max(2, Math.min(15, Math.round(memberGrids.length * 0.65)));
+		islands.push({
+			id: i + 1,
+			name: namePool[i % namePool.length] ?? `Isle ${i + 1}`,
+			value,
+			center: [cx, cy],
+			labelPos: [cx, cy],
+			shape: unionHexes(memberGrids.map((g) => ({ poly: g.cell })))
+		});
+	}
+
+	// Adjacency: within-island by hex neighborship.
+	const adj: number[][] = grids.map(() => []);
+	for (const [key, gid] of hexToGrid) {
+		const [c, r] = key.split(',').map(Number);
+		for (const [nc, nr] of hexNeighbors(c, r)) {
+			const nk = hexKey(nc, nr);
+			const ngid = hexToGrid.get(nk);
+			if (ngid == null) continue;
+			if (grids[gid].island !== grids[ngid].island) continue;
+			if (gid < ngid) { adj[gid].push(ngid); adj[ngid].push(gid); }
+		}
+	}
+
+	const seaLanes = computeSeaLanes(islands, grids, adj);
+
+	const toGridPair = (e: CustomMapEdgeInput): [number, number] | null => {
+		const a = hexToGrid.get(hexKey(e.a[0], e.a[1]));
+		const b = hexToGrid.get(hexKey(e.b[0], e.b[1]));
+		if (a == null || b == null || a === b) return null;
+		return a < b ? [a, b] : [b, a];
+	};
+	const rivers = riverEdges.map(toGridPair).filter((e): e is [number, number] => e != null);
+	const walls = wallEdges.map(toGridPair).filter((e): e is [number, number] => e != null);
+
+	assignCityNames(grids, rnd);
+	computeIslandLabelPositions(islands, grids);
+
+	let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity;
+	for (const g of grids) {
+		for (const [px, py] of g.cell) {
+			if (px < minX) minX = px;
+			if (px > maxX) maxX = px;
+			if (py < minY) minY = py;
+			if (py > maxY) maxY = py;
+		}
+	}
+	if (!isFinite(minX)) { minX = 0; minY = 0; maxX = width; maxY = height; }
+	const waterMargin = Math.max(60, s * 1.5);
+	const vbX = Math.max(0, minX - waterMargin);
+	const vbY = Math.max(0, minY - waterMargin);
+	const vbW = Math.min(width, maxX + waterMargin) - vbX;
+	const vbH = Math.min(height, maxY + waterMargin) - vbY;
+
+	return {
+		islands,
+		grids,
+		adj,
+		seaLanes,
+		waterHexes: [],
+		waterFeatures: [],
+		rivers,
+		walls,
+		tunnels: [],
+		width,
+		height,
+		viewBox: { x: vbX, y: vbY, w: vbW, h: vbH },
+		winThreshold: Math.min(30, Math.floor(grids.length * 0.66))
+	};
+}
+
+// -----------------------------------------------------------------------------
+// Packed custom-map seed.
+//
+// A custom map's "seed" is the map itself: `CUSTOM-` followed by one character
+// per canvas cell (RLE-compressed) plus dot-separated sections for cities,
+// rivers, walls, starting placements, and difficulty/armies. That makes a
+// custom game's seed exactly as powerful as a procedural one — pasting it into
+// the New Game menu, "Play Same Map" on the recap page, and the recap page's
+// map rebuild all work from the seed string alone, with nothing else stored.
+//
+// Format (case-insensitive; canonical form is uppercase like all seeds):
+//   CUSTOM-<terrain>[.C<cities>][.R<rivers>][.W<walls>][.G<placements>][.S<rules>]
+//   terrain     one char per cell in buildHexGrid order, run-length encoded as
+//               [count]char (count omitted for 1): N none, P plain, M mountain,
+//               F forest, S marsh, D desert. Trailing N-runs are dropped.
+//   cities      2-char base36 cell index per production hex.
+//   rivers/walls  4 chars per edge: two 2-char base36 cell indices, low first.
+//   placements  5 chars each: cell (2, base36) + player index (1, 0-3) +
+//               starting armies (2, base36).
+//   rules       difficulty (1 digit) + startingArmies (2, base36).
+// -----------------------------------------------------------------------------
+
+const TERRAIN_TO_CHAR: Record<Terrain, string> = {
+	plain: 'p',
+	mountain: 'm',
+	forest: 'f',
+	marsh: 's',
+	desert: 'd'
+};
+const CHAR_TO_TERRAIN: Record<string, Terrain> = Object.fromEntries(
+	Object.entries(TERRAIN_TO_CHAR).map(([t, c]) => [c, t as Terrain])
+);
+
+/** One starting placement inside the packed seed. `grid` indexes the decoded
+ *  `hexes` array (== buildCustomMap's output grid id); `playerIndex` indexes
+ *  game.ts's PLAYERS (map.ts deliberately doesn't know the Player type). */
+export interface CustomSeedPlacement {
+	grid: number;
+	playerIndex: number;
+	armies: number;
+}
+
+export interface DecodedCustomMapSeed {
+	hexes: CustomMapHexInput[];
+	riverEdges: CustomMapEdgeInput[];
+	wallEdges: CustomMapEdgeInput[];
+	placements: CustomSeedPlacement[];
+	difficulty: number;
+	startingArmies: number;
+}
+
+const b36 = (n: number) => n.toString(36).padStart(2, '0');
+const clampArmies = (n: number) => Math.max(1, Math.min(1295, Math.round(n))); // 1295 = 'zz'
+
+/** buildHexGrid cell index of a grid, recovered from its center coordinates
+ *  (buildCustomMap places centers on the exact buildHexGrid lattice). */
+function cellIndexOfGrid(g: { x: number; y: number }): number {
+	const { s } = CUSTOM_MAP_CANVAS;
+	const w = Math.sqrt(3) * s;
+	const row = Math.round((g.y - s) / (1.5 * s));
+	const col = Math.round((g.x - w / 2 - (row % 2) * (w / 2)) / w);
+	return row * CUSTOM_COLS + col;
+}
+
+/** Packs a custom map + its starting placements + rules into a seed string.
+ *  Canonical (sections and entries sorted), so decode → re-encode round-trips
+ *  to the identical string. Call BEFORE anything mutates the map (capital
+ *  promotion flips `production` on a hex — see game.ts's startGameFromMap). */
+export function encodeCustomMapSeed(
+	map: GameMap,
+	placements: CustomSeedPlacement[],
+	difficulty: number,
+	startingArmies: number
+): string {
+	const cellOf = map.grids.map(cellIndexOfGrid);
+	const cells: string[] = new Array(CUSTOM_COLS * CUSTOM_ROWS).fill('n');
+	const cities: number[] = [];
+	for (const g of map.grids) {
+		cells[cellOf[g.id]] = TERRAIN_TO_CHAR[g.terrain];
+		if (g.production) cities.push(cellOf[g.id]);
+	}
+
+	let last = cells.length - 1;
+	while (last >= 0 && cells[last] === 'n') last--;
+	let terrain = '';
+	for (let i = 0; i <= last; ) {
+		let j = i;
+		while (j <= last && cells[j] === cells[i]) j++;
+		terrain += (j - i > 1 ? String(j - i) : '') + cells[i];
+		i = j;
+	}
+
+	const edgeSection = (edges: [number, number][]) =>
+		edges
+			.map(([a, b]) => {
+				const [lo, hi] = cellOf[a] < cellOf[b] ? [cellOf[a], cellOf[b]] : [cellOf[b], cellOf[a]];
+				return b36(lo) + b36(hi);
+			})
+			.sort()
+			.join('');
+
+	let out = terrain;
+	if (cities.length > 0) out += '.c' + cities.sort((a, b) => a - b).map(b36).join('');
+	const rivers = edgeSection(map.rivers);
+	if (rivers) out += '.r' + rivers;
+	const walls = edgeSection(map.walls ?? []);
+	if (walls) out += '.w' + walls;
+	if (placements.length > 0) {
+		out +=
+			'.g' +
+			placements
+				.map((p) => b36(cellOf[p.grid]) + String(Math.max(0, Math.min(3, p.playerIndex))) + b36(clampArmies(p.armies)))
+				.sort()
+				.join('');
+	}
+	out += '.s' + String(Math.max(1, Math.min(9, Math.round(difficulty)))) + b36(clampArmies(startingArmies));
+	return (CUSTOM_SEED_PREFIX + out).toUpperCase();
+}
+
+/** Parses a packed custom seed back into buildCustomMap inputs + placements
+ *  + rules, or null if it isn't a well-formed custom seed. */
+export function decodeCustomMapSeed(seed: string): DecodedCustomMapSeed | null {
+	const norm = seed.trim().toLowerCase();
+	const prefix = CUSTOM_SEED_PREFIX.toLowerCase();
+	if (!norm.startsWith(prefix)) return null;
+	const [terrainPart, ...sections] = norm.slice(prefix.length).split('.');
+
+	const totalCells = CUSTOM_COLS * CUSTOM_ROWS;
+	const cellTerrain: (Terrain | null)[] = new Array(totalCells).fill(null);
+	let cell = 0;
+	for (let i = 0; i < terrainPart.length; ) {
+		let count = 0;
+		while (i < terrainPart.length && terrainPart[i] >= '0' && terrainPart[i] <= '9') {
+			count = count * 10 + (terrainPart.charCodeAt(i) - 48);
+			i++;
+		}
+		if (count === 0) count = 1;
+		const ch = terrainPart[i++];
+		if (ch === undefined || cell + count > totalCells) return null;
+		if (ch === 'n') {
+			cell += count;
+			continue;
+		}
+		const t = CHAR_TO_TERRAIN[ch];
+		if (!t) return null;
+		for (let k = 0; k < count; k++) cellTerrain[cell++] = t;
+	}
+
+	const cities = new Set<number>();
+	const riverCells: [number, number][] = [];
+	const wallCells: [number, number][] = [];
+	const placementCells: { cell: number; playerIndex: number; armies: number }[] = [];
+	let difficulty = 2;
+	let startingArmies = 3;
+
+	const parse36 = (str: string, at: number): number => parseInt(str.slice(at, at + 2), 36);
+	for (const sec of sections) {
+		const tag = sec[0];
+		const rest = sec.slice(1);
+		if (tag === 'c') {
+			if (rest.length % 2 !== 0) return null;
+			for (let i = 0; i < rest.length; i += 2) {
+				const idx = parse36(rest, i);
+				if (!Number.isFinite(idx)) return null;
+				cities.add(idx);
+			}
+		} else if (tag === 'r' || tag === 'w') {
+			if (rest.length % 4 !== 0) return null;
+			const list = tag === 'r' ? riverCells : wallCells;
+			for (let i = 0; i < rest.length; i += 4) {
+				const a = parse36(rest, i);
+				const b = parse36(rest, i + 2);
+				if (!Number.isFinite(a) || !Number.isFinite(b)) return null;
+				list.push([a, b]);
+			}
+		} else if (tag === 'g') {
+			if (rest.length % 5 !== 0) return null;
+			for (let i = 0; i < rest.length; i += 5) {
+				const c = parse36(rest, i);
+				const playerIndex = rest.charCodeAt(i + 2) - 48;
+				const armies = parse36(rest, i + 3);
+				if (!Number.isFinite(c) || playerIndex < 0 || playerIndex > 3 || !Number.isFinite(armies)) return null;
+				placementCells.push({ cell: c, playerIndex, armies: Math.max(1, armies) });
+			}
+		} else if (tag === 's') {
+			if (rest.length !== 3) return null;
+			const d = rest.charCodeAt(0) - 48;
+			const a = parse36(rest, 1);
+			if (d < 1 || d > 9 || !Number.isFinite(a)) return null;
+			difficulty = d;
+			startingArmies = Math.max(1, a);
+		} else {
+			return null; // unknown section: refuse rather than silently drop data
+		}
+	}
+
+	const hexes: CustomMapHexInput[] = [];
+	const hexIdxOfCell = new Map<number, number>();
+	for (let idx = 0; idx < totalCells; idx++) {
+		const t = cellTerrain[idx];
+		if (!t) continue;
+		hexIdxOfCell.set(idx, hexes.length);
+		hexes.push({
+			col: idx % CUSTOM_COLS,
+			row: Math.floor(idx / CUSTOM_COLS),
+			terrain: t,
+			production: cities.has(idx)
+		});
+	}
+	if (hexes.length === 0) return null;
+
+	const colRow = (idx: number): [number, number] => [idx % CUSTOM_COLS, Math.floor(idx / CUSTOM_COLS)];
+	const toEdges = (pairs: [number, number][]): CustomMapEdgeInput[] =>
+		pairs
+			.filter(([a, b]) => hexIdxOfCell.has(a) && hexIdxOfCell.has(b))
+			.map(([a, b]) => ({ a: colRow(a), b: colRow(b) }));
+
+	return {
+		hexes,
+		riverEdges: toEdges(riverCells),
+		wallEdges: toEdges(wallCells),
+		placements: placementCells
+			.filter((p) => hexIdxOfCell.has(p.cell))
+			.map((p) => ({ grid: hexIdxOfCell.get(p.cell)!, playerIndex: p.playerIndex, armies: p.armies })),
+		difficulty,
+		startingArmies
+	};
+}
+
+/** Rebuilds the exact GameMap a packed custom seed describes, or null if the
+ *  seed doesn't decode. The custom-seed counterpart of generateMap(). */
+export function buildCustomMapFromSeed(seed: string): GameMap | null {
+	const decoded = decodeCustomMapSeed(seed);
+	if (!decoded) return null;
+	return buildCustomMap(decoded.hexes, decoded.riverEdges, decoded.wallEdges, seed.trim().toUpperCase());
 }
 
 // Hex distance in axial coords derived from odd-r offsets.

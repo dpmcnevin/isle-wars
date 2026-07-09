@@ -582,9 +582,10 @@
 
 	// Builds the same recap payload the shareable /recap page decodes — used
 	// to redirect there the moment a game ends (see the $effect below). The
-	// map itself isn't embedded (the recap page regenerates it from the
-	// seed), so conquests/edgeEvents/final owners+edges are what's needed to
-	// replay the turning-point compare view against that regenerated map.
+	// map itself isn't embedded (the recap page rebuilds it from the seed —
+	// generateMap for procedural games, decodeCustomMapSeed for editor maps),
+	// so conquests/edgeEvents/final owners+edges are what's needed to
+	// replay the turning-point compare view against that rebuilt map.
 	async function recapUrl(): Promise<string> {
 		const recap = buildRecap({
 			seed: $game.seed,
@@ -1027,22 +1028,31 @@
 	{#if showMenu}
 		<section class="menu">
 			<h2>New Game</h2>
-			<label>Difficulty
-				<select bind:value={difficulty}>
-					<option value={1}>1 — Easy</option>
-					<option value={2}>2 — Normal (default)</option>
-					<option value={3}>3 — Hard</option>
-					<option value={4}>4 — Hardest</option>
-				</select>
-			</label>
-			<label>Starting armies per country
-				<input type="number" min="1" max="10" bind:value={startingArmies} />
-			</label>
-			<label>Map seed <span class="menu-hint">(optional — same seed = same game & settings)</span>
-				<input type="text" placeholder="random" style="text-transform: uppercase" bind:value={seedInput} />
-			</label>
-			<button onclick={startNewGame}>Start</button>
-			<span class="share-label">Current map's seed: <strong>{$game.seed}</strong></span>
+			<div class="menu-fields">
+				<label>
+					<span class="field-label">Difficulty</span>
+					<select bind:value={difficulty}>
+						<option value={1}>1 — Easy</option>
+						<option value={2}>2 — Normal (default)</option>
+						<option value={3}>3 — Hard</option>
+						<option value={4}>4 — Hardest</option>
+					</select>
+				</label>
+				<label>
+					<span class="field-label">Starting armies per country</span>
+					<input type="number" min="1" max="10" bind:value={startingArmies} />
+				</label>
+				<label>
+					<span class="field-label">Map seed</span>
+					<input type="text" placeholder="random" style="text-transform: uppercase" bind:value={seedInput} />
+					<span class="menu-hint">optional — same seed = same game &amp; settings</span>
+				</label>
+			</div>
+			<div class="menu-actions">
+				<button class="primary" onclick={startNewGame}>Start</button>
+				<button class="ghost" onclick={() => goto('/editor')}>Custom Map…</button>
+				<span class="share-label">Current map's seed: <strong>{$game.seed}</strong></span>
+			</div>
 		</section>
 	{/if}
 
@@ -1851,18 +1861,58 @@
 	}
 
 	.menu {
-		padding: 1rem;
-		border: 1px solid #1a3040;
-		background: #0f2035;
+		padding: 1.25rem 1.5rem;
+		border: 2px solid #2a5a8a;
+		border-radius: 12px;
+		background: linear-gradient(135deg, #10304a, #0a2540);
 		margin-bottom: 0.75rem;
+		box-shadow: 0 0 20px rgba(74, 159, 207, 0.2);
+	}
+	.menu h2 {
+		margin: 0 0 1rem;
+		color: #e0f0ff;
+		font-size: 1.15rem;
+	}
+	.menu-fields {
 		display: flex;
-		gap: 1rem;
-		align-items: end;
+		gap: 2rem;
+		flex-wrap: wrap;
+		margin-bottom: 1.15rem;
+	}
+	.menu label {
+		display: flex;
+		flex-direction: column;
+		gap: 0.4rem;
+		font-size: 0.85rem;
+		color: #a8bfd4;
+	}
+	.menu input, .menu select {
+		width: 100%;
+		min-width: 150px;
+		border-radius: 6px;
+		padding: 0.4rem 0.6rem;
+		border-color: #2a5a8a;
+	}
+	.menu-hint { font-weight: normal; color: #6a80a0; font-size: 0.72rem; }
+	.menu-actions {
+		display: flex;
+		align-items: center;
+		gap: 0.75rem;
+		padding-top: 1rem;
+		border-top: 1px solid rgba(127, 207, 255, 0.15);
 		flex-wrap: wrap;
 	}
-	.menu label { display: flex; flex-direction: column; gap: 0.25rem; }
-	.menu-hint { font-weight: normal; color: #7a8fa8; font-size: 0.75rem; }
-	.share-label { font-size: 0.85rem; color: #b8c8da; }
+	.menu-actions button {
+		border-radius: 6px;
+		padding: 0.5rem 1.1rem;
+	}
+	button.ghost {
+		background: transparent;
+		border: 1px solid #4a9fcf;
+		color: #7fcfff;
+	}
+	button.ghost:hover:not(:disabled) { background: rgba(74, 159, 207, 0.15); }
+	.share-label { font-size: 0.8rem; color: #7a8fa8; margin-left: auto; }
 	.share-label strong { font-family: monospace; color: #ffe14a; }
 
 	.msg {

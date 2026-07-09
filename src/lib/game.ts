@@ -1,5 +1,5 @@
 import { writable, derived, get } from 'svelte/store';
-import { generateMap, crossesRiver, wallBetween, wallSegmentsFor, shuffle, encodeSeed, decodeSeedSettings, hashSeedToInt, type GameMap, type Terrain } from './map';
+import { generateMap, crossesRiver, wallBetween, wallSegmentsFor, shuffle, encodeSeed, decodeSeedSettings, hashSeedToInt, isCustomMapSeed, encodeCustomMapSeed, decodeCustomMapSeed, buildCustomMap, type GameMap, type Terrain } from './map';
 // The card registry lives in ./cards (this module and it import each other; see
 // the note in cards.ts for why that cycle is safe). Values used by the dispatch
 // below are imported here; the public card API is re-exported near CardType so
@@ -744,6 +744,25 @@ function emptyAlive(): Record<Player, boolean> {
  * human player starts with; startingArmies is the initial armies per grid.
  */
 export function startGame(difficulty = 2, startingArmies = 3, seed?: string): GameState {
+	// A CUSTOM- seed IS the map (see map.ts's packed custom-seed format) —
+	// terrain, cities, rivers/walls, starting placements, and rules all decode
+	// from the string, so pasting one reproduces the exact editor game the way
+	// a procedural seed reproduces a generated one. An undecodable CUSTOM-
+	// seed (truncated paste, future format) can't fall back to generateMap —
+	// that would produce a garbage board — so it starts a fresh random game.
+	if (seed && isCustomMapSeed(seed)) {
+		const decoded = decodeCustomMapSeed(seed);
+		if (decoded) {
+			const map = buildCustomMap(decoded.hexes, decoded.riverEdges, decoded.wallEdges, seed.trim().toUpperCase());
+			const placements = decoded.placements.map((p) => ({
+				grid: p.grid,
+				owner: PLAYERS[p.playerIndex],
+				armies: p.armies
+			}));
+			return startGameFromMap(map, placements, decoded.difficulty, decoded.startingArmies);
+		}
+		seed = undefined;
+	}
 	// A full seed string (see map.ts) carries its own difficulty/startingArmies
 	// and debug settings (die sides, starter cards, auto-play) packed into its
 	// trailing characters — typing or sharing just the seed reproduces the
@@ -817,9 +836,36 @@ export function startGame(difficulty = 2, startingArmies = 3, seed?: string): Ga
 	}
 
 	const startPlayer: Player = PLAYERS[Math.floor(rand() * 4)];
+	return finishGameSetup(
+		map,
+		states,
+		capitals,
+		startPlayer,
+		difficulty,
+		startingArmies,
+		s,
+		`New game (seed ${s}, difficulty ${difficulty}). ${PLAYER_NAMES[startPlayer]} plays first.`
+	);
+}
+
+/** Shared tail of game setup: wraps a fully-built map + initial ownership
+ *  into a playable GameState and runs the first turn's begin-turn hook.
+ *  Used by both `startGame` (procedural maps) and `startGameFromMap`
+ *  (custom maps from the map editor) so the two producers can never drift
+ *  on what a "freshly started game" looks like. */
+function finishGameSetup(
+	map: GameMap,
+	states: GridState[],
+	capitals: Partial<Record<Player, number>>,
+	startPlayer: Player,
+	difficulty: number,
+	startingArmies: number,
+	seed: string,
+	introLogText: string
+): GameState {
 	const state: GameState = {
 		map,
-		seed: s,
+		seed,
 		difficulty,
 		startingArmies,
 		states,
@@ -846,14 +892,7 @@ export function startGame(difficulty = 2, startingArmies = 3, seed?: string): Ga
 		cardPlayedThisTurn: false,
 		usedMarshHexes: [],
 		gameStarted: false,
-		log: [
-			{
-				turn: 1,
-				player: null,
-				text: `New game (seed ${s}, difficulty ${difficulty}). ${PLAYER_NAMES[startPlayer]} plays first.`,
-				kind: 'info'
-			}
-		],
+		log: [{ turn: 1, player: null, text: introLogText, kind: 'info' }],
 		message: '',
 		winner: null,
 		history: [],
@@ -869,6 +908,83 @@ export function startGame(difficulty = 2, startingArmies = 3, seed?: string): Ga
 	const ready = beginTurn(state);
 	devLogGameStart(ready);
 	return ready;
+}
+
+/** One player's starting ownership of a grid on a custom map, as assigned in
+ *  the map editor. */
+export interface CustomMapPlacement {
+	grid: number;
+	owner: Player;
+	armies: number;
+}
+
+/**
+ * Start a game on a hand-built map (from the map editor's `buildCustomMap`)
+ * instead of a procedurally generated one. `placements` gives each hex's
+ * starting owner/armies; any grid not covered stays neutral. Capitals are
+ * auto-assigned the same way `startGame` does: each player's best production
+ * hex, or a random owned hex promoted to one if they have no city.
+ */
+export function startGameFromMap(
+	map: GameMap,
+	placements: CustomMapPlacement[],
+	difficulty = 2,
+	startingArmies = 3
+): GameState {
+	const states: GridState[] = map.grids.map(() => ({ owner: null, armies: 0 }));
+	for (const p of placements) {
+		if (p.grid < 0 || p.grid >= states.length) continue;
+		states[p.grid] = { owner: p.owner, armies: Math.max(1, Math.round(p.armies)) };
+	}
+
+	// The seed IS the map: pack terrain/cities/edges/placements/rules into a
+	// CUSTOM- string (see map.ts) so sharing or re-pasting this game's seed
+	// reproduces it exactly, same as a procedural seed. Encoded BEFORE the
+	// capital promotion below mutates `production`, so the seed always holds
+	// the editor's own map — replaying it re-runs the same (seed-derived)
+	// promotion and lands on the same capitals.
+	const seedLabel = encodeCustomMapSeed(
+		map,
+		placements.map((p) => ({ grid: p.grid, playerIndex: Math.max(0, PLAYERS.indexOf(p.owner)), armies: p.armies })),
+		difficulty,
+		startingArmies
+	);
+	const rand = mulberry32(hashSeedToInt(seedLabel) ^ 0xa5a5a5);
+	const capitals: Partial<Record<Player, number>> = {};
+	for (const p of PLAYERS) {
+		const owned = map.grids.filter((g) => states[g.id].owner === p);
+		const cities = owned.filter((g) => g.production);
+		const pool = cities.length > 0 ? cities : owned;
+		if (pool.length === 0) continue; // player has no hexes on this map
+		const cap = pool[Math.floor(rand() * pool.length)];
+		if (!cap.production) {
+			cap.production = true;
+			cap.cityName = `${PLAYER_NAMES[p]} Capital`;
+		}
+		capitals[p] = cap.id;
+	}
+
+	const startPlayer: Player = PLAYERS[Math.floor(rand() * 4)];
+	return finishGameSetup(
+		map,
+		states,
+		capitals,
+		startPlayer,
+		difficulty,
+		startingArmies,
+		seedLabel,
+		`New game on a custom map (difficulty ${difficulty}). ${PLAYER_NAMES[startPlayer]} plays first.`
+	);
+}
+
+/** Sets the `game` store to a fresh game on a custom map. See `startGameFromMap`. */
+export function newGameFromMap(
+	map: GameMap,
+	placements: CustomMapPlacement[],
+	difficulty = 2,
+	startingArmies = 3
+) {
+	game.set(startGameFromMap(map, placements, difficulty, startingArmies));
 }
 
 function mulberry32(a: number) {
