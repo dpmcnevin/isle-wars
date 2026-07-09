@@ -7,6 +7,7 @@
 	interface EdgeSnapshot {
 		walls: [number, number][];
 		seaLanes: [number, number][];
+		tunnels?: [number, number][];
 	}
 
 	interface StatsSnapshot {
@@ -114,7 +115,7 @@
 		<div class="tp-compare">
 			<div class="tp-compare-pane">
 				<div class="tp-compare-label">Before (turn {turn - 1})</div>
-				<TpMiniMap {map} owners={ownersBefore} ghostGrids={changedGrids} edgeWalls={edgesBefore.walls} edgeSeaLanes={edgesBefore.seaLanes} {createdLaneKeys} />
+				<TpMiniMap {map} owners={ownersBefore} ghostGrids={changedGrids} edgeWalls={edgesBefore.walls} edgeSeaLanes={edgesBefore.seaLanes} edgeTunnels={edgesBefore.tunnels} {createdLaneKeys} />
 			</div>
 			<div class="tp-compare-arrow" aria-hidden="true">
 				<svg viewBox="0 0 40 24" width="40" height="24">
@@ -124,7 +125,7 @@
 			</div>
 			<div class="tp-compare-pane">
 				<div class="tp-compare-label">After (turn {turn})</div>
-				<TpMiniMap {map} owners={ownersAfter} {paths} {changedGrids} dimUnchanged edgeWalls={edgesAfter.walls} edgeSeaLanes={edgesAfter.seaLanes} {createdLaneKeys} {capturedFrom} {armyLabels} />
+				<TpMiniMap {map} owners={ownersAfter} {paths} {changedGrids} dimUnchanged edgeWalls={edgesAfter.walls} edgeSeaLanes={edgesAfter.seaLanes} edgeTunnels={edgesAfter.tunnels} {createdLaneKeys} {capturedFrom} {armyLabels} />
 			</div>
 		</div>
 		<div class="tp-modal-footer">

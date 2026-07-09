@@ -45,7 +45,8 @@
 		canPlayCardNow,
 		type Player,
 		type CardType,
-		type GameState
+		type GameState,
+		type DebugSettings
 	} from '$lib/game';
 	import { wallBetween, polygonPoints, wallSegmentsFor, seaLanePath, type GameMap } from '$lib/map';
 	import { runAiTurn, setValueNetPlayers } from '$lib/ai';
@@ -599,6 +600,7 @@
 			hexArmyDeltas: $game.hexArmyDeltas,
 			finalWalls: $game.map.walls ?? [],
 			finalSeaLanes: $game.map.seaLanes,
+			finalTunnels: $game.map.tunnels ?? [],
 			terrainEvents: $game.terrainEvents ?? []
 		});
 		return `${base}/recap/#d=${await encodeRecap(recap)}`;
@@ -775,6 +777,24 @@
 	let debugStarterCards = $state(false);
 	let debugAutoPlay = $state(false);
 	let debugDieSides = $state(10);
+	// The "free card each turn" debug checkboxes — barrier cards (build/destroy
+	// pairs for walls, rivers, tunnels, sea lanes) plus Water Invasion. Table-
+	// driven so adding another checkbox is one row here, not a new pair of
+	// state var + toggle function.
+	const TURN_CARD_DEBUG_OPTIONS: { key: keyof DebugSettings; card: CardType; label: string }[] = [
+		{ key: 'turnCardTunnel', card: 'tunnel', label: 'Tunnel' },
+		{ key: 'turnCardInvasion', card: 'invasion', label: 'Water Invasion' },
+		{ key: 'turnCardCanal', card: 'canal', label: 'Canal' },
+		{ key: 'turnCardWall', card: 'wall', label: 'Wall' },
+		{ key: 'turnCardBreach', card: 'breach', label: 'Breach' },
+		{ key: 'turnCardLevee', card: 'levee', label: 'Levee' },
+		{ key: 'turnCardCollapse', card: 'collapse', label: 'Collapse' },
+		{ key: 'turnCardFerry', card: 'ferry', label: 'Ferry Route' },
+		{ key: 'turnCardStorm', card: 'storm', label: 'Storm' }
+	];
+	let debugTurnCards = $state<Record<string, boolean>>(
+		Object.fromEntries(TURN_CARD_DEBUG_OPTIONS.map((o) => [o.key, false]))
+	);
 	// Not part of DebugSettings/the shareable seed (those are about map
 	// generation + game rules) — this is a pure AI-implementation switch, so
 	// it just resets to the default (on) every reload rather than round-
@@ -787,6 +807,7 @@
 		debugStarterCards = d.starterCards;
 		debugAutoPlay = d.autoPlay;
 		debugDieSides = d.dieSides;
+		for (const opt of TURN_CARD_DEBUG_OPTIONS) debugTurnCards[opt.key] = d[opt.key] as boolean;
 	}
 
 	function toggleDebugUseValueNet() {
@@ -816,6 +837,16 @@
 		// If autoplay was just enabled and we're waiting on the start gate,
 		// go ahead and start so the AI can run.
 		if (debugAutoPlay && !$game.gameStarted) startGamePlaying();
+	}
+
+	function toggleDebugTurnCard(key: keyof DebugSettings) {
+		debugTurnCards[key] = !debugTurnCards[key];
+		updateDebugSettings({ [key]: debugTurnCards[key] });
+	}
+
+	function setAllDebugTurnCards(on: boolean) {
+		for (const opt of TURN_CARD_DEBUG_OPTIONS) debugTurnCards[opt.key] = on;
+		updateDebugSettings(Object.fromEntries(TURN_CARD_DEBUG_OPTIONS.map((o) => [o.key, on])));
 	}
 
 	interface HexModifier { name: string; desc: string; }
@@ -1062,6 +1093,24 @@
 						<div class="toggle-desc">AI opponents use the trained value network for attacks/placement (~55% vs. the plain heuristic's ~25% in sims). Turn off to fall back to the original hand-tuned heuristic.</div>
 					</div>
 				</label>
+				<div class="toggle-card">
+					<div class="toggle-text" style="flex:1">
+						<div class="toggle-title">Free card each turn</div>
+						<div class="toggle-desc">Every player draws the checked card type(s) at the start of their turn, on top of their normal turn-end draw. Handy for testing specific cards without waiting for the RNG.</div>
+						<div class="turn-card-checks">
+							{#each TURN_CARD_DEBUG_OPTIONS as opt (opt.key)}
+								<label class="turn-card-check" class:on={debugTurnCards[opt.key]}>
+									<input type="checkbox" checked={debugTurnCards[opt.key]} onchange={() => toggleDebugTurnCard(opt.key)} />
+									{opt.label}
+								</label>
+							{/each}
+						</div>
+						<div class="turn-card-actions">
+							<button class="link-btn" onclick={() => setAllDebugTurnCards(true)}>Select all</button>
+							<button class="link-btn" onclick={() => setAllDebugTurnCards(false)}>Select none</button>
+						</div>
+					</div>
+				</div>
 				<div class="toggle-card">
 					<div class="toggle-text" style="flex:1">
 						<div class="toggle-title">Base die sides</div>
@@ -2496,6 +2545,41 @@
 	.toggle-text { flex: 1; }
 	.toggle-title { color: #e0e0ea; font-weight: bold; font-size: 0.9rem; margin-bottom: 0.15rem; }
 	.toggle-desc { color: #8a8a95; font-size: 0.78rem; line-height: 1.35; }
+	.turn-card-checks {
+		display: flex;
+		flex-wrap: wrap;
+		gap: 0.5rem;
+		margin-top: 0.5rem;
+	}
+	.turn-card-check {
+		display: flex;
+		align-items: center;
+		gap: 0.35rem;
+		background: #1a1d26;
+		color: #cfd6e2;
+		border: 1px solid #33384a;
+		border-radius: 6px;
+		padding: 0.3rem 0.55rem;
+		font-size: 0.82rem;
+		cursor: pointer;
+	}
+	.turn-card-check:hover { border-color: #556; }
+	.turn-card-check.on { border-color: #ffbe3c; background: #2a2113; color: #ffdf87; }
+	.turn-card-actions {
+		display: flex;
+		gap: 0.75rem;
+		margin-top: 0.4rem;
+	}
+	.link-btn {
+		background: none;
+		border: none;
+		color: #8fb4ff;
+		font-size: 0.78rem;
+		cursor: pointer;
+		padding: 0;
+		text-decoration: underline;
+	}
+	.link-btn:hover { color: #b6cdff; }
 
 	.debug-footer {
 		margin-top: 0.65rem;

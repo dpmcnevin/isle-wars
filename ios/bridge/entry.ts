@@ -152,6 +152,7 @@ function withState<Args extends unknown[]>(fn: (...args: Args) => void) {
 			hexArmyDeltas: s.hexArmyDeltas,
 			finalWalls: s.map.walls ?? [],
 			finalSeaLanes: s.map.seaLanes,
+			finalTunnels: s.map.tunnels ?? [],
 			terrainEvents: s.terrainEvents ?? []
 		});
 		return JSON.stringify(recap);

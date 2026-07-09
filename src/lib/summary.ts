@@ -176,7 +176,7 @@ export interface OwnerReplayState {
 	conquests: ConquestEvent[];
 }
 export interface EdgeReplayState {
-	map: { walls?: [number, number][]; seaLanes: [number, number][] };
+	map: { walls?: [number, number][]; seaLanes: [number, number][]; tunnels?: [number, number][] };
 	edgeEvents?: EdgeEvent[];
 }
 export interface TerrainReplayState {
@@ -212,7 +212,7 @@ export function reconstructOwnersAtTurn(s: OwnerReplayState, turn: number): (Pla
 export function reconstructEdgesAtTurn(
 	s: EdgeReplayState,
 	turn: number
-): { walls: [number, number][]; seaLanes: [number, number][] } {
+): { walls: [number, number][]; seaLanes: [number, number][]; tunnels: [number, number][] } {
 	// Sort endpoints — map.seaLanes stores lanes in whatever from/to order the
 	// player picked (cards.ts pushes [from, to] as-is), but edgeEvents.edge
 	// is always normalized to sorted order (see pushEdgeEvent in game.ts).
@@ -223,16 +223,17 @@ export function reconstructEdgesAtTurn(
 	const edgeKey = ([a, b]: [number, number]) => (a < b ? `${a},${b}` : `${b},${a}`);
 	const walls = new Map((s.map.walls ?? []).map((e) => [edgeKey(e), e]));
 	const seaLanes = new Map(s.map.seaLanes.map((e) => [edgeKey(e), e]));
+	const tunnels = new Map((s.map.tunnels ?? []).map((e) => [edgeKey(e), e]));
 	const events = s.edgeEvents ?? [];
 	for (let i = events.length - 1; i >= 0; i--) {
 		const ev = events[i];
 		if (ev.turn <= turn) continue;
-		const target = ev.kind === 'wall' ? walls : seaLanes;
+		const target = ev.kind === 'wall' ? walls : ev.kind === 'tunnel' ? tunnels : seaLanes;
 		const key = edgeKey(ev.edge);
 		if (ev.added) target.delete(key); // built/opened after `turn` — wasn't there yet
 		else target.set(key, ev.edge); // torn down after `turn` — was still there
 	}
-	return { walls: [...walls.values()], seaLanes: [...seaLanes.values()] };
+	return { walls: [...walls.values()], seaLanes: [...seaLanes.values()], tunnels: [...tunnels.values()] };
 }
 
 /**

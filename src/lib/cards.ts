@@ -453,6 +453,32 @@ export const CARD_DEFS: CardDef[] = [
 		}
 	},
 	{
+		id: 'levee', label: 'Levee', icon: '🚜', kind: 'terrain', weight: 1,
+		when: 'Action phase',
+		desc: 'Drain a river on an edge of a hex you occupy, permanently removing the +1 river-crossing defender bonus there. You must own one side of the river.',
+		playableIn: ACTION_ONLY,
+		steps: [
+			{ phase: 'levee_from', prompt: 'Levee: click one of your territories that has a river on one of its edges.',
+				check: (s, id) => {
+					if (s.states[id].owner !== s.current) return 'Drain a river from a hex you occupy.';
+					return s.map.rivers.some(([a, b]) => a === id || b === id)
+						? null : 'None of this hex’s edges has a river.';
+				} },
+			{ phase: 'levee_to', prompt: 'Levee: click the hex on the other side of the river to drain it.',
+				check: (s, id, from) => {
+					if (id === from) return 'Pick the hex on the other side of the river.';
+					return crossesRiver(s.map, from as number, id) ? null : 'There is no river on that edge.';
+				} }
+		],
+		onResolve: (s, [from, to], idx) => {
+			const lo = Math.min(from, to), hi = Math.max(from, to);
+			s.map.rivers = s.map.rivers.filter(([a, b]) => !(a === lo && b === hi));
+			consumeCard(s, idx);
+			log(s, `${PLAYER_NAMES[s.current]} drained the river between ${gridLabel(s, from)} and ${gridLabel(s, to)}.`, 'card');
+			s.phase = 'action'; s.selectedFrom = null; s.selectedTo = null; s.message = 'Attack, move, or pass.';
+		}
+	},
+	{
 		id: 'spy', label: 'Spy', icon: '🕵', kind: 'attack', weight: 1,
 		when: 'Action phase',
 		desc: 'Steal a random card from the player holding the most cards. Not consumed if no opponent has any.',
@@ -563,10 +589,11 @@ export const CARD_DEFS: CardDef[] = [
 			const lo = Math.min(from, to), hi = Math.max(from, to);
 			if (!s.map.tunnels) s.map.tunnels = [];
 			s.map.tunnels.push([lo, hi]);
-			// Add the tunnel to adjacency so attacks AND moves can use it. No
-			// pushEdgeEvent: like the Canal, the recap mini-maps don't draw
-			// tunnels (they persist through save/load via the serialized map).
+			// Add the tunnel to adjacency so attacks AND moves can use it, and log
+			// an edge event so the recap can reconstruct/draw it per turn (a failed
+			// assault or a Collapse/Canal later pushes the matching 'removed').
 			s.map.adj[from].push(to); s.map.adj[to].push(from);
+			pushEdgeEvent(s, 'tunnel', from, to, true);
 			s.pendingTunnel = [from, to];
 			consumeCard(s, idx);
 			log(s, `${PLAYER_NAMES[s.current]} tunnelled from ${gridLabel(s, from)} to ${gridLabel(s, to)} — the attack bypasses all defenses.`, 'card');
@@ -588,6 +615,7 @@ export const CARD_DEFS: CardDef[] = [
 			s.map.tunnels = (s.map.tunnels ?? []).filter(([a, b]) => !(a === lo && b === hi));
 			s.map.adj[from] = s.map.adj[from].filter((n) => n !== to);
 			s.map.adj[to] = s.map.adj[to].filter((n) => n !== from);
+			pushEdgeEvent(s, 'tunnel', from, to, false);
 			consumeCard(s, idx);
 			log(s, `${PLAYER_NAMES[s.current]} collapsed the tunnel between ${gridLabel(s, from)} and ${gridLabel(s, to)}.`, 'card');
 			s.phase = 'action'; s.selectedFrom = null; s.selectedTo = null; s.message = 'Attack, move, or pass.';

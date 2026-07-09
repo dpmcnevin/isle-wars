@@ -217,7 +217,7 @@ export function seaLanePath(a: number, b: number, grids: Grid[]): string {
 // folds the whole string down deterministically for the map's own RNG.
 const SEED_CHARS = '0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZ';
 const RANDOM_PART_LEN = 8;
-const SETTINGS_PART_LEN = 4;
+const SETTINGS_PART_LEN = 6;
 export const SEED_LENGTH = RANDOM_PART_LEN + SETTINGS_PART_LEN;
 
 export interface SeedSettings {
@@ -226,6 +226,15 @@ export interface SeedSettings {
 	dieSides: number;
 	starterCards: boolean;
 	autoPlay: boolean;
+	turnCardTunnel: boolean;
+	turnCardInvasion: boolean;
+	turnCardCanal: boolean;
+	turnCardWall: boolean;
+	turnCardBreach: boolean;
+	turnCardLevee: boolean;
+	turnCardCollapse: boolean;
+	turnCardFerry: boolean;
+	turnCardStorm: boolean;
 }
 
 function clamp(n: number, lo: number, hi: number): number {
@@ -233,18 +242,23 @@ function clamp(n: number, lo: number, hi: number): number {
 }
 
 // 3 bits difficulty (0-7) + 5 bits armies (0-31) + 7 bits dieSides (0-127)
-// + 2 flag bits = 17 bits, comfortably under 36^4 (~1.68M) once base36-encoded.
+// + 11 flag bits = 26 bits, comfortably under 36^6 (~2.18B) once base36-encoded.
 function packSettings(s: SeedSettings): number {
 	const difficulty = clamp(s.difficulty, 0, 7);
 	const armies = clamp(s.startingArmies, 0, 31);
 	const dieSides = clamp(s.dieSides, 0, 127);
-	const flags = (s.autoPlay ? 1 : 0) | (s.starterCards ? 2 : 0);
-	return ((difficulty * 32 + armies) * 128 + dieSides) * 4 + flags;
+	const flags = (s.autoPlay ? 1 : 0) | (s.starterCards ? 2 : 0)
+		| (s.turnCardTunnel ? 4 : 0) | (s.turnCardInvasion ? 8 : 0)
+		| (s.turnCardCanal ? 16 : 0) | (s.turnCardWall ? 32 : 0)
+		| (s.turnCardBreach ? 64 : 0) | (s.turnCardLevee ? 128 : 0)
+		| (s.turnCardCollapse ? 256 : 0) | (s.turnCardFerry ? 512 : 0)
+		| (s.turnCardStorm ? 1024 : 0);
+	return ((difficulty * 32 + armies) * 128 + dieSides) * 2048 + flags;
 }
 
 function unpackSettings(packed: number): SeedSettings {
 	let v = packed;
-	const flags = v % 4; v = Math.floor(v / 4);
+	const flags = v % 2048; v = Math.floor(v / 2048);
 	const dieSides = v % 128; v = Math.floor(v / 128);
 	const startingArmies = v % 32; v = Math.floor(v / 32);
 	const difficulty = v % 8;
@@ -256,7 +270,16 @@ function unpackSettings(packed: number): SeedSettings {
 		startingArmies: clamp(startingArmies, 1, 20),
 		dieSides: clamp(dieSides, 2, 100),
 		autoPlay: !!(flags & 1),
-		starterCards: !!(flags & 2)
+		starterCards: !!(flags & 2),
+		turnCardTunnel: !!(flags & 4),
+		turnCardInvasion: !!(flags & 8),
+		turnCardCanal: !!(flags & 16),
+		turnCardWall: !!(flags & 32),
+		turnCardBreach: !!(flags & 64),
+		turnCardLevee: !!(flags & 128),
+		turnCardCollapse: !!(flags & 256),
+		turnCardFerry: !!(flags & 512),
+		turnCardStorm: !!(flags & 1024)
 	};
 }
 
@@ -586,7 +609,16 @@ const DEFAULT_SEED_SETTINGS: SeedSettings = {
 	startingArmies: 3,
 	dieSides: 10,
 	starterCards: false,
-	autoPlay: false
+	autoPlay: false,
+	turnCardTunnel: false,
+	turnCardInvasion: false,
+	turnCardCanal: false,
+	turnCardWall: false,
+	turnCardBreach: false,
+	turnCardLevee: false,
+	turnCardCollapse: false,
+	turnCardFerry: false,
+	turnCardStorm: false
 };
 
 export function generateMap(seed: string = encodeSeed(DEFAULT_SEED_SETTINGS)): GameMap {

@@ -43,6 +43,7 @@
 		dimUnchanged = false,
 		edgeWalls,
 		edgeSeaLanes,
+		edgeTunnels = [],
 		createdLaneKeys = new Set<string>(),
 		capturedFrom = {},
 		armyLabels = {}
@@ -59,6 +60,9 @@
 		dimUnchanged?: boolean;
 		edgeWalls: [number, number][];
 		edgeSeaLanes: [number, number][];
+		/** Tunnel-card underground routes as of this turn — drawn as a bold amber
+		 *  channel straight between the two hex centers. */
+		edgeTunnels?: [number, number][];
 		/** Sorted "a,b" keys of lanes opened by cards (Ferry / Water Invasion)
 		 *  during play — drawn in a distinct color from map-generated lanes. */
 		createdLaneKeys?: Set<string>;
@@ -266,6 +270,19 @@
 	{#each edgeSeaLanes as [a, b]}
 		{@const created = createdLaneKeys.has(a < b ? `${a},${b}` : `${b},${a}`)}
 		<path d={seaLanePath(a, b, map.grids)} fill="none" stroke={created ? '#c68fff' : '#a0d8ff'} stroke-width="2.5" stroke-dasharray="6 4" stroke-opacity="0.85" pointer-events="none" />
+	{/each}
+	<!-- Tunnels (Tunnel card) as of this turn: a bold underground channel — a
+	     dark casing under a bright amber dashed core with capped ends — drawn
+	     straight between the two linked hex centers, above the hex fills. -->
+	{#each edgeTunnels as [a, b]}
+		{@const ga = map.grids[a]}
+		{@const gb = map.grids[b]}
+		<g pointer-events="none">
+			<line x1={ga.x} y1={ga.y} x2={gb.x} y2={gb.y} stroke="#241206" stroke-width="9" stroke-linecap="round" stroke-opacity="0.95" />
+			<line x1={ga.x} y1={ga.y} x2={gb.x} y2={gb.y} stroke="#ffb454" stroke-width="4" stroke-dasharray="7 6" stroke-linecap="round" />
+			<circle cx={ga.x} cy={ga.y} r="4.5" fill="#241206" stroke="#ffb454" stroke-width="2" />
+			<circle cx={gb.x} cy={gb.y} r="4.5" fill="#241206" stroke="#ffb454" stroke-width="2" />
+		</g>
 	{/each}
 	<!-- Faint dashed echo (on the "before" pane) of the hexes that change
 	     this turn, so the eye lands on the same spot in both maps. -->

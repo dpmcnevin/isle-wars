@@ -40,6 +40,9 @@ export interface RecapData {
 	hexArmyDeltas: HexArmyDelta[];
 	finalWalls: [number, number][];
 	finalSeaLanes: [number, number][];
+	// Tunnel-card routes on the final board, for reconstructEdgesAtTurn. Optional:
+	// shared links from before tunnels existed decode without it.
+	finalTunnels?: [number, number][];
 	// Terrain changes (Deforestation / Oasis / Scorched Earth) in turn order —
 	// applied forward over the seed-regenerated map (which has the ORIGINAL
 	// terrain) to recover the final board's terrain. Optional: shared links
@@ -61,6 +64,7 @@ export function buildRecap(params: {
 	hexArmyDeltas: HexArmyDelta[];
 	finalWalls: [number, number][];
 	finalSeaLanes: [number, number][];
+	finalTunnels?: [number, number][];
 	terrainEvents?: TerrainEvent[];
 }): RecapData {
 	return {

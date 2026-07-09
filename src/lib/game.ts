@@ -66,7 +66,8 @@ export type CardType =
 	| 'navalpatrol'
 	| 'mountaineer'
 	| 'tunnel'
-	| 'collapse';
+	| 'collapse'
+	| 'levee';
 
 // Re-export the card registry's public surface so consumers keep importing it
 // from '$lib/game'. The definitions themselves live in ./cards.
@@ -124,6 +125,8 @@ export type Phase =
 	| 'tunnel_to'
 	| 'collapse_from'
 	| 'collapse_to'
+	| 'levee_from'
+	| 'levee_to'
 	| 'discard'
 	| 'game_over';
 
@@ -271,7 +274,7 @@ export interface TerrainEvent {
 // actually existed as of that turn (see reconstructEdgesAtTurn in summary.ts).
 export interface EdgeEvent {
 	turn: number;
-	kind: 'wall' | 'seaLane';
+	kind: 'wall' | 'seaLane' | 'tunnel';
 	edge: [number, number];
 	added: boolean; // true = built/opened, false = torn down/destroyed
 }
@@ -348,13 +351,25 @@ export interface DebugSettings {
 	starterCards: boolean; // give blue every card type on new games
 	autoPlay: boolean; // AI takes over all four players
 	dieSides: number; // base die max value; 10 by default
+	turnCardTunnel: boolean; // give every player a Tunnel card at the start of their turn
+	turnCardInvasion: boolean; // give every player a Water Invasion card at the start of their turn
+	turnCardCanal: boolean; // give every player a Canal card at the start of their turn
+	turnCardWall: boolean; // give every player a Wall card at the start of their turn
+	turnCardBreach: boolean; // give every player a Breach card at the start of their turn
+	turnCardLevee: boolean; // give every player a Levee card at the start of their turn
+	turnCardCollapse: boolean; // give every player a Collapse card at the start of their turn
+	turnCardFerry: boolean; // give every player a Ferry Route card at the start of their turn
+	turnCardStorm: boolean; // give every player a Storm card at the start of their turn
 }
 
 const DEFAULT_DIE_SIDES = 10;
 
 function loadDebugSettings(): DebugSettings {
 	const dflt: DebugSettings = {
-		disableSave: false, starterCards: false, autoPlay: false, dieSides: DEFAULT_DIE_SIDES
+		disableSave: false, starterCards: false, autoPlay: false, dieSides: DEFAULT_DIE_SIDES,
+		turnCardTunnel: false, turnCardInvasion: false, turnCardCanal: false, turnCardWall: false,
+		turnCardBreach: false, turnCardLevee: false, turnCardCollapse: false, turnCardFerry: false,
+		turnCardStorm: false
 	};
 	if (typeof window === 'undefined') return dflt;
 	try {
@@ -366,12 +381,35 @@ function loadDebugSettings(): DebugSettings {
 				disableSave: !!parsed.disableSave,
 				starterCards: !!parsed.starterCards,
 				autoPlay: !!parsed.autoPlay,
-				dieSides: sides >= 2 && sides <= 100 ? sides : DEFAULT_DIE_SIDES
+				dieSides: sides >= 2 && sides <= 100 ? sides : DEFAULT_DIE_SIDES,
+				turnCardTunnel: !!parsed.turnCardTunnel,
+				turnCardInvasion: !!parsed.turnCardInvasion,
+				turnCardCanal: !!parsed.turnCardCanal,
+				turnCardWall: !!parsed.turnCardWall,
+				turnCardBreach: !!parsed.turnCardBreach,
+				turnCardLevee: !!parsed.turnCardLevee,
+				turnCardCollapse: !!parsed.turnCardCollapse,
+				turnCardFerry: !!parsed.turnCardFerry,
+				turnCardStorm: !!parsed.turnCardStorm
 			};
 		}
 	} catch { /* ignore */ }
 	return dflt;
 }
+
+/** Card types granted each turn by the "free card" debug checkboxes, in a
+ *  stable order for display/logging. */
+const TURN_CARD_DEBUG_MAP: [keyof DebugSettings, CardType][] = [
+	['turnCardTunnel', 'tunnel'],
+	['turnCardInvasion', 'invasion'],
+	['turnCardCanal', 'canal'],
+	['turnCardWall', 'wall'],
+	['turnCardBreach', 'breach'],
+	['turnCardLevee', 'levee'],
+	['turnCardCollapse', 'collapse'],
+	['turnCardFerry', 'ferry'],
+	['turnCardStorm', 'storm']
+];
 
 export function rollDie(): number {
 	return 1 + Math.floor(Math.random() * debugSettings.dieSides);
@@ -720,7 +758,16 @@ export function startGame(difficulty = 2, startingArmies = 3, seed?: string): Ga
 		updateDebugSettings({
 			dieSides: decoded.dieSides,
 			starterCards: decoded.starterCards,
-			autoPlay: decoded.autoPlay
+			autoPlay: decoded.autoPlay,
+			turnCardTunnel: decoded.turnCardTunnel,
+			turnCardInvasion: decoded.turnCardInvasion,
+			turnCardCanal: decoded.turnCardCanal,
+			turnCardWall: decoded.turnCardWall,
+			turnCardBreach: decoded.turnCardBreach,
+			turnCardLevee: decoded.turnCardLevee,
+			turnCardCollapse: decoded.turnCardCollapse,
+			turnCardFerry: decoded.turnCardFerry,
+			turnCardStorm: decoded.turnCardStorm
 		});
 	}
 	// Canonical seed display/storage is uppercase — hashSeedToInt in map.ts is
@@ -1087,6 +1134,7 @@ function removePendingTunnel(s: GameState) {
 	s.map.tunnels = (s.map.tunnels ?? []).filter(([x, y]) => !((x === a && y === b) || (x === b && y === a)));
 	s.map.adj[a] = s.map.adj[a].filter((n) => n !== b);
 	s.map.adj[b] = s.map.adj[b].filter((n) => n !== a);
+	pushEdgeEvent(s, 'tunnel', a, b, false);
 	log(s, `The tunnel between ${gridLabel(s, a)} and ${gridLabel(s, b)} collapsed — the assault failed.`, 'card');
 	s.pendingTunnel = null;
 }
@@ -1108,6 +1156,7 @@ export function severTunnelsCrossingCanal(s: GameState, from: number, to: number
 		if (crosses) {
 			s.map.adj[a] = s.map.adj[a].filter((n) => n !== b);
 			s.map.adj[b] = s.map.adj[b].filter((n) => n !== a);
+			pushEdgeEvent(s, 'tunnel', a, b, false);
 			log(s, `The new canal cut through the tunnel between ${gridLabel(s, a)} and ${gridLabel(s, b)}, collapsing it.`, 'card');
 			destroyed++;
 		} else {
@@ -1191,6 +1240,13 @@ function beginTurn(s: GameState): GameState {
 	s.selectedFrom = null;
 	s.selectedTo = null;
 	s.pendingArmies = 0;
+
+	// Debug: hand out any of the "free card each turn" checkboxes.
+	const turnCards = TURN_CARD_DEBUG_MAP.filter(([key]) => debugSettings[key]).map(([, card]) => card);
+	if (turnCards.length > 0) {
+		s.hands[s.current] = [...s.hands[s.current], ...turnCards];
+		log(s, `${PLAYER_NAMES[s.current]} received debug card${turnCards.length > 1 ? 's' : ''}: ${turnCards.map((c) => CARD_LABELS[c]).join(', ')}.`, 'card');
+	}
 
 	// Random world event 25% chance (skip on turn 1)
 	if (s.turn > 1 && Math.random() < 0.25) {

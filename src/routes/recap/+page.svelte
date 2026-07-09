@@ -180,7 +180,7 @@
 	}
 	function edgesAtTurn(d: RecapData, turn: number) {
 		return reconstructEdgesAtTurn(
-			{ map: { walls: d.finalWalls, seaLanes: d.finalSeaLanes }, edgeEvents: d.edgeEvents },
+			{ map: { walls: d.finalWalls, seaLanes: d.finalSeaLanes, tunnels: d.finalTunnels }, edgeEvents: d.edgeEvents },
 			turn
 		);
 	}
@@ -492,7 +492,7 @@
 					{@const edgesStart = edgesAtTurn(d, 0)}
 					<h3 class="moment-headline">Starting positions — before turn 1</h3>
 					<div class="moment-single">
-						<TpMiniMap map={m} owners={ownersStart} edgeWalls={edgesStart.walls} edgeSeaLanes={edgesStart.seaLanes} {createdLaneKeys} />
+						<TpMiniMap map={m} owners={ownersStart} edgeWalls={edgesStart.walls} edgeSeaLanes={edgesStart.seaLanes} edgeTunnels={edgesStart.tunnels} {createdLaneKeys} />
 					</div>
 				{:else}
 					{@const tp = d.turningPoints[selected - 1]}
@@ -517,7 +517,7 @@
 					<div class="moment-compare" onclick={() => (zoomOpen = true)} title="Click to zoom">
 						<div class="moment-pane">
 							<div class="moment-label">Before (turn {tp.turn - 1})</div>
-							<TpMiniMap map={m} owners={v.ownersBefore} ghostGrids={v.changedGrids} edgeWalls={v.edgesBefore.walls} edgeSeaLanes={v.edgesBefore.seaLanes} {createdLaneKeys} />
+							<TpMiniMap map={m} owners={v.ownersBefore} ghostGrids={v.changedGrids} edgeWalls={v.edgesBefore.walls} edgeSeaLanes={v.edgesBefore.seaLanes} edgeTunnels={v.edgesBefore.tunnels} {createdLaneKeys} />
 						</div>
 						<div class="moment-arrow" aria-hidden="true">
 							<svg viewBox="0 0 40 24" width="40" height="24">
@@ -527,7 +527,7 @@
 						</div>
 						<div class="moment-pane">
 							<div class="moment-label">After (turn {tp.turn})</div>
-							<TpMiniMap map={m} owners={v.ownersAfter} paths={v.paths} changedGrids={v.changedGrids} dimUnchanged edgeWalls={v.edgesAfter.walls} edgeSeaLanes={v.edgesAfter.seaLanes} {createdLaneKeys} capturedFrom={v.capturedFrom} armyLabels={v.armyLabels} />
+							<TpMiniMap map={m} owners={v.ownersAfter} paths={v.paths} changedGrids={v.changedGrids} dimUnchanged edgeWalls={v.edgesAfter.walls} edgeSeaLanes={v.edgesAfter.seaLanes} edgeTunnels={v.edgesAfter.tunnels} {createdLaneKeys} capturedFrom={v.capturedFrom} armyLabels={v.armyLabels} />
 						</div>
 					</div>
 				{/if}
