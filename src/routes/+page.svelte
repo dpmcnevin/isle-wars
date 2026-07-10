@@ -180,6 +180,29 @@
 			paratroopQty = Math.max(info.min, Math.min(info.max, Math.round(Number.isFinite(paratroopQty) ? paratroopQty : 1)));
 		}
 	});
+	// The page became genuinely scrollable once the compact-landscape mobile
+	// layout put the turn/cards/log panel below the first-screen map (see
+	// the (max-height: 600px) and (orientation: landscape) media query) —
+	// before that, the page's own height never exceeded the viewport, so a
+	// modal's fixed backdrop never had page content to accidentally drag-
+	// scroll underneath it. Lock body scroll for the duration of any modal
+	// or full-panel overlay so touch drags on/through it don't scroll the
+	// board behind it. showDebug is referenced here even though it's
+	// declared further down — fine, since this effect body only runs once
+	// per-frame after the whole <script> top level has finished setting up.
+	$effect(() => {
+		if (typeof document === 'undefined') return;
+		const open = isQtyPhase() || ($game.current === HUMAN && $game.phase === 'attack_rolling') || showMenu || showDebug;
+		// overflow:hidden alone doesn't reliably stop iOS Safari's rubber-band
+		// touch scroll bleeding through a fixed-position backdrop; pairing it
+		// with touch-action:none on <body> does.
+		document.body.style.overflow = open ? 'hidden' : '';
+		document.body.style.touchAction = open ? 'none' : '';
+		return () => {
+			document.body.style.overflow = '';
+			document.body.style.touchAction = '';
+		};
+	});
 	let difficulty = $state(2);
 	let startingArmies = $state(3);
 	let showMenu = $state(false);
@@ -218,6 +241,24 @@
 	let autoRolling = $state(false);
 	let hoveredGrid = $state<number | null>(null);
 	let tooltipPos = $state<{ x: number; y: number } | null>(null);
+	// Touch devices have no hover, so the hex-info tooltip above (which only
+	// ever shows on pointerenter) is unreachable on mobile. Inspect mode
+	// repurposes taps for that instead of gameplay actions: tap a hex to
+	// pin its info tooltip, tap it again (or tap empty water) to dismiss,
+	// tap a different hex to switch. Off by default so normal play (attack/
+	// move taps) isn't disrupted.
+	let inspectMode = $state(false);
+	let pinnedInfoHex = $state<number | null>(null);
+	let pinnedInfoPos = $state<{ x: number; y: number } | null>(null);
+	function toggleInspectMode() {
+		inspectMode = !inspectMode;
+		pinnedInfoHex = null;
+		pinnedInfoPos = null;
+	}
+	function dismissPinnedInfo() {
+		pinnedInfoHex = null;
+		pinnedInfoPos = null;
+	}
 	let hoveredCard = $state<CardType | null>(null);
 	let cardTipPos = $state<{ x: number; y: number } | null>(null);
 	let hoveredLogIdx = $state<number | null>(null);
@@ -303,6 +344,7 @@
 	let pointerDownAt: { x: number; y: number } | null = null;
 
 	function canStartAttackDrag(id: number): boolean {
+		if (inspectMode) return false;
 		const s = $game;
 		if (s.current !== HUMAN) return false;
 		if (s.phase === 'action') {
@@ -539,11 +581,21 @@
 	// both core attack/move phases and every card's targeting rules) instead of
 	// re-deriving per-phase logic here.
 	function isSelectable(id: number, s: typeof $game): boolean {
+		if (inspectMode) return false;
 		if (s.current !== HUMAN) return false;
 		return isSelectableHex(s, id);
 	}
 
-	function handleGridClick(id: number) {
+	function handleGridClick(id: number, e?: MouseEvent) {
+		if (inspectMode) {
+			if (pinnedInfoHex === id) {
+				dismissPinnedInfo();
+			} else {
+				pinnedInfoHex = id;
+				pinnedInfoPos = e ? { x: e.clientX, y: e.clientY } : null;
+			}
+			return;
+		}
 		const s = $game;
 		if (s.current !== HUMAN) return;
 		if (s.phase === 'placing') {
@@ -1223,7 +1275,7 @@
 					</pattern>
 				</defs>
 				<!-- Water -->
-				<rect x="0" y="0" width={$game.map.width} height={$game.map.height} fill="#0a2540" />
+				<rect x="0" y="0" width={$game.map.width} height={$game.map.height} fill="#0a2540" onclick={dismissPinnedInfo} />
 				<!-- Water hexes (the underlying grid) -->
 				{#each $game.map.waterHexes ?? [] as poly}
 					<polygon points={polygonPoints(poly)} fill="#0e2a48" stroke="#26527a" stroke-width="0.8" stroke-opacity="0.55" pointer-events="none" />
@@ -1253,7 +1305,7 @@
 						fill={gridFill(g.id, $game)}
 						stroke="#0a1420"
 						stroke-width="2"
-						onclick={() => handleGridClick(g.id)}
+						onclick={(e) => handleGridClick(g.id, e)}
 						onpointerdown={(e) => onPolyPointerDown(g.id, e)}
 						onpointerenter={(e) => onHexPointerEnter(g.id, e)}
 						onpointerleave={() => onHexPointerLeave(g.id)}
@@ -1534,6 +1586,16 @@
 		{/if}
 	</button>
 
+	<!-- Always visible (not gated to the landscape breakpoint like the two
+	     buttons above) — touch has no hover anywhere, portrait included, so
+	     the toggle to swap taps from gameplay actions to "show hex info"
+	     needs to be reachable regardless of orientation or header state.
+	     Left edge, vertically centered, so it never collides with
+	     .chrome-toggle (bottom-left) or .cards-fab (bottom-right). -->
+	<button class="inspect-toggle" class:active={inspectMode} onclick={toggleInspectMode} aria-label={inspectMode ? 'Exit inspect mode' : 'Enter inspect mode — tap a hex to see its info'}>
+		{inspectMode ? '✕' : 'i'}
+	</button>
+
 	{#if isQtyPhase() && qtySourceHex() != null}
 		{@const src = qtySourceHex()!}
 		{@const srcArmies = $game.states[src].armies}
@@ -1809,14 +1871,20 @@
 	</div>
 {/if}
 
-{#if hoveredGrid != null && tooltipPos}
-	{@const info = hexInfo(hoveredGrid)}
-	{@const hp = clampTip(tooltipPos.x, tooltipPos.y, 280, 180)}
-	<div class="hex-tooltip" style="left:{hp.x}px; top:{hp.y}px">
+{#if (pinnedInfoHex ?? hoveredGrid) != null && (pinnedInfoPos ?? tooltipPos)}
+	{@const shownHex = (pinnedInfoHex ?? hoveredGrid)!}
+	{@const pinned = pinnedInfoHex != null}
+	{@const info = hexInfo(shownHex)}
+	{@const pos = (pinnedInfoPos ?? tooltipPos)!}
+	{@const hp = clampTip(pos.x, pos.y, 280, 180)}
+	<div class="hex-tooltip" class:pinned style="left:{hp.x}px; top:{hp.y}px">
 		<div class="tt-title">
 			<span class="tt-owner-dot" style="background:{info.ownerColor}"></span>
 			<strong>{info.title}</strong>
 			<span class="tt-armies">{info.armies}</span>
+			{#if pinned}
+				<button class="tt-close" onclick={dismissPinnedInfo} aria-label="Close">✕</button>
+			{/if}
 		</div>
 		<div class="tt-owner" style="color:{info.ownerColor}">{info.owner}</div>
 		{#if info.city}<div class="tt-city">★ {info.city}</div>{/if}
@@ -1826,6 +1894,7 @@
 				{#if m.desc}<div class="tt-terrain-desc">{m.desc}</div>{/if}
 			</div>
 		{/each}
+		{#if pinned}<div class="tt-hint">Tap this hex again, or elsewhere, to close</div>{/if}
 	</div>
 {/if}
 
@@ -2033,8 +2102,6 @@
 		.icon-btn { padding: 0.15rem 0.4rem; font-size: 0.68rem; }
 		.turn { font-size: 0.68rem; padding: 0.1rem 0.3rem; }
 		.speed select { font-size: 0.68rem; padding: 0.05rem 0.15rem; }
-		.qty-modal, .attack-modal { padding: 0.75rem 1rem; }
-		.qty-modal-value { font-size: 2rem; }
 		/* New Game / Debug panels float below the header instead of pushing
 		   the board down, same as everything else here — scrollable since
 		   they're taller than a HUD pill should be. */
@@ -2084,6 +2151,11 @@
 		   meet) scales it to fill without distortion. */
 		.map { width: 100%; height: 100%; }
 	}
+	/* Shortest landscape phones (SE/mini-class, ~375-390px tall): even the
+	   compacted qty-modal above doesn't quite fit under ~400px available
+	   height with the hex illustration included — drop it entirely rather
+	   than fine-tune margins further, since it's decorative (the actual hex
+	   being placed on is already visible, blurred, behind the modal). */
 	/* Small fixed badge that jumps down to the card hand — the tap target
 	   for reaching cards once they're normal below-the-fold content instead
 	   of an always-visible panel. Hidden outside the landscape breakpoint,
@@ -2148,6 +2220,40 @@
 	}
 	.chrome-toggle-dot { width: 9px; height: 9px; border-radius: 50%; flex: none; }
 	.chrome-toggle-turn { font-family: monospace; }
+	/* Left edge, vertically centered — always visible (touch has no hover
+	   in portrait either, not just landscape), and clear of .chrome-toggle/
+	   .cards-fab, which only appear in the landscape breakpoint and sit at
+	   the bottom corners. */
+	.inspect-toggle {
+		position: fixed;
+		left: max(0.6rem, env(safe-area-inset-left));
+		top: 50%;
+		transform: translateY(-50%);
+		z-index: 40;
+		width: 38px;
+		height: 38px;
+		border-radius: 50%;
+		background: rgba(15, 32, 53, 0.9);
+		border: 1px solid #4a9fcf;
+		backdrop-filter: blur(6px);
+		box-shadow: 0 4px 14px rgba(0, 0, 0, 0.5);
+		color: #7fcfff;
+		font-family: Georgia, serif;
+		font-style: italic;
+		font-weight: bold;
+		font-size: 1.05rem;
+		display: flex;
+		align-items: center;
+		justify-content: center;
+		cursor: pointer;
+		padding: 0;
+	}
+	.inspect-toggle.active {
+		background: #4a9fcf;
+		border-color: #7fcfff;
+		color: #fff;
+		font-style: normal;
+	}
 	@media (max-height: 600px) and (orientation: landscape) {
 		.cards-fab { display: flex; }
 		.chrome-toggle { display: flex; }
@@ -2642,13 +2748,6 @@
 		box-sizing: border-box;
 		box-shadow: 0 12px 40px rgba(0, 0, 0, 0.55), 0 0 30px rgba(255, 225, 74, 0.2);
 	}
-	@media (max-width: 640px) {
-		.attack-hexes { grid-template-columns: 1fr; }
-		.attack-vs { padding: 0.15rem 0; }
-		.side-hex { max-width: 170px; }
-		.attack-actions { grid-template-columns: 1fr 1fr; }
-		.attack-actions button:last-child { grid-column: span 2; }
-	}
 	.attack-title {
 		display: flex;
 		justify-content: space-between;
@@ -2739,6 +2838,82 @@
 	.attack-actions .primary {
 		background: #ffe14a;
 		color: #1a1a1a;
+	}
+
+	@media (max-width: 640px) {
+		.attack-hexes { grid-template-columns: 1fr; }
+		.attack-vs { padding: 0.15rem 0; }
+		.side-hex { max-width: 170px; }
+		.attack-actions { grid-template-columns: 1fr 1fr; }
+		.attack-actions button:last-child { grid-column: span 2; }
+	}
+	/* Short/landscape mobile modal compacting lives here — after all the
+	   base qty-modal/attack-modal/side-hex rules above — rather than up
+	   near the rest of the landscape layout CSS. CSS resolves same-specificity
+	   conflicts by source order, not by whether a media query currently
+	   matches, so an override positioned BEFORE the rule it targets loses
+	   even when its condition is true; that silently broke every one of
+	   these overrides (hex sizing, the text-overlay layout, even this same
+	   attack-hexes stacking rule) until moved down here. */
+	@media (max-height: 600px) and (orientation: landscape) {
+		.qty-modal-backdrop, .attack-modal-backdrop { padding: 0.3rem; }
+		.qty-modal, .attack-modal { padding: 0.35rem 0.6rem; }
+		/* The hex is the one thing that matters most here (it's what you're
+		   actually placing on/moving between) — shrink the title/value/
+		   button chrome around it instead of the hex itself. */
+		.qty-modal .side-hex { max-width: 132px; margin: 0.05rem auto 0.1rem; }
+		.qty-modal-title { font-size: 0.78rem; margin: 0; }
+		.qty-modal-sub { font-size: 0.66rem; margin: 0.05rem 0 0.15rem; }
+		.qty-modal-value { font-size: 1.1rem; }
+		.qty-modal-scale { font-size: 0.6rem; margin: 0.05rem 0 0.2rem; }
+		.qty-modal-grid { gap: 0.2rem; margin-bottom: 0.2rem; }
+		.qty-modal-grid button { padding: 0.22rem 0.25rem; font-size: 0.75rem; }
+		.qty-modal-actions { margin-top: 0.2rem; }
+		.qty-modal-actions button { padding: 0.3rem 0.4rem; font-size: 0.8rem; }
+		.qty-hex-row { gap: 0.25rem; }
+		.qty-mods { font-size: 0.68rem; margin: 0.15rem 0 0.1rem; }
+		.qty-modal-warn { font-size: 0.68rem; margin-top: 0.15rem; }
+		/* Overlay label/name/bonus text directly on the hex (same idea as
+		   the army-count badge already drawn ON the hex, not stacked below
+		   it) instead of stacking separate rows around it — that frees
+		   enough height for the hex to be BIGGER than its old default size,
+		   not smaller. Owner is dropped outright: the hex's own fill color
+		   already says who owns it, once it's this size. */
+		.attack-title { font-size: 0.9rem; padding-bottom: 0.3rem; margin-bottom: 0.4rem; }
+		.attack-wp { font-size: 0.85rem; }
+		.attack-side { position: relative; padding: 0.3rem; min-height: 0; }
+		.attack-modal .side-hex { max-width: 190px; width: 100%; height: auto; margin: 0 auto; }
+		.side-owner { display: none; }
+		.side-label, .side-name, .side-mods {
+			position: absolute;
+			left: 0.5rem;
+			right: 0.5rem;
+			z-index: 2;
+			margin: 0;
+			text-shadow: 0 1px 3px #000, 0 0 6px #000, 0 0 6px #000;
+		}
+		/* .side-name's top must clear .side-label's own line box (top +
+		   line-height), not just its top — these are absolutely positioned
+		   with hand-picked offsets rather than normal stacking flow (that's
+		   what lets them overlay the hex instead of pushing it down), so
+		   the gap has to be spelled out explicitly or the two text lines
+		   overlap. Doesn't affect the modal's height either way: it's
+		   .side-hex (a normal-flow element) that drives .attack-side's
+		   size, not where this absolutely-positioned text lands within it. */
+		.side-label { top: 0.3rem; font-size: 0.6rem; }
+		.side-name { top: 1.15rem; font-size: 0.85rem; }
+		.side-mods { bottom: 0.3rem; font-size: 0.66rem; }
+		.side-mods li { padding: 0; }
+		.attack-actions { margin-top: 0.5rem; }
+		.attack-actions button { padding: 0.45rem 0.4rem; font-size: 0.82rem; }
+	}
+	@media (max-height: 400px) and (orientation: landscape) {
+		/* Safari's own collapsible toolbar means the effective viewport
+		   here can be noticeably shorter than the device's full landscape
+		   height, so this tier is reachable even on larger phones. */
+		.qty-modal .side-hex { max-width: 92px; margin: 0.05rem auto 0.1rem; }
+		.qty-modal-sub { margin-top: 0; }
+		.attack-modal .side-hex { max-width: 150px; }
 	}
 
 	.debug-panel {
@@ -2930,10 +3105,27 @@
 		max-width: 280px;
 		pointer-events: none;
 	}
+	/* The hover variant is pointer-events:none so it never steals the mouse
+	   from whatever's underneath — but the inspect-mode (tap-pinned) variant
+	   needs its own close button to be tappable, since touch has no "move
+	   the pointer away" equivalent to dismiss it. */
+	.hex-tooltip.pinned { pointer-events: auto; }
 	.tt-title { display: flex; align-items: center; gap: 0.4rem; }
 	.tt-title strong { color: #e0f0ff; font-size: 0.95rem; }
 	.tt-owner-dot { width: 10px; height: 10px; border-radius: 50%; display: inline-block; flex: none; }
 	.tt-armies { margin-left: auto; color: #ffe14a; font-family: monospace; font-weight: bold; }
+	.tt-close {
+		margin-left: auto;
+		background: none;
+		border: none;
+		color: #7fa0c0;
+		font-size: 0.85rem;
+		line-height: 1;
+		padding: 0.15rem;
+		cursor: pointer;
+	}
+	.tt-close:hover { color: #e0f0ff; }
+	.tt-hint { color: #5a7a9a; font-size: 0.68rem; font-style: italic; margin-top: 0.5rem; text-align: center; }
 	.tt-owner { color: #7fcfff; font-size: 0.75rem; margin-top: 2px; }
 	.tt-city { color: #ffe14a; font-style: italic; font-size: 0.8rem; margin-top: 3px; }
 	.tt-terrain { margin-top: 6px; padding-top: 6px; border-top: 1px solid #1a3040; }
