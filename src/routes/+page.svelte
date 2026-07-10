@@ -1596,6 +1596,19 @@
 		{inspectMode ? '✕' : 'i'}
 	</button>
 
+	<!-- Same reasoning as .inspect-toggle: the real End Turn button lives in
+	     the side panel, which is below the fold (compact landscape) or a
+	     scroll away (portrait) — this floating shortcut is reachable without
+	     hunting for it. During placing it can't act yet (armies have to go
+	     down first), so it shows a disabled count instead of pretending
+	     you can end the turn early — same information as the side panel's
+	     "Armies remaining" hint, just reachable from here too. -->
+	{#if $game.current === HUMAN && $game.phase === 'action'}
+		<button class="end-turn-fab" onclick={endTurn}>End Turn</button>
+	{:else if $game.current === HUMAN && $game.phase === 'placing'}
+		<button class="end-turn-fab placing" disabled>{$game.armiesToPlace} to place</button>
+	{/if}
+
 	{#if isQtyPhase() && qtySourceHex() != null}
 		{@const src = qtySourceHex()!}
 		{@const srcArmies = $game.states[src].armies}
@@ -2254,9 +2267,45 @@
 		color: #fff;
 		font-style: normal;
 	}
+	/* Top-right, mirroring .inspect-toggle's left-edge/always-visible
+	   treatment — the panel button it shadows can be scrolled out of view
+	   or behind the collapsed header, so this stays reachable regardless. */
+	.end-turn-fab {
+		position: fixed;
+		right: max(0.6rem, env(safe-area-inset-right));
+		top: max(0.6rem, env(safe-area-inset-top));
+		z-index: 40;
+		background: #2a5a8a;
+		border: 1px solid #7fcfff;
+		color: #fff;
+		border-radius: 20px;
+		padding: 0.5rem 1rem;
+		font-weight: bold;
+		font-size: 0.85rem;
+		box-shadow: 0 4px 14px rgba(0, 0, 0, 0.5);
+		cursor: pointer;
+	}
+	.end-turn-fab:hover { background: #3a6a9a; }
+	/* Informational, not actionable — muted like the other floating badges
+	   (.cards-fab/.chrome-toggle) instead of the bright "primary" action
+	   look, and no hover/pointer affordance since tapping it does nothing. */
+	.end-turn-fab.placing {
+		background: rgba(15, 32, 53, 0.9);
+		border-color: #4a9fcf;
+		color: #a8bfd4;
+		cursor: default;
+		font-family: monospace;
+	}
+	.end-turn-fab.placing:hover { background: rgba(15, 32, 53, 0.9); }
 	@media (max-height: 600px) and (orientation: landscape) {
 		.cards-fab { display: flex; }
 		.chrome-toggle { display: flex; }
+		/* .end-turn-fab sits at top-right too, same corner as the header's
+		   own New/Share/Debug/Clear cluster — header is collapsed by default
+		   here so there's normally no conflict, but if it's manually opened
+		   (.chrome-toggle) mid-action-phase, drop the fab below it rather
+		   than overlap. Sibling selector: they're DOM siblings, not nested. */
+		.board-frame.chrome-open ~ .end-turn-fab { top: 3rem; }
 		/* Collapsed by default (see landscapeChromeOpen) — hide the header
 		   and message bar until the toggle opens them. Not .start-prompt:
 		   that's the "Start Game" CTA on a fresh game, and it's the only
