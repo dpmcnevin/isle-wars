@@ -2,8 +2,22 @@
 <html lang="en">
 	<head>
 		<meta charset="utf-8" />
-		<meta name="viewport" content="width=device-width, initial-scale=1" />
+		<!-- viewport-fit=cover lets full-bleed layouts (see the landscape-mobile
+		     board in +page.svelte) draw under the notch/home-indicator; paired
+		     with env(safe-area-inset-*) in that CSS so HUD elements still clear
+		     it. Required for "Add to Home Screen" to hide Safari's chrome (see
+		     apple-mobile-web-app-capable below) to actually go edge-to-edge. -->
+		<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
 		<meta name="text-scale" content="scale" />
+		<!-- Makes "Add to Home Screen" launch full-screen with no Safari
+		     address/tab bar at all — the reliable way to hide it on iOS,
+		     since the address bar itself can't be hidden from within a
+		     regular Safari tab (it only auto-collapses on scroll). -->
+		<meta name="apple-mobile-web-app-capable" content="yes" />
+		<meta name="mobile-web-app-capable" content="yes" />
+		<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent" />
+		<meta name="apple-mobile-web-app-title" content="Isle Wars" />
+		<link rel="manifest" href="%sveltekit.assets%/manifest.webmanifest" />
 		%sveltekit.head%
 	</head>
 	<body data-sveltekit-preload-data="hover">

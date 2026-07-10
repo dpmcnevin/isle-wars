@@ -283,6 +283,20 @@
 
 	// Drag-to-attack state
 	let mapSvg: SVGSVGElement | undefined = $state();
+	// Compact-landscape mobile: the map fills the first screen and the rest
+	// of the game info (turn panel/cards/log) sits below it in normal flow,
+	// reached by scrolling — this ref backs the floating card-count badge's
+	// "jump to cards" tap target (see .cards-fab in the landscape media query).
+	let cardsPanelEl: HTMLElement | undefined = $state();
+	function scrollToCards() {
+		cardsPanelEl?.scrollIntoView({ behavior: 'smooth', block: 'start' });
+	}
+	// Same breakpoint: the header (scoreboard/actions) and message bar are
+	// collapsed by default so they don't eat into the map's first screen —
+	// toggled open via .chrome-toggle. Starts closed since maximizing the
+	// map is the point; irrelevant outside the landscape breakpoint, where
+	// the toggle button itself is hidden via CSS and the header always shows.
+	let landscapeChromeOpen = $state(false);
 	let dragFrom = $state<number | null>(null);
 	let dragPt = $state<{ x: number; y: number } | null>(null);
 	let pointerDownGrid: number | null = null;
@@ -996,6 +1010,11 @@
 {/snippet}
 
 <main>
+	<!-- Groups the header/menu/message chrome with the map+side grid so the
+	     short-landscape media query below can flex just this region to fill
+	     the viewport, without the (always-in-the-DOM) analytics section past
+	     it competing for that space. -->
+	<div class="board-frame" class:chrome-open={landscapeChromeOpen}>
 	<header>
 		<div class="header-row">
 			<div class="scoreboard">
@@ -1414,7 +1433,7 @@
 				{/if}
 			</section>
 
-			<section class="panel">
+			<section class="panel" bind:this={cardsPanelEl}>
 				{#if $game.current === HUMAN && $game.phase === 'discard'}
 					<h3>Discard a card ({$game.hands[HUMAN].length} — over hand limit)</h3>
 				{:else}
@@ -1492,6 +1511,28 @@
 			</section>
 		</aside>
 	</div>
+	</div>
+
+	<!-- Compact-landscape mobile only (see .cards-fab in the media query):
+	     the side panel isn't floated over the map here, it's normal content
+	     below the first screen — this fixed badge is the tap target that
+	     jumps down to it, so playing a card is still reachable without
+	     scrolling blind. Hidden outside that breakpoint via CSS. -->
+	<button class="cards-fab" onclick={scrollToCards} aria-label="Jump to your cards">
+		🎴<span class="cards-fab-count">{$game.hands[HUMAN].length}</span>
+	</button>
+
+	<!-- Same breakpoint: mirrors .cards-fab on the opposite corner, toggling
+	     the header/message bar (collapsed by default) instead of scrolling
+	     to something below the fold. -->
+	<button class="chrome-toggle" onclick={() => (landscapeChromeOpen = !landscapeChromeOpen)} aria-label={landscapeChromeOpen ? 'Hide status bar' : 'Show status bar'}>
+		{#if landscapeChromeOpen}
+			✕
+		{:else}
+			<span class="chrome-toggle-dot" style="background:{PLAYER_COLORS[$game.current]}"></span>
+			<span class="chrome-toggle-turn">T{$game.turn}</span>
+		{/if}
+	</button>
 
 	{#if isQtyPhase() && qtySourceHex() != null}
 		{@const src = qtySourceHex()!}
@@ -1789,16 +1830,18 @@
 {/if}
 
 <style>
-	:global(body) {
+	:global(html, body) {
 		background: #0a1420;
 		color: #d0e6f5;
 		font-family: 'Segoe UI', system-ui, sans-serif;
 		margin: 0;
+		overflow-x: hidden;
 	}
 	main {
 		max-width: 1400px;
 		margin: 0 auto;
 		padding: 0.75rem;
+		box-sizing: border-box;
 	}
 	header {
 		border: 1px solid #1a3040;
@@ -1931,8 +1974,198 @@
 	@media (max-width: 1000px) {
 		.grid { grid-template-columns: 1fr; }
 	}
+	/* Phones and small tablets: tighten spacing, avoid horizontal scroll,
+	   and give tap targets enough room for fingers instead of a mouse cursor. */
+	@media (max-width: 640px) {
+		main { padding: 0.4rem; }
+		header { padding: 0.3rem 0.4rem; }
+		.header-row { gap: 0.4rem; }
+		.scoreboard { gap: 0.3rem; }
+		.score { font-size: 0.72rem; padding: 0.15rem 0.35rem; }
+		.actions { gap: 0.3rem; }
+		.icon-btn { padding: 0.35rem 0.55rem; font-size: 0.78rem; }
+		.menu { padding: 0.9rem 1rem; }
+		.menu-fields { gap: 1rem; }
+		.grid { gap: 0.5rem; }
+		.card-grid { grid-template-columns: repeat(4, 1fr); }
+		.qty-modal-actions button,
+		.attack-actions button,
+		.card-tile,
+		button {
+			min-height: 40px;
+		}
+		.log-chip { width: 38px; height: 38px; }
+	}
+	@media (max-width: 400px) {
+		.card-grid { grid-template-columns: repeat(3, 1fr); }
+	}
 	.mapwrap { background: #0f2035; border: 1px solid #1a3040; }
 	.map { width: 100%; height: auto; display: block; }
+	/* Short/landscape viewports (phone rotated): mirror the iPad app's
+	   layout (see ios/IsleWars/Views/ContentView.swift) — a full-bleed map
+	   with the header/status/side-panel floating as translucent HUD pills
+	   on top, instead of a docked sidebar that eats width from the board.
+	   Portrait phones keep the normal stacked block layout; this only
+	   kicks in when height is the scarce dimension. */
+	@media (max-height: 600px) and (orientation: landscape) {
+		main { padding: 0; }
+		/* min-height, not height — the map fills exactly one screen (below)
+		   but .side now flows normally after it instead of being absolutely
+		   filled/clipped to this box, so the frame needs to grow with it. */
+		.board-frame { position: relative; min-height: 100dvh; }
+		header {
+			position: absolute;
+			top: max(0.4rem, env(safe-area-inset-top));
+			left: max(0.4rem, env(safe-area-inset-left));
+			right: max(0.4rem, env(safe-area-inset-right));
+			z-index: 30;
+			margin: 0;
+			background: rgba(15, 32, 53, 0.88);
+			backdrop-filter: blur(6px);
+			border-radius: 8px;
+			padding: 0.2rem 0.4rem;
+		}
+		.header-row { flex-wrap: nowrap; gap: 0.35rem; }
+		.scoreboard { gap: 0.25rem; flex-wrap: nowrap; overflow-x: auto; }
+		.score { font-size: 0.62rem; padding: 0.1rem 0.3rem; gap: 0.2rem; white-space: nowrap; }
+		.bonus { display: none; }
+		.actions { gap: 0.25rem; }
+		.icon-btn { padding: 0.15rem 0.4rem; font-size: 0.68rem; }
+		.turn { font-size: 0.68rem; padding: 0.1rem 0.3rem; }
+		.speed select { font-size: 0.68rem; padding: 0.05rem 0.15rem; }
+		.qty-modal, .attack-modal { padding: 0.75rem 1rem; }
+		.qty-modal-value { font-size: 2rem; }
+		/* New Game / Debug panels float below the header instead of pushing
+		   the board down, same as everything else here — scrollable since
+		   they're taller than a HUD pill should be. */
+		.menu, .debug-panel {
+			position: absolute;
+			top: 2.5rem;
+			left: max(0.4rem, env(safe-area-inset-left));
+			right: max(0.4rem, env(safe-area-inset-right));
+			z-index: 35;
+			max-height: calc(100dvh - 3rem);
+			overflow-y: auto;
+			margin: 0;
+		}
+		.start-prompt, .msg {
+			position: absolute;
+			top: 2.5rem;
+			left: max(0.4rem, env(safe-area-inset-left));
+			right: max(0.4rem, env(safe-area-inset-right));
+			z-index: 25;
+			margin: 0;
+			background: rgba(15, 32, 53, 0.85);
+			backdrop-filter: blur(6px);
+			border-radius: 6px;
+		}
+		.start-prompt { padding: 0.4rem 0.6rem; gap: 0.6rem; }
+		.start-prompt h2 { font-size: 0.9rem; margin: 0; }
+		.start-prompt p { font-size: 0.75rem; }
+		.start-prompt button.big { padding: 0.4rem 0.8rem; font-size: 0.85rem; }
+		/* This duplicates the phase hint already shown atop the floating side
+		   panel (e.g. "Blue's turn — placing / Armies remaining: N…") — safe
+		   to shrink hard since it's not the only place that info shows. */
+		.msg { padding: 0.2rem 0.4rem; font-size: 0.75rem; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+		/* The map claims the entire first screen; the turn/cards/log column
+		   (.side, unstyled here — it keeps its normal block layout) sits
+		   right below in ordinary document flow, reached by scrolling rather
+		   than fighting for space alongside or on top of the board. */
+		.grid { display: block; }
+		.mapwrap {
+			height: 100dvh;
+			display: flex;
+			align-items: center;
+			justify-content: center;
+			overflow: hidden;
+		}
+		/* Fit the map to the full screen instead of sharing width with a
+		   docked sidebar — the SVG's default preserveAspectRatio (xMidYMid
+		   meet) scales it to fill without distortion. */
+		.map { width: 100%; height: 100%; }
+	}
+	/* Small fixed badge that jumps down to the card hand — the tap target
+	   for reaching cards once they're normal below-the-fold content instead
+	   of an always-visible panel. Hidden outside the landscape breakpoint,
+	   where the side panel is already on-screen alongside the map. */
+	.cards-fab {
+		display: none;
+		position: fixed;
+		right: max(0.75rem, env(safe-area-inset-right));
+		bottom: max(0.75rem, env(safe-area-inset-bottom));
+		z-index: 40;
+		width: 52px;
+		height: 52px;
+		border-radius: 50%;
+		background: rgba(15, 32, 53, 0.9);
+		border: 1px solid #4a9fcf;
+		backdrop-filter: blur(6px);
+		box-shadow: 0 4px 14px rgba(0, 0, 0, 0.5);
+		font-size: 1.3rem;
+		align-items: center;
+		justify-content: center;
+	}
+	.cards-fab-count {
+		position: absolute;
+		top: -4px;
+		right: -4px;
+		background: #ffe14a;
+		color: #1a1a1a;
+		font-family: monospace;
+		font-weight: bold;
+		font-size: 0.7rem;
+		min-width: 18px;
+		height: 18px;
+		border-radius: 9px;
+		display: flex;
+		align-items: center;
+		justify-content: center;
+		padding: 0 3px;
+	}
+	/* Mirrors .cards-fab on the opposite bottom corner — toggles the
+	   collapsed header/message bar instead of scrolling to below-the-fold
+	   content, so it never has to fight the header itself for screen space
+	   regardless of open/closed state. */
+	.chrome-toggle {
+		display: none;
+		position: fixed;
+		left: max(0.75rem, env(safe-area-inset-left));
+		bottom: max(0.75rem, env(safe-area-inset-bottom));
+		z-index: 40;
+		height: 36px;
+		min-width: 36px;
+		border-radius: 18px;
+		background: rgba(15, 32, 53, 0.9);
+		border: 1px solid #4a9fcf;
+		backdrop-filter: blur(6px);
+		box-shadow: 0 4px 14px rgba(0, 0, 0, 0.5);
+		color: #d0e6f5;
+		align-items: center;
+		justify-content: center;
+		gap: 0.3rem;
+		padding: 0 0.6rem;
+		font-size: 0.8rem;
+	}
+	.chrome-toggle-dot { width: 9px; height: 9px; border-radius: 50%; flex: none; }
+	.chrome-toggle-turn { font-family: monospace; }
+	@media (max-height: 600px) and (orientation: landscape) {
+		.cards-fab { display: flex; }
+		.chrome-toggle { display: flex; }
+		/* Collapsed by default (see landscapeChromeOpen) — hide the header
+		   and message bar until the toggle opens them. Not .start-prompt:
+		   that's the "Start Game" CTA on a fresh game, and it's the only
+		   way in — hiding it behind this same toggle would mean tapping the
+		   toggle to find the button that reveals the toggle. */
+		.board-frame:not(.chrome-open) header,
+		.board-frame:not(.chrome-open) .msg {
+			display: none;
+		}
+		/* .start-prompt normally sits below the header (top: 2.5rem); with
+		   the header collapsed by default there's nothing above it to clear. */
+		.board-frame:not(.chrome-open) .start-prompt {
+			top: max(0.4rem, env(safe-area-inset-top));
+		}
+	}
 	.side { display: flex; flex-direction: column; gap: 0.5rem; }
 	.panel {
 		border: 1px solid #1a3040;
@@ -2292,14 +2525,19 @@
 		align-items: center;
 		justify-content: center;
 		z-index: 1500;
+		padding: 0.75rem;
+		box-sizing: border-box;
 	}
 	.qty-modal {
 		background: linear-gradient(180deg, #10304a, #0a1a2c);
 		border: 2px solid #4a9fcf;
 		border-radius: 10px;
 		padding: 1.5rem 1.75rem;
-		min-width: 340px;
+		width: 100%;
 		max-width: 440px;
+		max-height: 100%;
+		overflow-y: auto;
+		box-sizing: border-box;
 		box-shadow: 0 12px 40px rgba(0, 0, 0, 0.5), 0 0 30px rgba(74, 159, 207, 0.3);
 	}
 	.qty-modal-title {
@@ -2389,15 +2627,27 @@
 		align-items: center;
 		justify-content: center;
 		z-index: 1500;
+		padding: 0.75rem;
+		box-sizing: border-box;
 	}
 	.attack-modal {
 		background: linear-gradient(180deg, #10304a, #0a1a2c);
 		border: 2px solid #ffe14a;
 		border-radius: 12px;
 		padding: 1.25rem 1.5rem;
-		min-width: 620px;
+		width: 100%;
 		max-width: 780px;
+		max-height: 100%;
+		overflow-y: auto;
+		box-sizing: border-box;
 		box-shadow: 0 12px 40px rgba(0, 0, 0, 0.55), 0 0 30px rgba(255, 225, 74, 0.2);
+	}
+	@media (max-width: 640px) {
+		.attack-hexes { grid-template-columns: 1fr; }
+		.attack-vs { padding: 0.15rem 0; }
+		.side-hex { max-width: 170px; }
+		.attack-actions { grid-template-columns: 1fr 1fr; }
+		.attack-actions button:last-child { grid-column: span 2; }
 	}
 	.attack-title {
 		display: flex;
@@ -2701,11 +2951,16 @@
 		padding: 1rem 1.25rem;
 		margin: 0.75rem 0;
 		box-shadow: 0 0 20px rgba(74, 159, 207, 0.35);
+		flex-wrap: wrap;
 	}
 	.start-prompt h2 { margin: 0 0 0.15rem; color: #e0f0ff; font-size: 1.15rem; }
 	.start-prompt p { margin: 0; color: #a8bfd4; font-size: 0.9rem; }
 	.start-prompt > div:first-child { flex: 1 1 auto; }
 	.start-prompt > button { margin-left: auto; }
+	@media (max-width: 480px) {
+		.start-prompt { flex-direction: column; align-items: stretch; text-align: center; }
+		.start-prompt > button { margin-left: 0; }
+	}
 	button.big { padding: 0.75rem 1.5rem; font-size: 1rem; font-weight: bold; }
 	button.primary { background: #2a5a8a; border-color: #7fcfff; color: #fff; }
 	button.primary:hover:not(:disabled) { background: #3a6a9a; }

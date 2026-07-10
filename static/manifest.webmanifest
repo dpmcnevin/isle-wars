@@ -1,0 +1,9 @@
+{
+	"name": "Isle Wars",
+	"short_name": "Isle Wars",
+	"start_url": ".",
+	"display": "standalone",
+	"orientation": "any",
+	"background_color": "#0a1420",
+	"theme_color": "#0a1420"
+}
