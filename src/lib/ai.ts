@@ -18,6 +18,8 @@ import {
 	canInvasionConnect,
 	canTunnelConnect,
 	defenseBonus,
+	attackerBonus,
+	winProbability,
 	hasClearWaterPath,
 	PLAYERS,
 	type Player,
@@ -548,6 +550,22 @@ function choosePlacementTarget(s: GameState, p: Player): number | null {
 	return valueNetPlayers.has(p) ? pickPlacementTargetWithValueNet(s, p) : pickPlacementTarget(s, p);
 }
 
+// Minimum estimated conquest probability before the AI opens an attack, by
+// game difficulty (1..4). This is what makes the difficulty setting actually
+// matter: low difficulties pick fights recklessly, high ones only commit when
+// clearly favored. Uses the exact winProbability the human's UI shows, with
+// the same terrain/fortification/crossing bonuses factored in.
+const ATTACK_PROB_FLOOR: Record<number, number> = { 1: 0.3, 2: 0.45, 3: 0.55, 4: 0.65 };
+
+// Whether attacking `to` from `from` clears the difficulty's win-chance bar.
+// Undefended hexes are always worth walking into.
+function attackWorthOpening(s: GameState, from: number, to: number): boolean {
+	const def = s.states[to].armies;
+	if (def <= 0) return true;
+	const floor = ATTACK_PROB_FLOOR[s.difficulty] ?? 0.45;
+	return winProbability(s.states[from].armies, def, defenseBonus(s, to, from), attackerBonus(s, to)) >= floor;
+}
+
 interface AttackChoice { from: number; to: number; }
 function findBestAttack(s: GameState, p: Player): AttackChoice | null {
 	let best: AttackChoice | null = null;
@@ -565,6 +583,7 @@ function findBestAttack(s: GameState, p: Player): AttackChoice | null {
 			if (wallBetween(s.map, g.id, n)) continue;
 			const margin = myArmies - st.armies;
 			if (margin < 2) continue;
+			if (!attackWorthOpening(s, g.id, n)) continue;
 			// Neutrals are effectively free real estate; weight them so the AI
 			// prefers scooping up an empty hex over grinding an enemy.
 			const score = st.owner ? margin * 4 - st.armies : margin * 4 + 20;
@@ -593,6 +612,7 @@ function findBestAttackWithValueNet(s: GameState, p: Player): AttackChoice | nul
 			if (wallBetween(s.map, g.id, n)) continue;
 			const margin = myArmies - st.armies;
 			if (margin < 2) continue;
+			if (!attackWorthOpening(s, g.id, n)) continue;
 
 			const movedIn = Math.max(1, Math.floor(myArmies / 2));
 			const hypothetical: GameState = {

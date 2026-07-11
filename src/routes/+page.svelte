@@ -43,10 +43,12 @@
 		CARD_META,
 		CARD_DEFS,
 		canPlayCardNow,
+		setHumanPlayers,
 		type Player,
 		type CardType,
 		type GameState,
-		type DebugSettings
+		type DebugSettings,
+		type EventIntensity
 	} from '$lib/game';
 	import { wallBetween, polygonPoints, wallSegmentsFor, seaLanePath, type GameMap } from '$lib/map';
 	import { runAiTurn, setValueNetPlayers } from '$lib/ai';
@@ -205,9 +207,13 @@
 	});
 	let difficulty = $state(2);
 	let startingArmies = $state(3);
+	let eventIntensity = $state<EventIntensity>('mild');
 	let showMenu = $state(false);
 
 	const HUMAN: Player = 'blue';
+	// Register the human with the engine (the discard-pause rule keys off it)
+	// instead of the rules hardcoding blue.
+	setHumanPlayers([HUMAN]);
 	// Trained value-network evaluator (see ml/, src/lib/valueNet.ts) beat the
 	// original hand-tuned heuristic ~55% vs ~25% in head-to-head sims, so the
 	// AI opponents use it here. It's a module-level switch in ai.ts, not tied
@@ -238,6 +244,7 @@
 	});
 	function aiTickMs() { return aiSpeed === 0 ? 0 : aiSpeed === 2 ? 20 : 60; }
 
+	let showShortcuts = $state(false);
 	let autoRolling = $state(false);
 	let hoveredGrid = $state<number | null>(null);
 	let tooltipPos = $state<{ x: number; y: number } | null>(null);
@@ -338,6 +345,17 @@
 	// map is the point; irrelevant outside the landscape breakpoint, where
 	// the toggle button itself is hidden via CSS and the header always shows.
 	let landscapeChromeOpen = $state(false);
+	// True only inside the Tauri desktop shell (src-tauri/), never in a
+	// regular browser tab — detected via the global Tauri's own JS runtime
+	// injects, checked once on mount since it can't change mid-session.
+	// Browser tabs are expected to scroll like any other web page; the
+	// desktop window isn't, so this gates a dedicated no-scroll layout
+	// (main.app-mode below) that fills the window exactly instead.
+	let isDesktopApp = $state(false);
+	// Analytics/charts are hidden by default in app-mode (see main.app-mode
+	// .analytics) so they don't push the window's content taller than its
+	// viewport — this reveals them as a dismissible overlay instead.
+	let showAnalytics = $state(false);
 	let dragFrom = $state<number | null>(null);
 	let dragPt = $state<{ x: number; y: number } | null>(null);
 	let pointerDownGrid: number | null = null;
@@ -494,6 +512,7 @@
 	}
 
 	onMount(() => {
+		isDesktopApp = '__TAURI_INTERNALS__' in window;
 		loadDebugUi();
 		// A shared map link (?seed=...) always wins over any saved game — the
 		// whole point is to reproduce that exact game. The seed itself packs
@@ -505,7 +524,7 @@
 		const sharedSeed = url.searchParams.get('seed');
 		if (sharedSeed != null && sharedSeed.trim() !== '') {
 			loadSavedGame(); // still registers the auto-save subscription
-			newGame(difficulty, startingArmies, sharedSeed);
+			newGame(difficulty, startingArmies, sharedSeed, eventIntensity);
 			loadDebugUi(); // reflect any debug settings the seed just applied
 			url.searchParams.delete('seed');
 			window.history.replaceState({}, '', url.toString());
@@ -517,9 +536,14 @@
 	});
 
 	function onKey(e: KeyboardEvent) {
-		if ($game.current !== HUMAN || $game.phase === 'game_over') return;
 		const tag = (e.target as HTMLElement | null)?.tagName;
 		if (tag === 'INPUT' || tag === 'TEXTAREA') return;
+		// Shortcut help works at any time — even during the AI's turn or when
+		// the game is over — so it's handled before the current-player gate.
+		if (e.key === '?') { showShortcuts = !showShortcuts; e.preventDefault(); return; }
+		if (e.key === 'Escape' && showShortcuts) { showShortcuts = false; return; }
+		if ($game.current !== HUMAN || $game.phase === 'game_over') return;
+		if (showShortcuts) return; // don't drive the game from behind the help modal
 		if (e.key === 'Escape') { cancelQty(); return; }
 		if (isQtyPhase()) {
 			if (e.key === 'Enter') { confirmQty(); e.preventDefault(); return; }
@@ -538,6 +562,14 @@
 	async function startAutoRoll() {
 		autoRolling = true;
 		while (autoRolling && $game.phase === 'attack_rolling') {
+			// Pause at the forfeit brink: with 2 armies left, one more lost roll
+			// forfeits the source hex to an enemy defender and ends the turn.
+			// That decision belongs to the player, not the auto-roller.
+			const s = $game;
+			if (
+				s.selectedFrom != null && s.selectedTo != null &&
+				s.states[s.selectedFrom].armies <= 2 && s.states[s.selectedTo].owner != null
+			) break;
 			rollAttack();
 			await new Promise((r) => setTimeout(r, 90));
 		}
@@ -619,7 +651,7 @@
 	}
 
 	function startNewGame() {
-		newGame(difficulty, startingArmies, parseSeedInput());
+		newGame(difficulty, startingArmies, parseSeedInput(), eventIntensity);
 		showMenu = false;
 	}
 
@@ -629,7 +661,7 @@
 		);
 		if (!ok) return;
 		clearSavedGame();
-		newGame(difficulty, startingArmies, parseSeedInput());
+		newGame(difficulty, startingArmies, parseSeedInput(), eventIntensity);
 	}
 
 	let seedCopied = $state(false);
@@ -1061,7 +1093,7 @@
 	</g>
 {/snippet}
 
-<main>
+<main class:app-mode={isDesktopApp}>
 	<!-- Groups the header/menu/message chrome with the map+side grid so the
 	     short-landscape media query below can flex just this region to fill
 	     the viewport, without the (always-in-the-DOM) analytics section past
@@ -1088,6 +1120,9 @@
 						<option value={0}>⚡</option>
 					</select>
 				</label>
+				{#if isDesktopApp}
+					<button class="icon-btn" title="Stats" onclick={() => (showAnalytics = !showAnalytics)}>{showAnalytics ? '✕' : 'Stats'}</button>
+				{/if}
 				<button class="icon-btn" title="New Game" onclick={() => (showMenu = !showMenu)}>{showMenu ? '✕' : 'New'}</button>
 				<button class="icon-btn" title="Copy a link to this exact game — map and settings (seed {$game.seed})" onclick={copyShareLink}>{seedCopied ? 'Copied!' : 'Share'}</button>
 				<button class="icon-btn debug-btn" title="Debug" onclick={() => (showDebug = !showDebug)}>Debug</button>
@@ -1112,6 +1147,14 @@
 				<label>
 					<span class="field-label">Starting armies per country</span>
 					<input type="number" min="1" max="10" bind:value={startingArmies} />
+				</label>
+				<label>
+					<span class="field-label">World events</span>
+					<select bind:value={eventIntensity}>
+						<option value="off">Off — no random events</option>
+						<option value="mild">Mild (default) — occasional, announced a turn ahead</option>
+						<option value="wild">Wild — frequent, announced a turn ahead</option>
+					</select>
 				</label>
 				<label>
 					<span class="field-label">Map seed</span>
@@ -1609,6 +1652,34 @@
 		<button class="end-turn-fab placing" disabled>{$game.armiesToPlace} to place</button>
 	{/if}
 
+	{#if showShortcuts}
+		<div class="shortcuts-backdrop" role="presentation" onclick={() => (showShortcuts = false)}>
+			<div class="shortcuts-modal" role="dialog" aria-label="Keyboard shortcuts" onclick={(e) => e.stopPropagation()}>
+				<div class="shortcuts-title">
+					<span>Keyboard shortcuts</span>
+					<button class="close-x" onclick={() => (showShortcuts = false)} aria-label="Close shortcuts">✕</button>
+				</div>
+				<table class="shortcuts-table">
+					<tbody>
+						<tr><th colspan="2">Action phase</th></tr>
+						<tr><td><kbd>A</kbd></td><td>Attack — then click source and target</td></tr>
+						<tr><td><kbd>M</kbd></td><td>Move armies (ends your turn)</td></tr>
+						<tr><td><kbd>P</kbd></td><td>Pass — end your turn</td></tr>
+						<tr><th colspan="2">During a battle</th></tr>
+						<tr><td><kbd>Enter</kbd> / <kbd>Space</kbd></td><td>Roll the dice</td></tr>
+						<tr><th colspan="2">Quantity picker</th></tr>
+						<tr><td><kbd>↑</kbd> / <kbd>+</kbd></td><td>More armies</td></tr>
+						<tr><td><kbd>↓</kbd> / <kbd>−</kbd></td><td>Fewer armies</td></tr>
+						<tr><td><kbd>Enter</kbd></td><td>Confirm</td></tr>
+						<tr><th colspan="2">Anywhere</th></tr>
+						<tr><td><kbd>Esc</kbd></td><td>Cancel the current selection / close dialogs</td></tr>
+						<tr><td><kbd>?</kbd></td><td>Show or hide this help</td></tr>
+					</tbody>
+				</table>
+			</div>
+		</div>
+	{/if}
+
 	{#if isQtyPhase() && qtySourceHex() != null}
 		{@const src = qtySourceHex()!}
 		{@const srcArmies = $game.states[src].armies}
@@ -1744,6 +1815,7 @@
 									{#if atkB > 0}<li class="pos">+{atkB} 🌲 forest cover on target</li>{/if}
 									{#if eliteB > 0}<li class="pos">+{eliteB} 🛡 Elite Troops</li>{/if}
 									{#if g.terrain === 'marsh'}<li class="warn">Marsh — cannot re-attack from here this turn</li>{/if}
+									{#if atkA <= 2}<li class="warn">⚠ One more lost roll {tgtSt.owner ? 'FORFEITS this territory to the defender and ends your turn' : 'aborts the attack'}!</li>{/if}
 								{:else}
 									{#if g.terrain === 'mountain'}<li class="pos">+1 ⛰ mountain</li>{/if}
 									{#if st.fortified}<li class="pos">+2 🛡 fortified</li>{/if}
@@ -1776,8 +1848,15 @@
 	{/if}
 
 	{#if $game.history}
-		<section class="analytics">
-			{@render analyticsCharts($game.history)}
+		<section class="analytics" class:app-mode={isDesktopApp} class:open={showAnalytics}>
+			{#if isDesktopApp}
+				<div class="analytics-card">
+					<button class="analytics-close" onclick={() => (showAnalytics = false)} aria-label="Close stats">✕</button>
+					{@render analyticsCharts($game.history)}
+				</div>
+			{:else}
+				{@render analyticsCharts($game.history)}
+			{/if}
 		</section>
 	{/if}
 </main>
@@ -2267,13 +2346,27 @@
 		color: #fff;
 		font-style: normal;
 	}
+	/* Inspect mode exists because touch has no hover — on a device whose
+	   primary pointer CAN hover (desktop mouse/trackpad), the tooltip already
+	   works and this toggle is just clutter, so hide it there. (After the
+	   base rule so its display: none beats the base display: flex.) */
+	@media (hover: hover) and (pointer: fine) {
+		.inspect-toggle {
+			display: none;
+		}
+	}
 	/* Top-right, mirroring .inspect-toggle's left-edge/always-visible
 	   treatment — the panel button it shadows can be scrolled out of view
 	   or behind the collapsed header, so this stays reachable regardless. */
 	.end-turn-fab {
 		position: fixed;
 		right: max(0.6rem, env(safe-area-inset-right));
-		top: max(0.6rem, env(safe-area-inset-top));
+		/* Clears the header, which is visible by default everywhere except
+		   the landscape-compact breakpoint (where it's collapsed to start —
+		   see the override below) — without this, the fab sits directly on
+		   top of the header's own Debug/Clear buttons and blocks clicks on
+		   them, on any normal desktop-sized window. */
+		top: max(3.5rem, calc(env(safe-area-inset-top) + 3.2rem));
 		z-index: 40;
 		background: #2a5a8a;
 		border: 1px solid #7fcfff;
@@ -2301,10 +2394,14 @@
 		.cards-fab { display: flex; }
 		.chrome-toggle { display: flex; }
 		/* .end-turn-fab sits at top-right too, same corner as the header's
-		   own New/Share/Debug/Clear cluster — header is collapsed by default
-		   here so there's normally no conflict, but if it's manually opened
-		   (.chrome-toggle) mid-action-phase, drop the fab below it rather
-		   than overlap. Sibling selector: they're DOM siblings, not nested. */
+		   own New/Share/Debug/Clear cluster. Everywhere else the header is
+		   always visible, so the fab's default top offset clears it — but
+		   here the header is collapsed by default (see landscapeChromeOpen),
+		   so it can sit right at the top with nothing to avoid, UNLESS the
+		   header is manually opened (.chrome-toggle) mid-action-phase, in
+		   which case it drops back below it. Sibling selector: they're DOM
+		   siblings, not nested. */
+		.end-turn-fab { top: max(0.6rem, env(safe-area-inset-top)); }
 		.board-frame.chrome-open ~ .end-turn-fab { top: 3rem; }
 		/* Collapsed by default (see landscapeChromeOpen) — hide the header
 		   and message bar until the toggle opens them. Not .start-prompt:
@@ -2773,6 +2870,73 @@
 		font-weight: bold;
 	}
 
+	.shortcuts-backdrop {
+		position: fixed;
+		inset: 0;
+		background: rgba(4, 10, 20, 0.7);
+		backdrop-filter: blur(2px);
+		display: flex;
+		align-items: center;
+		justify-content: center;
+		z-index: 1600;
+		padding: 0.75rem;
+		box-sizing: border-box;
+	}
+	.shortcuts-modal {
+		background: linear-gradient(180deg, #10304a, #0a1a2c);
+		border: 2px solid #4a9fcf;
+		border-radius: 12px;
+		padding: 1rem 1.25rem 1.25rem;
+		width: 100%;
+		max-width: 460px;
+		max-height: 100%;
+		overflow-y: auto;
+		box-sizing: border-box;
+		box-shadow: 0 12px 40px rgba(0, 0, 0, 0.55), 0 0 30px rgba(74, 159, 207, 0.25);
+	}
+	.shortcuts-title {
+		display: flex;
+		justify-content: space-between;
+		align-items: center;
+		color: #e0f0ff;
+		font-size: 1.1rem;
+		font-weight: bold;
+		margin-bottom: 0.5rem;
+	}
+	.shortcuts-table {
+		width: 100%;
+		border-collapse: collapse;
+		font-size: 0.9rem;
+	}
+	.shortcuts-table th {
+		text-align: left;
+		color: #7fcfff;
+		font-size: 0.75rem;
+		letter-spacing: 0.08em;
+		text-transform: uppercase;
+		padding: 0.7rem 0 0.25rem;
+	}
+	.shortcuts-table td {
+		padding: 0.2rem 0;
+		color: #a8bfd4;
+		vertical-align: baseline;
+	}
+	.shortcuts-table td:first-child {
+		white-space: nowrap;
+		padding-right: 1rem;
+		width: 1%;
+	}
+	.shortcuts-table kbd {
+		display: inline-block;
+		background: #0f2035;
+		border: 1px solid #2a4a66;
+		border-bottom-width: 2px;
+		border-radius: 5px;
+		padding: 0.1rem 0.45rem;
+		color: #e0f0ff;
+		font-family: inherit;
+		font-size: 0.85rem;
+	}
 	.attack-modal-backdrop {
 		position: fixed;
 		inset: 0;
@@ -3190,9 +3354,34 @@
 		border: 2px solid #4a9fcf;
 		border-radius: 8px;
 		padding: 1rem 1.25rem;
-		margin: 0.75rem 0;
-		box-shadow: 0 0 20px rgba(74, 159, 207, 0.35);
+		margin: 0;
+		box-shadow: 0 0 20px rgba(74, 159, 207, 0.35), 0 8px 30px rgba(0, 0, 0, 0.45);
 		flex-wrap: wrap;
+	}
+	/* On desktop, float the banner (fixed, centered at the BOTTOM of the
+	   viewport — over the analytics strip, not the board) instead of sitting
+	   in flow, so the map and side panel don't jump down and back up when it
+	   appears/disappears. Only ≥1001px: below that the single-column layout
+	   keeps it in flow, and the compact-landscape breakpoint (declared
+	   earlier) has its own absolute placement this must not override. */
+	@media (min-width: 1001px) and (min-height: 601px) {
+		.start-prompt {
+			position: fixed;
+			bottom: 1rem;
+			left: 50%;
+			transform: translateX(-50%);
+			width: auto;
+			max-width: calc(100vw - 1.5rem);
+			z-index: 30;
+			/* Single slim line: title and hint run inline, button at the end. */
+			flex-wrap: nowrap;
+			white-space: nowrap;
+			padding: 0.5rem 0.9rem;
+		}
+		.start-prompt > div:first-child { flex: 0 0 auto; }
+		.start-prompt h2 { display: inline; font-size: 1rem; margin: 0 0.5rem 0 0; }
+		.start-prompt p { display: inline; }
+		.start-prompt button.big { padding: 0.45rem 1rem; font-size: 0.9rem; }
 	}
 	.start-prompt h2 { margin: 0 0 0.15rem; color: #e0f0ff; font-size: 1.15rem; }
 	.start-prompt p { margin: 0; color: #a8bfd4; font-size: 0.9rem; }
@@ -3242,4 +3431,91 @@
 
 	/* Game-over/turning-point UI now lives entirely on routes/recap — see
 	   TurningPointCompareModal.svelte and TpMiniMap.svelte. */
+
+	/* Desktop app (Tauri) only — see isDesktopApp in the script block. A
+	   browser tab is expected to scroll like any other web page; a native
+	   window isn't, so this fills the window exactly instead: header/menu
+	   keep their natural height, .grid (map + side panel) absorbs whatever
+	   space is left, and .side/.analytics get their own internal scroll
+	   instead of growing the page. All selectors here are compound
+	   (main.app-mode ...), which is what makes them win regardless of where
+	   in the file they're declared — higher specificity than the plain
+	   .grid/.mapwrap/etc. rules above, not source order, so there's no
+	   repeat of the "override placed before the base rule silently loses"
+	   bug from the mobile layout work. */
+	main.app-mode {
+		height: 100dvh;
+		overflow: hidden;
+		display: flex;
+		flex-direction: column;
+		box-sizing: border-box;
+	}
+	main.app-mode .board-frame {
+		display: flex;
+		flex-direction: column;
+		height: 100%;
+		min-height: 0;
+	}
+	main.app-mode .board-frame > :global(*) { flex: none; }
+	main.app-mode .grid {
+		flex: 1 1 0;
+		min-height: 0;
+		/* Implicit grid rows default to auto (max-content) sizing and won't
+		   shrink below that even with a definite container height — same
+		   trap as flexbox's default min-height:auto. minmax(0, 1fr) is what
+		   actually lets the row respect the flex-fill height above. */
+		grid-template-rows: minmax(0, 1fr);
+	}
+	main.app-mode .mapwrap {
+		height: 100%;
+		min-height: 0;
+		display: flex;
+		align-items: center;
+		justify-content: center;
+		overflow: hidden;
+	}
+	/* Fit the map to the available height instead of the width:100%/
+	   height:auto default, which sizes purely off width and ignores
+	   whatever vertical space this row actually has. */
+	main.app-mode .map { width: auto; height: 100%; max-width: 100%; }
+	main.app-mode .side { max-height: 100%; min-height: 0; overflow-y: auto; }
+	/* Hidden by default so charts/stats don't push the window taller than
+	   its own viewport — the Stats header button toggles this open as a
+	   dismissible overlay instead of normal-flow content below the fold. */
+	.analytics.app-mode {
+		display: none;
+		position: fixed;
+		inset: 0;
+		z-index: 60;
+		margin: 0;
+		align-items: center;
+		justify-content: center;
+		background: rgba(4, 10, 20, 0.75);
+		backdrop-filter: blur(2px);
+	}
+	.analytics.app-mode.open { display: flex; }
+	.analytics-card {
+		position: relative;
+		background: #0f2035;
+		border: 1px solid #2a5a8a;
+		border-radius: 10px;
+		padding: 1rem 1.25rem;
+		max-width: min(90vw, 1100px);
+		max-height: 85vh;
+		overflow-y: auto;
+		box-shadow: 0 12px 40px rgba(0, 0, 0, 0.5);
+	}
+	.analytics-close {
+		position: absolute;
+		top: 0.6rem;
+		right: 0.6rem;
+		z-index: 1;
+		background: rgba(15, 32, 53, 0.9);
+		border: 1px solid #4a9fcf;
+		color: #d0e6f5;
+		border-radius: 50%;
+		width: 30px;
+		height: 30px;
+		cursor: pointer;
+	}
 </style>

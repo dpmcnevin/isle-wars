@@ -1,5 +1,5 @@
 import { writable, derived, get } from 'svelte/store';
-import { generateMap, crossesRiver, wallBetween, wallSegmentsFor, shuffle, encodeSeed, decodeSeedSettings, hashSeedToInt, isCustomMapSeed, encodeCustomMapSeed, decodeCustomMapSeed, buildCustomMap, type GameMap, type Terrain } from './map';
+import { generateMap, crossesRiver, wallBetween, wallSegmentsFor, shuffle, encodeSeed, decodeSeedSettings, hashSeedToInt, isCustomMapSeed, encodeCustomMapSeed, decodeCustomMapSeed, buildCustomMap, type GameMap, type Terrain, type EventIntensity } from './map';
 // The card registry lives in ./cards (this module and it import each other; see
 // the note in cards.ts for why that cycle is safe). Values used by the dispatch
 // below are imported here; the public card API is re-exported near CardType so
@@ -23,6 +23,18 @@ import {
 
 export type Player = 'blue' | 'green' | 'red' | 'brown';
 export const PLAYERS: Player[] = ['blue', 'green', 'red', 'brown'];
+export type { EventIntensity };
+
+// Which players a human drives (the rest are AI). A single seam instead of
+// hardcoding 'blue' in the rules — the UI registers its human player(s) here,
+// and a future hotseat mode just registers more than one.
+let humanPlayers: Set<Player> = new Set(['blue']);
+export function isHumanPlayer(p: Player): boolean {
+	return humanPlayers.has(p);
+}
+export function setHumanPlayers(players: Player[]) {
+	humanPlayers = new Set(players);
+}
 export const PLAYER_COLORS: Record<Player, string> = {
 	blue: '#3a7fd5',
 	green: '#3ac055',
@@ -149,11 +161,20 @@ export interface LogEntry {
 	kind?: 'info' | 'attack' | 'event' | 'card' | 'defeat';
 }
 
+export type WorldEventType = 'earthquake' | 'flood' | 'rebellion' | 'rebels_flip';
+
 export interface GameState {
 	map: GameMap;
 	seed: string;
 	difficulty: number; // 1..4
 	startingArmies: number; // armies each initial territory got at game start — kept for share links
+	// How often random world events fire. Optional: absent on saves from
+	// before the setting existed (treated as 'mild').
+	eventIntensity?: EventIntensity;
+	// A world event announced at the end of the previous turn that strikes at
+	// the start of this one — events are telegraphed one turn ahead so players
+	// can react. Optional: absent on old saves.
+	pendingEventType?: WorldEventType | null;
 	states: GridState[]; // indexed by grid id
 	hands: Record<Player, CardType[]>;
 	alive: Record<Player, boolean>;
@@ -743,7 +764,7 @@ function emptyAlive(): Record<Player, boolean> {
  * Initialize a new game. Difficulty 1..4 controls how many countries the
  * human player starts with; startingArmies is the initial armies per grid.
  */
-export function startGame(difficulty = 2, startingArmies = 3, seed?: string): GameState {
+export function startGame(difficulty = 2, startingArmies = 3, seed?: string, eventIntensity: EventIntensity = 'mild'): GameState {
 	// A CUSTOM- seed IS the map (see map.ts's packed custom-seed format) —
 	// terrain, cities, rivers/walls, starting placements, and rules all decode
 	// from the string, so pasting one reproduces the exact editor game the way
@@ -774,6 +795,7 @@ export function startGame(difficulty = 2, startingArmies = 3, seed?: string): Ga
 	if (decoded) {
 		difficulty = decoded.difficulty;
 		startingArmies = decoded.startingArmies;
+		eventIntensity = decoded.eventIntensity;
 		updateDebugSettings({
 			dieSides: decoded.dieSides,
 			starterCards: decoded.starterCards,
@@ -794,7 +816,7 @@ export function startGame(difficulty = 2, startingArmies = 3, seed?: string): Ga
 	// (shown in the UI and shared links) never shows a stray lowercase entry.
 	const s = (
 		seed ??
-		encodeSeed({ difficulty, startingArmies, ...getDebugSettings() })
+		encodeSeed({ difficulty, startingArmies, eventIntensity, ...getDebugSettings() })
 	).toUpperCase();
 	const map = generateMap(s);
 	const states: GridState[] = map.grids.map(() => ({ owner: null, armies: 0 }));
@@ -844,7 +866,8 @@ export function startGame(difficulty = 2, startingArmies = 3, seed?: string): Ga
 		difficulty,
 		startingArmies,
 		s,
-		`New game (seed ${s}, difficulty ${difficulty}). ${PLAYER_NAMES[startPlayer]} plays first.`
+		`New game (seed ${s}, difficulty ${difficulty}). ${PLAYER_NAMES[startPlayer]} plays first.`,
+		eventIntensity
 	);
 }
 
@@ -861,13 +884,16 @@ function finishGameSetup(
 	difficulty: number,
 	startingArmies: number,
 	seed: string,
-	introLogText: string
+	introLogText: string,
+	eventIntensity: EventIntensity = 'mild'
 ): GameState {
 	const state: GameState = {
 		map,
 		seed,
 		difficulty,
 		startingArmies,
+		eventIntensity,
+		pendingEventType: null,
 		states,
 		capitals,
 		hands: emptyHands(),
@@ -1034,10 +1060,25 @@ export function allCapitalsBonus(s: GameState, p: Player): number {
 	return caps.every((id) => s.states[id].owner === p) ? CAPITAL_BONUS : 0;
 }
 
+/** Deterministic city income: +1 reinforcement per city (★) a player holds,
+ *  +2 if that city is a capital — anyone's. (An occupied enemy capital thus
+ *  pays its occupier +2/turn, while the dispossessed owner also loses their
+ *  separate +3 capitalBonus — capitals are worth attacking AND defending.)
+ *  This replaces the old random production surge. */
+export function cityIncome(s: GameState, p: Player): number {
+	const capitalIds = new Set(Object.values(s.capitals ?? {}));
+	let income = 0;
+	for (const g of s.map.grids) {
+		if (!g.production || s.states[g.id].owner !== p) continue;
+		income += capitalIds.has(g.id) ? 2 : 1;
+	}
+	return income;
+}
+
 function computeReinforcements(s: GameState, p: Player): number {
 	const c = countryCount(s, p);
 	const base = Math.max(2, Math.floor(c / 3));
-	return base + fullIslandBonus(s, p) + capitalBonus(s, p) + allCapitalsBonus(s, p);
+	return base + fullIslandBonus(s, p) + cityIncome(s, p) + capitalBonus(s, p) + allCapitalsBonus(s, p);
 }
 
 export function log(s: GameState, text: string, kind: LogEntry['kind'] = 'info', player: Player | null = s.current) {
@@ -1364,37 +1405,27 @@ function beginTurn(s: GameState): GameState {
 		log(s, `${PLAYER_NAMES[s.current]} received debug card${turnCards.length > 1 ? 's' : ''}: ${turnCards.map((c) => CARD_LABELS[c]).join(', ')}.`, 'card');
 	}
 
-	// Random world event 25% chance (skip on turn 1)
-	if (s.turn > 1 && Math.random() < 0.25) {
-		applyRandomEvent(s);
+	// Random world events are telegraphed one turn ahead: a warning is logged
+	// this turn, and the event actually strikes at the start of the NEXT turn —
+	// giving players a window to react instead of being ambushed. How often one
+	// is scheduled depends on the game's event intensity setting.
+	const pendingEvent = s.pendingEventType;
+	s.pendingEventType = null;
+	if (pendingEvent) {
+		applyRandomEvent(s, pendingEvent);
 		if (s.winner) return s;
 	}
-
-	// Production centers grow at ~10% chance per turn. To prevent exponential
-	// runaway on long games, the doubling is capped: a hex only doubles up to
-	// the PROD_CAP threshold, beyond which it grows by a fixed additive bonus.
-	if (Math.random() < 0.1) {
-		const PROD_CAP = 40;
-		const PROD_ADD = 8;
-		let touched = 0;
-		for (const g of s.map.grids) {
-			if (!g.production || !s.states[g.id].owner) continue;
-			const cur = s.states[g.id].armies;
-			if (cur < PROD_CAP) {
-				s.states[g.id].armies = Math.min(PROD_CAP, cur * 2);
-			} else {
-				s.states[g.id].armies = cur + PROD_ADD;
-			}
-			pushArmyEvent(s, g.id, s.states[g.id].owner!, s.states[g.id].armies - cur, 'production', null);
-			touched++;
-		}
-		if (touched > 0) log(s, `Production centers active! ${touched} grids boosted.`, 'event', null);
+	if (s.turn > 1 && Math.random() < eventChance(s)) {
+		const type = pickEventType();
+		s.pendingEventType = type;
+		log(s, EVENT_OMENS[type], 'event', null);
 	}
 
-	// Reinforcements
+	// Reinforcements (city income replaced the old random production surge —
+	// see cityIncome).
 	let reinf = computeReinforcements(s, s.current);
 	s.armiesToPlace = reinf;
-	log(s, `${PLAYER_NAMES[s.current]}'s turn ${s.turn}. Reinforcements: ${reinf} (${countryCount(s, s.current)} territories, +${fullIslandBonus(s, s.current)} island bonus${capitalBonus(s, s.current) ? `, +${CAPITAL_BONUS} capital` : ''}${allCapitalsBonus(s, s.current) ? `, +${CAPITAL_BONUS} all capitals` : ''}).`, 'info');
+	log(s, `${PLAYER_NAMES[s.current]}'s turn ${s.turn}. Reinforcements: ${reinf} (${countryCount(s, s.current)} territories, +${fullIslandBonus(s, s.current)} island bonus${cityIncome(s, s.current) ? `, +${cityIncome(s, s.current)} cities` : ''}${capitalBonus(s, s.current) ? `, +${CAPITAL_BONUS} capital` : ''}${allCapitalsBonus(s, s.current) ? `, +${CAPITAL_BONUS} all capitals` : ''}).`, 'info');
 	s.phase = 'placing';
 	s.message = `${PLAYER_NAMES[s.current]}: place ${s.armiesToPlace} armies. Click one of your territories.`;
 	return s;
@@ -1436,15 +1467,30 @@ function updateAlive(s: GameState) {
 	}
 }
 
-function applyRandomEvent(s: GameState) {
+/** Per-turn chance a world event gets scheduled, by the game's intensity
+ *  setting. 'mild' (the default) is deliberately well below the old 25%. */
+function eventChance(s: GameState): number {
+	const intensity = s.eventIntensity ?? 'mild';
+	return intensity === 'off' ? 0 : intensity === 'wild' ? 0.25 : 0.12;
+}
+
+function pickEventType(): WorldEventType {
 	const r = Math.random();
-	const eventType =
-		r < 0.32 ? 'earthquake' :
-		r < 0.64 ? 'flood' :
-		r < 0.95 ? 'rebellion' :
-		'rebels_flip';
+	return r < 0.32 ? 'earthquake' : r < 0.64 ? 'flood' : r < 0.95 ? 'rebellion' : 'rebels_flip';
+}
+
+// The warning logged one turn before each event strikes (see beginTurn).
+// Deliberately names the event type — the telegraph is playable information.
+const EVENT_OMENS: Record<WorldEventType, string> = {
+	earthquake: 'The ground trembles… an earthquake will strike next turn!',
+	flood: 'Storm clouds gather… floods will hit next turn!',
+	rebellion: 'Unrest is spreading… a rebellion will erupt next turn!',
+	rebels_flip: 'Whispers of insurrection… rebels will seize a territory next turn!'
+};
+
+function applyRandomEvent(s: GameState, eventType: WorldEventType) {
 	devLog({ type: 'random_event', game_id: devLogGameId, turn: s.turn, event_type: eventType });
-	if (r < 0.32) {
+	if (eventType === 'earthquake') {
 		// Earthquake — 3-4 grids
 		const count = 3 + Math.floor(Math.random() * 2);
 		const hits = pickRandomGrids(s, count);
@@ -1458,7 +1504,7 @@ function applyRandomEvent(s: GameState) {
 			}
 		}
 		log(s, `Earthquake devastates ${hits.length} territories!`, 'event', null);
-	} else if (r < 0.64) {
+	} else if (eventType === 'flood') {
 		// Flood
 		const count = 3 + Math.floor(Math.random() * 2);
 		const hits = pickRandomGrids(s, count);
@@ -1472,7 +1518,7 @@ function applyRandomEvent(s: GameState) {
 			}
 		}
 		log(s, `Floods inundate ${hits.length} territories!`, 'event', null);
-	} else if (r < 0.95) {
+	} else if (eventType === 'rebellion') {
 		// Rebellion — one grid loses half
 		const ids = s.map.grids.filter((g) => s.states[g.id].owner).map((g) => g.id);
 		if (ids.length) {
@@ -1596,10 +1642,10 @@ function awardTurnCardIfDue(s: GameState): boolean {
 	log(s, `${PLAYER_NAMES[s.current]} drew a ${CARD_LABELS[card]} card.`, 'card');
 	s.turnCardAwarded = true;
 	// If the human is over the hand limit, pause for them to pick a
-	// discard. In auto-play mode, blue is AI-controlled — skip the pause
-	// and auto-discard the oldest card(s). With the "blue starts with every
-	// card" debug option the limit is waived (see enforceHandLimit).
-	if (s.current === 'blue' && s.hands.blue.length > HAND_MAX && !debugSettings.autoPlay && !debugSettings.starterCards) {
+	// discard. In auto-play mode every player is AI-controlled — skip the
+	// pause and auto-discard. With the "blue starts with every card" debug
+	// option the limit is waived (see enforceHandLimit).
+	if (isHumanPlayer(s.current) && s.hands[s.current].length > HAND_MAX && !debugSettings.autoPlay && !debugSettings.starterCards) {
 		s.pendingDiscard = true;
 		s.phase = 'discard';
 		s.message = 'Hand full — click a card to discard.';
@@ -1637,12 +1683,11 @@ export function discardCard(index: number) {
 }
 
 function drawCard(s: GameState): CardType | null {
-	// small chance of Lose-All: clear hand instead of drawing
-	if (Math.random() < 0.07) {
-		if (s.hands[s.current].length > 0) {
-			log(s, `${PLAYER_NAMES[s.current]} drew a Lose-All Cards event — their hand was cleared!`, 'card');
-			s.hands[s.current] = [];
-		}
+	// Very rare Lose-All: clear hand instead of drawing. Only fires on a hand
+	// worth losing (3+ cards) — on a small hand it would just be a wasted draw.
+	if (s.hands[s.current].length >= 3 && Math.random() < 0.01) {
+		log(s, `${PLAYER_NAMES[s.current]} drew a Lose-All Cards event — their hand was cleared!`, 'card');
+		s.hands[s.current] = [];
 		return null;
 	}
 	const card = CARD_POOL[Math.floor(Math.random() * CARD_POOL.length)];
@@ -1655,10 +1700,17 @@ function enforceHandLimit(s: GameState) {
 	// on purpose — waive the limit entirely so the debug hand isn't trimmed
 	// (and the human is never forced into the discard flow).
 	if (debugSettings.starterCards) return;
-	// If AI over limit, discard random. Human over limit prompted via UI —
-	// we auto-discard oldest to avoid a modal for now.
+	// Auto-discard (AI, or a human in auto-play): drop the most common card —
+	// draw-pool weight is a decent proxy for value (weight-1 cards are the
+	// rare/powerful ones, weight-3 the routine boosters). Ties go to the
+	// oldest copy, matching the previous oldest-first behavior.
 	while (s.hands[s.current].length > HAND_MAX) {
-		s.hands[s.current].shift();
+		const hand = s.hands[s.current];
+		let worst = 0;
+		for (let i = 1; i < hand.length; i++) {
+			if (CARD_BY_ID[hand[i]].weight > CARD_BY_ID[hand[worst]].weight) worst = i;
+		}
+		s.hands[s.current] = hand.filter((_, i) => i !== worst);
 	}
 }
 
@@ -2277,8 +2329,8 @@ export function forceEndTurn() {
 	});
 }
 
-export function newGame(difficulty: number, startingArmies: number, seed?: string) {
-	game.set(startGame(difficulty, startingArmies, seed));
+export function newGame(difficulty: number, startingArmies: number, seed?: string, eventIntensity: EventIntensity = 'mild') {
+	game.set(startGame(difficulty, startingArmies, seed, eventIntensity));
 }
 
 // Derived

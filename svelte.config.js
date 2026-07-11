@@ -3,8 +3,15 @@ import { vitePreprocess } from '@sveltejs/vite-plugin-svelte';
 
 // GitHub Pages base path — must match the repo name so asset URLs resolve at
 // https://<user>.github.io/<repo>/. Set to '' for a custom-domain deploy.
+// The Tauri desktop build also needs '' — it serves assets from the root of
+// its own tauri:// protocol, not a /isle-wars/ subpath, and TAURI is set by
+// the "build:tauri" script that src-tauri/tauri.conf.json's
+// beforeBuildCommand invokes (see also ios/bridge, which imports src/lib
+// directly rather than going through this build at all, so it never hits
+// this path — only the two static-site consumers, GitHub Pages and Tauri,
+// need to agree on a base here).
 const dev = process.env.NODE_ENV === 'development';
-const base = dev ? '' : '/isle-wars';
+const base = dev || process.env.TAURI ? '' : '/isle-wars';
 
 /** @type {import('@sveltejs/kit').Config} */
 const config = {

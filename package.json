@@ -14,12 +14,15 @@
 		"log:tail": "node -e \"require('child_process').spawn('tail', ['-f', require('os').tmpdir() + '/isle-wars-events.jsonl'], {stdio:'inherit'})\"",
 		"log:clear": "node -e \"require('fs').rmSync(require('os').tmpdir() + '/isle-wars-events.jsonl', {force:true})\"",
 		"build:ios-bridge": "esbuild ios/bridge/entry.ts --bundle --format=iife --define:import.meta.env.DEV=false --outfile=ios/IsleWars/Resources/game-bundle.js",
+		"build:tauri": "TAURI=true vite build",
+		"tauri": "tauri",
 		"test": "npm run build:ios-bridge && node --test 'tests/*.test.mjs'"
 	},
 	"devDependencies": {
 		"@sveltejs/adapter-static": "^3.0.10",
 		"@sveltejs/kit": "^2.63.0",
 		"@sveltejs/vite-plugin-svelte": "^7.1.2",
+		"@tauri-apps/cli": "^2.11.4",
 		"@types/d3-delaunay": "^6.0.4",
 		"@types/node": "^26.1.0",
 		"esbuild": "^0.28.1",

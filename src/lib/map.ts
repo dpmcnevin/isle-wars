@@ -220,9 +220,19 @@ const RANDOM_PART_LEN = 8;
 const SETTINGS_PART_LEN = 6;
 export const SEED_LENGTH = RANDOM_PART_LEN + SETTINGS_PART_LEN;
 
+/** How often random world events (earthquake/flood/rebellion/flip) fire.
+ *  Encoded in the seed so a shared seed reproduces the same game rules. */
+export type EventIntensity = 'off' | 'mild' | 'wild';
+
+// Index order is load-bearing for seed compatibility: seeds from before this
+// setting existed have zero in the intensity bits, so index 0 MUST be the
+// default ('mild') for old seeds to keep decoding to the same game.
+const EVENT_INTENSITIES: EventIntensity[] = ['mild', 'off', 'wild'];
+
 export interface SeedSettings {
 	difficulty: number;
 	startingArmies: number;
+	eventIntensity: EventIntensity;
 	dieSides: number;
 	starterCards: boolean;
 	autoPlay: boolean;
@@ -241,9 +251,12 @@ function clamp(n: number, lo: number, hi: number): number {
 	return Math.max(lo, Math.min(hi, Math.round(n)));
 }
 
-// 3 bits difficulty (0-7) + 5 bits armies (0-31) + 7 bits dieSides (0-127)
-// + 11 flag bits = 26 bits, comfortably under 36^6 (~2.18B) once base36-encoded.
+// 2 bits event intensity + 3 bits difficulty (0-7) + 5 bits armies (0-31) +
+// 7 bits dieSides (0-127) + 11 flag bits = 28 bits, comfortably under 36^6
+// (~2.18B) once base36-encoded. Intensity sits in the MOST significant bits so
+// pre-intensity seeds (those bits zero) decode to EVENT_INTENSITIES[0].
 function packSettings(s: SeedSettings): number {
+	const intensity = Math.max(0, EVENT_INTENSITIES.indexOf(s.eventIntensity));
 	const difficulty = clamp(s.difficulty, 0, 7);
 	const armies = clamp(s.startingArmies, 0, 31);
 	const dieSides = clamp(s.dieSides, 0, 127);
@@ -253,7 +266,7 @@ function packSettings(s: SeedSettings): number {
 		| (s.turnCardBreach ? 64 : 0) | (s.turnCardLevee ? 128 : 0)
 		| (s.turnCardCollapse ? 256 : 0) | (s.turnCardFerry ? 512 : 0)
 		| (s.turnCardStorm ? 1024 : 0);
-	return ((difficulty * 32 + armies) * 128 + dieSides) * 2048 + flags;
+	return (((intensity * 8 + difficulty) * 32 + armies) * 128 + dieSides) * 2048 + flags;
 }
 
 function unpackSettings(packed: number): SeedSettings {
@@ -261,8 +274,10 @@ function unpackSettings(packed: number): SeedSettings {
 	const flags = v % 2048; v = Math.floor(v / 2048);
 	const dieSides = v % 128; v = Math.floor(v / 128);
 	const startingArmies = v % 32; v = Math.floor(v / 32);
-	const difficulty = v % 8;
+	const difficulty = v % 8; v = Math.floor(v / 8);
+	const intensity = v % 4;
 	return {
+		eventIntensity: EVENT_INTENSITIES[intensity] ?? 'mild',
 		// Clamped to the app's actual valid ranges — a hand-typed 12-char
 		// seed that isn't one of ours can still unpack to *some* number here,
 		// and an out-of-range difficulty/dieSides shouldn't leak into play.
@@ -799,6 +814,7 @@ function assignCityNames(grids: Grid[], rnd: () => number): void {
 const DEFAULT_SEED_SETTINGS: SeedSettings = {
 	difficulty: 2,
 	startingArmies: 3,
+	eventIntensity: 'mild',
 	dieSides: 10,
 	starterCards: false,
 	autoPlay: false,

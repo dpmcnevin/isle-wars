@@ -10,6 +10,9 @@ adjacent hexes, play cards) on a procedurally generated island map. It ships as:
 - **Web app** — SvelteKit + Svelte 5 (runes) + TypeScript. All game logic lives here.
 - **Native iPad app** — SwiftUI (`ios/`). It does **not** reimplement the game; it
   runs the exact web logic inside a JavaScriptCore engine and renders natively.
+- **macOS desktop app** — Tauri (`src-tauri/`). Unlike the iPad app, this isn't a
+  native rewrite — it's the same web UI (`build/`, the static site) running inside a
+  system WebView in a native window frame. No bridge, no separate rendering code.
 
 ## Architecture
 
@@ -44,12 +47,22 @@ cd ios && xcodegen generate   # IsleWars.xcodeproj is gitignored, generated from
 The Xcode build also runs `build:ios-bridge` as a pre-build step, so building from
 Xcode picks up `src/lib` changes automatically. From the CLI you must run it yourself.
 
+**The macOS build needs no equivalent step.** It's the same static site as the web
+app — any change under `src/` is picked up the next time you run `npm run tauri
+build` or `npm run tauri dev`, no separate bundle to regenerate. The one thing to
+know: production web builds set SvelteKit's `base` path to `/isle-wars` for GitHub
+Pages, which would break asset loading under Tauri's own protocol — `svelte.config.js`
+checks `process.env.TAURI` (set by the `build:tauri` script that
+`src-tauri/tauri.conf.json`'s `beforeBuildCommand` invokes) and uses `''` instead.
+Don't build the Tauri app with plain `npm run build`; use `npm run tauri build`, which
+runs `build:tauri` for you.
+
 ## Commands
 
 ```bash
 npm run dev              # web dev server
 npm run check            # svelte-check typecheck (run this after editing TS/Svelte)
-npm run build            # static web build
+npm run build            # static web build (GitHub Pages base path)
 npm run build:ios-bridge # rebuild the iOS JS bundle after any src/lib change
 
 # iOS (needs Xcode):
@@ -57,7 +70,14 @@ cd ios && xcodegen generate
 cd ios && xcodebuild -project IsleWars.xcodeproj -scheme IsleWars \
   -destination 'generic/platform=iOS Simulator' -configuration Debug \
   build CODE_SIGNING_ALLOWED=NO
+
+# macOS (needs Rust — rustc >= 1.77.2 — via rustup):
+npm run tauri dev        # live-reloading desktop window against the vite dev server
+npm run tauri build      # release .app + .dmg in src-tauri/target/release/bundle/
 ```
+
+`src-tauri/icons/` is still Tauri's generic scaffold icon — regenerate from a real
+1024×1024 source with `npx tauri icon path/to/icon.png` once one exists.
 
 ## Cards
 

@@ -65,9 +65,9 @@ Empty (neutral, 0-army) hexes are simply walked into — no dice.
 - **Marsh** — a hex used as an attack source can't attack again that turn.
 - **Desert** — moving or airlifting armies in costs **1 army** (heat), and deserts
   never host cities. An **Oasis** card converts one back to plains.
-- **City (★)** — a production centre. Some turns its garrison **doubles** on its
-  own (capped, then grows steadily), so contested cities snowball. Cities are also
-  the only launch sites for **Artillery**.
+- **City (★)** — a production centre. Each city you hold adds **+1** to your
+  reinforcements every turn (**+2** if it's a capital — anyone's, so occupying an
+  enemy capital pays too). Cities are also the only launch sites for **Artillery**.
 
 ## Crossing water
 
@@ -100,8 +100,10 @@ short) recipe for adding new cards.
 
 ## Events
 
-The world isn't static — roughly once every few turns a **random event** shakes
-things up, and city production fires on its own. Watch the log.
+The world isn't static — every so often a **random event** (earthquake, flood,
+rebellion, uprising) shakes things up. Events are **announced one turn ahead**
+in the log, so watch for omens and react. The New Game panel sets how often
+they fire: **Off**, **Mild** (default), or **Wild**.
 
 ## Controls
 
@@ -111,8 +113,9 @@ things up, and city production fires on its own. Watch the log.
   enemy to attack, onto a friendly hex to move.
 - **Cards:** click/tap a card to play it; targeting cards then prompt you to click
   the hex(es) they act on. Legal targets glow.
-- **New game:** pick difficulty (1–4), starting armies, and optionally a seed to
-  share or replay a map.
+- **New game:** pick difficulty (1–4 — higher means the AI only picks fights it's
+  clearly favored to win), starting armies, world-event intensity, and optionally
+  a seed to share or replay a map.
 
 ---
 
