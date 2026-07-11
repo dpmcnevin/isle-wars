@@ -547,6 +547,12 @@
 		if (e.key === 'Escape' && showShortcuts) { showShortcuts = false; return; }
 		if (e.key === 'Escape' && showLifetime) { showLifetime = false; return; }
 		if (showLifetime) return; // don't drive the game from behind the Career modal
+		// Pre-game "Start Game" gate — Enter starts the game. Before the
+		// current-player gate, since another player may open the game.
+		if (!$game.gameStarted && $game.phase !== 'game_over' && !showShortcuts) {
+			if (e.key === 'Enter') { startGamePlaying(); e.preventDefault(); }
+			return;
+		}
 		// Game-over banner shortcuts — before the current-player gate, since
 		// the winner is usually not the human.
 		if ($game.phase === 'game_over' && !showShortcuts) {
@@ -1731,6 +1737,8 @@
 						<tr><td><kbd>↑</kbd> / <kbd>+</kbd></td><td>More armies</td></tr>
 						<tr><td><kbd>↓</kbd> / <kbd>−</kbd></td><td>Fewer armies</td></tr>
 						<tr><td><kbd>Enter</kbd></td><td>Confirm</td></tr>
+						<tr><th colspan="2">Before the game starts</th></tr>
+						<tr><td><kbd>Enter</kbd></td><td>Start the game</td></tr>
 						<tr><th colspan="2">Game over</th></tr>
 						<tr><td><kbd>S</kbd></td><td>View the game summary</td></tr>
 						<tr><td><kbd>N</kbd></td><td>New game on a fresh random map</td></tr>

@@ -90,6 +90,13 @@
 			e.preventDefault();
 			return;
 		}
+		// Mirrors the main page's game-over 'N' shortcut: straight into a new
+		// random game.
+		if ((e.key === 'n' || e.key === 'N') && !showLifetime) {
+			startFreshAndGoHome();
+			e.preventDefault();
+			return;
+		}
 		if (e.key === 'Escape') {
 			if (showLifetime) {
 				showLifetime = false;
