@@ -9,6 +9,7 @@
 	import TurningPointCompareModal from '$lib/components/TurningPointCompareModal.svelte';
 	import TpMiniMap from '$lib/components/TpMiniMap.svelte';
 	import LifetimeStatsModal from '$lib/components/LifetimeStatsModal.svelte';
+	import ShortcutsModal from '$lib/components/ShortcutsModal.svelte';
 	import { loadLifetimeStats, resetLifetimeStats, type LifetimeStats } from '$lib/lifetime';
 
 	let data = $state<RecapData | null>(null);
@@ -81,10 +82,29 @@
 	let lifetimeStats = $state<LifetimeStats>(loadLifetimeStats());
 	let showLifetime = $state(false);
 
+	// '?' help — this page's own bindings (see onKey below).
+	let showShortcuts = $state(false);
+	const SHORTCUT_SECTIONS = [
+		{ title: 'Moments', rows: [
+			{ keys: ['←', '→'], desc: 'Step through the turning points' },
+			{ keys: ['Esc'], desc: 'Close the zoomed map / dialogs' }
+		] },
+		{ title: 'Anywhere', rows: [
+			{ keys: ['N'], desc: 'New game on a fresh random map' },
+			{ keys: ['C'], desc: 'Career — lifetime stats' },
+			{ keys: ['?'], desc: 'Show or hide this help' }
+		] }
+	];
+
 	function onKey(e: KeyboardEvent) {
 		if (!data) return;
 		const tag = (e.target as HTMLElement | null)?.tagName;
 		if (tag === 'INPUT' || tag === 'TEXTAREA' || tag === 'SELECT') return;
+		if (e.key === '?') {
+			showShortcuts = !showShortcuts;
+			e.preventDefault();
+			return;
+		}
 		if (e.key === 'c' || e.key === 'C') {
 			showLifetime = !showLifetime;
 			e.preventDefault();
@@ -92,13 +112,16 @@
 		}
 		// Mirrors the main page's game-over 'N' shortcut: straight into a new
 		// random game.
-		if ((e.key === 'n' || e.key === 'N') && !showLifetime) {
+		if ((e.key === 'n' || e.key === 'N') && !showLifetime && !showShortcuts) {
 			startFreshAndGoHome();
 			e.preventDefault();
 			return;
 		}
 		if (e.key === 'Escape') {
-			if (showLifetime) {
+			if (showShortcuts) {
+				showShortcuts = false;
+				e.preventDefault();
+			} else if (showLifetime) {
 				showLifetime = false;
 				e.preventDefault();
 			} else if (zoomOpen) {
@@ -107,7 +130,7 @@
 			}
 			return;
 		}
-		if (showLifetime) return;
+		if (showLifetime || showShortcuts) return;
 		if (e.key === 'ArrowLeft') {
 			selectMoment(selected - 1);
 			e.preventDefault();
@@ -372,6 +395,10 @@
 				onclose={() => (showLifetime = false)}
 				onreset={() => (lifetimeStats = resetLifetimeStats())}
 			/>
+		{/if}
+
+		{#if showShortcuts}
+			<ShortcutsModal sections={SHORTCUT_SECTIONS} onclose={() => (showShortcuts = false)} />
 		{/if}
 
 		{#snippet chart(field: 'territories' | 'armies', max: number)}

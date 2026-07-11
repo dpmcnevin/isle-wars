@@ -54,6 +54,7 @@
 	import { runAiTurn, setValueNetPlayers } from '$lib/ai';
 	import { loadLifetimeStats, recordFinishedGame, resetLifetimeStats, type LifetimeStats } from '$lib/lifetime';
 	import LifetimeStatsModal from '$lib/components/LifetimeStatsModal.svelte';
+	import ShortcutsModal from '$lib/components/ShortcutsModal.svelte';
 	import { computeTurningPoints } from '$lib/summary';
 	import { buildRecap, encodeRecap } from '$lib/recap';
 	import { base } from '$app/paths';
@@ -247,6 +248,30 @@
 	function aiTickMs() { return aiSpeed === 0 ? 0 : aiSpeed === 2 ? 20 : 60; }
 
 	let showShortcuts = $state(false);
+	// The '?' help content — keep in sync with onKey's actual bindings.
+	const SHORTCUT_SECTIONS = [
+		{ title: 'Before the game starts', rows: [{ keys: ['Enter'], desc: 'Start the game' }] },
+		{ title: 'Action phase', rows: [
+			{ keys: ['A'], desc: 'Attack — then click source and target' },
+			{ keys: ['M'], desc: 'Move armies (ends your turn)' },
+			{ keys: ['P'], desc: 'Pass — end your turn' }
+		] },
+		{ title: 'During a battle', rows: [{ keys: ['Enter', 'Space'], desc: 'Roll the dice' }] },
+		{ title: 'Quantity picker', rows: [
+			{ keys: ['↑', '+'], desc: 'More armies' },
+			{ keys: ['↓', '−'], desc: 'Fewer armies' },
+			{ keys: ['Enter'], desc: 'Confirm' }
+		] },
+		{ title: 'Game over', rows: [
+			{ keys: ['S'], desc: 'View the game summary' },
+			{ keys: ['N'], desc: 'New game on a fresh random map' }
+		] },
+		{ title: 'Anywhere', rows: [
+			{ keys: ['Esc'], desc: 'Cancel the current selection / close dialogs' },
+			{ keys: ['C'], desc: 'Career — lifetime stats' },
+			{ keys: ['?'], desc: 'Show or hide this help' }
+		] }
+	];
 	let autoRolling = $state(false);
 	let hoveredGrid = $state<number | null>(null);
 	let tooltipPos = $state<{ x: number; y: number } | null>(null);
@@ -1719,37 +1744,7 @@
 	{/if}
 
 	{#if showShortcuts}
-		<div class="shortcuts-backdrop" role="presentation" onclick={() => (showShortcuts = false)}>
-			<div class="shortcuts-modal" role="dialog" aria-label="Keyboard shortcuts" onclick={(e) => e.stopPropagation()}>
-				<div class="shortcuts-title">
-					<span>Keyboard shortcuts</span>
-					<button class="close-x" onclick={() => (showShortcuts = false)} aria-label="Close shortcuts">✕</button>
-				</div>
-				<table class="shortcuts-table">
-					<tbody>
-						<tr><th colspan="2">Action phase</th></tr>
-						<tr><td><kbd>A</kbd></td><td>Attack — then click source and target</td></tr>
-						<tr><td><kbd>M</kbd></td><td>Move armies (ends your turn)</td></tr>
-						<tr><td><kbd>P</kbd></td><td>Pass — end your turn</td></tr>
-						<tr><th colspan="2">During a battle</th></tr>
-						<tr><td><kbd>Enter</kbd> / <kbd>Space</kbd></td><td>Roll the dice</td></tr>
-						<tr><th colspan="2">Quantity picker</th></tr>
-						<tr><td><kbd>↑</kbd> / <kbd>+</kbd></td><td>More armies</td></tr>
-						<tr><td><kbd>↓</kbd> / <kbd>−</kbd></td><td>Fewer armies</td></tr>
-						<tr><td><kbd>Enter</kbd></td><td>Confirm</td></tr>
-						<tr><th colspan="2">Before the game starts</th></tr>
-						<tr><td><kbd>Enter</kbd></td><td>Start the game</td></tr>
-						<tr><th colspan="2">Game over</th></tr>
-						<tr><td><kbd>S</kbd></td><td>View the game summary</td></tr>
-						<tr><td><kbd>N</kbd></td><td>New game on a fresh random map</td></tr>
-						<tr><th colspan="2">Anywhere</th></tr>
-						<tr><td><kbd>Esc</kbd></td><td>Cancel the current selection / close dialogs</td></tr>
-						<tr><td><kbd>C</kbd></td><td>Career — lifetime stats</td></tr>
-						<tr><td><kbd>?</kbd></td><td>Show or hide this help</td></tr>
-					</tbody>
-				</table>
-			</div>
-		</div>
+		<ShortcutsModal sections={SHORTCUT_SECTIONS} onclose={() => (showShortcuts = false)} />
 	{/if}
 
 	{#if showLifetime}
@@ -2950,73 +2945,6 @@
 		font-weight: bold;
 	}
 
-	.shortcuts-backdrop {
-		position: fixed;
-		inset: 0;
-		background: rgba(4, 10, 20, 0.7);
-		backdrop-filter: blur(2px);
-		display: flex;
-		align-items: center;
-		justify-content: center;
-		z-index: 1600;
-		padding: 0.75rem;
-		box-sizing: border-box;
-	}
-	.shortcuts-modal {
-		background: linear-gradient(180deg, #10304a, #0a1a2c);
-		border: 2px solid #4a9fcf;
-		border-radius: 12px;
-		padding: 1rem 1.25rem 1.25rem;
-		width: 100%;
-		max-width: 460px;
-		max-height: 100%;
-		overflow-y: auto;
-		box-sizing: border-box;
-		box-shadow: 0 12px 40px rgba(0, 0, 0, 0.55), 0 0 30px rgba(74, 159, 207, 0.25);
-	}
-	.shortcuts-title {
-		display: flex;
-		justify-content: space-between;
-		align-items: center;
-		color: #e0f0ff;
-		font-size: 1.1rem;
-		font-weight: bold;
-		margin-bottom: 0.5rem;
-	}
-	.shortcuts-table {
-		width: 100%;
-		border-collapse: collapse;
-		font-size: 0.9rem;
-	}
-	.shortcuts-table th {
-		text-align: left;
-		color: #7fcfff;
-		font-size: 0.75rem;
-		letter-spacing: 0.08em;
-		text-transform: uppercase;
-		padding: 0.7rem 0 0.25rem;
-	}
-	.shortcuts-table td {
-		padding: 0.2rem 0;
-		color: #a8bfd4;
-		vertical-align: baseline;
-	}
-	.shortcuts-table td:first-child {
-		white-space: nowrap;
-		padding-right: 1rem;
-		width: 1%;
-	}
-	.shortcuts-table kbd {
-		display: inline-block;
-		background: #0f2035;
-		border: 1px solid #2a4a66;
-		border-bottom-width: 2px;
-		border-radius: 5px;
-		padding: 0.1rem 0.45rem;
-		color: #e0f0ff;
-		font-family: inherit;
-		font-size: 0.85rem;
-	}
 	.attack-modal-backdrop {
 		position: fixed;
 		inset: 0;
