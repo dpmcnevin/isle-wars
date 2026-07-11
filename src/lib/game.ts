@@ -232,6 +232,11 @@ export interface GameState {
 	message: string;
 	// End
 	winner: Player | null;
+	// True once this finished game has been folded into the web app's
+	// lifetime-stats localStorage (src/lib/lifetime.ts) — persists with the
+	// save so a reloaded finished game isn't counted twice. Optional: absent
+	// on old saves and never set on iOS.
+	lifetimeRecorded?: boolean;
 	// Analytics
 	history: TurnSnapshot[];
 	stats: Record<Player, PlayerStats>;
@@ -371,6 +376,7 @@ export interface DebugSettings {
 	disableSave: boolean;
 	starterCards: boolean; // give blue every card type on new games
 	autoPlay: boolean; // AI takes over all four players
+	careerAutoPlay: boolean; // count auto-played (spectator) games in lifetime stats
 	dieSides: number; // base die max value; 10 by default
 	turnCardTunnel: boolean; // give every player a Tunnel card at the start of their turn
 	turnCardInvasion: boolean; // give every player a Water Invasion card at the start of their turn
@@ -387,7 +393,7 @@ const DEFAULT_DIE_SIDES = 10;
 
 function loadDebugSettings(): DebugSettings {
 	const dflt: DebugSettings = {
-		disableSave: false, starterCards: false, autoPlay: false, dieSides: DEFAULT_DIE_SIDES,
+		disableSave: false, starterCards: false, autoPlay: false, careerAutoPlay: false, dieSides: DEFAULT_DIE_SIDES,
 		turnCardTunnel: false, turnCardInvasion: false, turnCardCanal: false, turnCardWall: false,
 		turnCardBreach: false, turnCardLevee: false, turnCardCollapse: false, turnCardFerry: false,
 		turnCardStorm: false
@@ -402,6 +408,7 @@ function loadDebugSettings(): DebugSettings {
 				disableSave: !!parsed.disableSave,
 				starterCards: !!parsed.starterCards,
 				autoPlay: !!parsed.autoPlay,
+				careerAutoPlay: !!parsed.careerAutoPlay,
 				dieSides: sides >= 2 && sides <= 100 ? sides : DEFAULT_DIE_SIDES,
 				turnCardTunnel: !!parsed.turnCardTunnel,
 				turnCardInvasion: !!parsed.turnCardInvasion,

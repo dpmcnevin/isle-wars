@@ -52,6 +52,8 @@
 	} from '$lib/game';
 	import { wallBetween, polygonPoints, wallSegmentsFor, seaLanePath, type GameMap } from '$lib/map';
 	import { runAiTurn, setValueNetPlayers } from '$lib/ai';
+	import { loadLifetimeStats, recordFinishedGame, resetLifetimeStats, type LifetimeStats } from '$lib/lifetime';
+	import LifetimeStatsModal from '$lib/components/LifetimeStatsModal.svelte';
 	import { computeTurningPoints } from '$lib/summary';
 	import { buildRecap, encodeRecap } from '$lib/recap';
 	import { base } from '$app/paths';
@@ -541,7 +543,17 @@
 		// Shortcut help works at any time — even during the AI's turn or when
 		// the game is over — so it's handled before the current-player gate.
 		if (e.key === '?') { showShortcuts = !showShortcuts; e.preventDefault(); return; }
+		if (e.key === 'c' || e.key === 'C') { showLifetime = !showLifetime; e.preventDefault(); return; }
 		if (e.key === 'Escape' && showShortcuts) { showShortcuts = false; return; }
+		if (e.key === 'Escape' && showLifetime) { showLifetime = false; return; }
+		if (showLifetime) return; // don't drive the game from behind the Career modal
+		// Game-over banner shortcuts — before the current-player gate, since
+		// the winner is usually not the human.
+		if ($game.phase === 'game_over' && !showShortcuts) {
+			if (e.key === 's' || e.key === 'S') { viewSummary(); e.preventDefault(); }
+			else if (e.key === 'n' || e.key === 'N') { playAgain(); e.preventDefault(); }
+			return;
+		}
 		if ($game.current !== HUMAN || $game.phase === 'game_over') return;
 		if (showShortcuts) return; // don't drive the game from behind the help modal
 		if (e.key === 'Escape') { cancelQty(); return; }
@@ -705,13 +717,33 @@
 		return `${base}/recap/#d=${await encodeRecap(recap)}`;
 	}
 
-	// Game over has its own dedicated page (routes/recap) — jump there the
-	// instant the game ends, whether that's a live finish or reloading a
-	// page whose saved game already ended. replaceState so the finished
-	// board doesn't linger as a back-button stop.
+	// Game over shows a banner (see the .start-prompt.game-over block below)
+	// with links to the recap page and a new game, instead of yanking the
+	// player away from the final board the instant the game ends.
+	function viewSummary() {
+		recapUrl().then((url) => goto(url));
+	}
+	// "New game" on the game-over banner: straight into a fresh random map
+	// with the current settings — no menu detour.
+	function playAgain() {
+		newGame(difficulty, startingArmies, undefined, eventIntensity);
+		window.scrollTo({ top: 0, behavior: 'smooth' });
+	}
+
+	// Lifetime stats: fold each finished game into localStorage exactly once.
+	// The flag lives in the (auto-saved) game state, so reloading a finished
+	// game doesn't double-count it. Auto-play games are spectator games —
+	// blue was AI-driven — so they're skipped unless the "count auto-played
+	// games in Career" debug option is on.
+	let lifetimeStats = $state<LifetimeStats>(loadLifetimeStats());
+	let showLifetime = $state(false);
 	$effect(() => {
-		if ($game.phase === 'game_over') {
-			recapUrl().then((url) => goto(url, { replaceState: true }));
+		if ($game.phase === 'game_over' && !$game.lifetimeRecorded && $game.gameStarted) {
+			const dbg = getDebugSettings();
+			if (!dbg.autoPlay || dbg.careerAutoPlay) {
+				lifetimeStats = recordFinishedGame($game, HUMAN);
+			}
+			game.update((s) => { s.lifetimeRecorded = true; return s; });
 		}
 	});
 
@@ -875,6 +907,7 @@
 	let debugDisableSave = $state(false);
 	let debugStarterCards = $state(false);
 	let debugAutoPlay = $state(false);
+	let debugCareerAutoPlay = $state(false);
 	let debugDieSides = $state(10);
 	// The "free card each turn" debug checkboxes — barrier cards (build/destroy
 	// pairs for walls, rivers, tunnels, sea lanes) plus Water Invasion. Table-
@@ -905,6 +938,7 @@
 		debugDisableSave = d.disableSave;
 		debugStarterCards = d.starterCards;
 		debugAutoPlay = d.autoPlay;
+		debugCareerAutoPlay = d.careerAutoPlay;
 		debugDieSides = d.dieSides;
 		for (const opt of TURN_CARD_DEBUG_OPTIONS) debugTurnCards[opt.key] = d[opt.key] as boolean;
 	}
@@ -936,6 +970,11 @@
 		// If autoplay was just enabled and we're waiting on the start gate,
 		// go ahead and start so the AI can run.
 		if (debugAutoPlay && !$game.gameStarted) startGamePlaying();
+	}
+
+	function toggleDebugCareerAutoPlay() {
+		debugCareerAutoPlay = !debugCareerAutoPlay;
+		updateDebugSettings({ careerAutoPlay: debugCareerAutoPlay });
 	}
 
 	function toggleDebugTurnCard(key: keyof DebugSettings) {
@@ -1125,6 +1164,7 @@
 				{/if}
 				<button class="icon-btn" title="New Game" onclick={() => (showMenu = !showMenu)}>{showMenu ? '✕' : 'New'}</button>
 				<button class="icon-btn" title="Copy a link to this exact game — map and settings (seed {$game.seed})" onclick={copyShareLink}>{seedCopied ? 'Copied!' : 'Share'}</button>
+				<button class="icon-btn" title="Lifetime stats across all your games" onclick={() => (showLifetime = true)}>Career</button>
 				<button class="icon-btn debug-btn" title="Debug" onclick={() => (showDebug = !showDebug)}>Debug</button>
 				<button class="icon-btn danger" title="Clear Save" onclick={confirmClearSave}>Clear</button>
 			</div>
@@ -1209,6 +1249,14 @@
 						<div class="toggle-desc">The AI controls all four players so you can watch a game play itself. Turn off to take over Blue again.</div>
 					</div>
 				</label>
+				<label class="toggle-card" class:on={debugCareerAutoPlay}>
+					<input type="checkbox" checked={debugCareerAutoPlay} onchange={toggleDebugCareerAutoPlay} />
+					<div class="toggle-slot"><div class="toggle-thumb"></div></div>
+					<div class="toggle-text">
+						<div class="toggle-title">Count auto-played games in Career</div>
+						<div class="toggle-desc">Normally spectator (auto-play) games don't touch your lifetime stats — Blue was AI-driven. Turn on to record them anyway.</div>
+					</div>
+				</label>
 				<label class="toggle-card" class:on={debugUseValueNet}>
 					<input type="checkbox" checked={debugUseValueNet} onchange={toggleDebugUseValueNet} />
 					<div class="toggle-slot"><div class="toggle-thumb"></div></div>
@@ -1265,6 +1313,18 @@
 				<p>Take a look at the map, then hit <strong>Start Game</strong> to let the opponents make their moves.</p>
 			</div>
 			<button class="primary big" onclick={startGamePlaying}>Start Game →</button>
+		</div>
+	{/if}
+
+	{#if $game.phase === 'game_over'}
+		{@const winColor = $game.winner ? PLAYER_COLORS[$game.winner] : '#ffe14a'}
+		<div class="start-prompt game-over" style="border-color: {winColor}; box-shadow: 0 0 20px {winColor}59, 0 8px 30px rgba(0, 0, 0, 0.45)">
+			<div>
+				<h2 style="color: {winColor}">{$game.winner ? `${PLAYER_NAMES[$game.winner]} wins!` : 'Game over'}</h2>
+				<p>Conquered in {$game.turn} turns. Browse the final board, or dive into the recap.</p>
+			</div>
+			<button class="primary big" onclick={viewSummary}>Game summary →</button>
+			<button class="big ghost" onclick={playAgain}>New game</button>
 		</div>
 	{/if}
 
@@ -1671,13 +1731,25 @@
 						<tr><td><kbd>↑</kbd> / <kbd>+</kbd></td><td>More armies</td></tr>
 						<tr><td><kbd>↓</kbd> / <kbd>−</kbd></td><td>Fewer armies</td></tr>
 						<tr><td><kbd>Enter</kbd></td><td>Confirm</td></tr>
+						<tr><th colspan="2">Game over</th></tr>
+						<tr><td><kbd>S</kbd></td><td>View the game summary</td></tr>
+						<tr><td><kbd>N</kbd></td><td>New game on a fresh random map</td></tr>
 						<tr><th colspan="2">Anywhere</th></tr>
 						<tr><td><kbd>Esc</kbd></td><td>Cancel the current selection / close dialogs</td></tr>
+						<tr><td><kbd>C</kbd></td><td>Career — lifetime stats</td></tr>
 						<tr><td><kbd>?</kbd></td><td>Show or hide this help</td></tr>
 					</tbody>
 				</table>
 			</div>
 		</div>
+	{/if}
+
+	{#if showLifetime}
+		<LifetimeStatsModal
+			stats={lifetimeStats}
+			onclose={() => (showLifetime = false)}
+			onreset={() => (lifetimeStats = resetLifetimeStats())}
+		/>
 	{/if}
 
 	{#if isQtyPhase() && qtySourceHex() != null}
@@ -3357,6 +3429,12 @@
 		margin: 0;
 		box-shadow: 0 0 20px rgba(74, 159, 207, 0.35), 0 8px 30px rgba(0, 0, 0, 0.45);
 		flex-wrap: wrap;
+	}
+	/* Same banner treatment as Start Game, but gold — it marks the end of the
+	   game rather than the way in. */
+	.start-prompt.game-over {
+		border-color: #ffe14a;
+		box-shadow: 0 0 20px rgba(255, 225, 74, 0.35), 0 8px 30px rgba(0, 0, 0, 0.45);
 	}
 	/* On desktop, float the banner (fixed, centered at the BOTTOM of the
 	   viewport — over the analytics strip, not the board) instead of sitting

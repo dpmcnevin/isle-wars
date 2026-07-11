@@ -8,6 +8,8 @@
 	import { goto } from '$app/navigation';
 	import TurningPointCompareModal from '$lib/components/TurningPointCompareModal.svelte';
 	import TpMiniMap from '$lib/components/TpMiniMap.svelte';
+	import LifetimeStatsModal from '$lib/components/LifetimeStatsModal.svelte';
+	import { loadLifetimeStats, resetLifetimeStats, type LifetimeStats } from '$lib/lifetime';
 
 	let data = $state<RecapData | null>(null);
 	let invalid = $state(false);
@@ -75,17 +77,30 @@
 
 	// Keyboard: ← / → step through the key moments (wrapping is intentional at
 	// neither end), Esc closes the zoomed compare modal.
+	// Lifetime stats modal — same Career view as the main page's header button.
+	let lifetimeStats = $state<LifetimeStats>(loadLifetimeStats());
+	let showLifetime = $state(false);
+
 	function onKey(e: KeyboardEvent) {
 		if (!data) return;
 		const tag = (e.target as HTMLElement | null)?.tagName;
 		if (tag === 'INPUT' || tag === 'TEXTAREA' || tag === 'SELECT') return;
+		if (e.key === 'c' || e.key === 'C') {
+			showLifetime = !showLifetime;
+			e.preventDefault();
+			return;
+		}
 		if (e.key === 'Escape') {
-			if (zoomOpen) {
+			if (showLifetime) {
+				showLifetime = false;
+				e.preventDefault();
+			} else if (zoomOpen) {
 				zoomOpen = false;
 				e.preventDefault();
 			}
 			return;
 		}
+		if (showLifetime) return;
 		if (e.key === 'ArrowLeft') {
 			selectMoment(selected - 1);
 			e.preventDefault();
@@ -337,11 +352,20 @@
 				<button class="secondary" onclick={startFreshAndGoHome}>New Random Map</button>
 				<button onclick={copyLink}>{linkCopied ? '✓ Copied!' : '🔗 Copy Share Link'}</button>
 				<button class="ghost" onclick={startFreshAndGoHome}>Back to Main Page</button>
+				<button onclick={() => (showLifetime = true)}>Career</button>
 				{#if isDesktopApp}
 					<button onclick={() => (showStats = !showStats)}>{showStats ? '✕ Close' : '📊 Stats'}</button>
 				{/if}
 			</div>
 		</section>
+
+		{#if showLifetime}
+			<LifetimeStatsModal
+				stats={lifetimeStats}
+				onclose={() => (showLifetime = false)}
+				onreset={() => (lifetimeStats = resetLifetimeStats())}
+			/>
+		{/if}
 
 		{#snippet chart(field: 'territories' | 'armies', max: number)}
 			{@const len = d.history.length}
@@ -638,6 +662,36 @@
 		color: #8ab;
 	}
 	.banner-actions button.ghost:hover { background: rgba(255, 255, 255, 0.06); color: #d0e6f5; }
+	/* On desktop, float the banner as a slim one-line pill fixed at the
+	   bottom of the viewport — same treatment as the main page's Start Game /
+	   game-over banners — so the stats and charts start at the top of the
+	   page. Narrow screens keep the in-flow block layout above. (Declared
+	   AFTER every base .banner rule so the overrides win the cascade.) */
+	@media (min-width: 1001px) {
+		.banner {
+			position: fixed;
+			bottom: 1rem;
+			left: 50%;
+			transform: translateX(-50%);
+			width: auto;
+			max-width: calc(100vw - 1.5rem);
+			z-index: 50;
+			display: flex;
+			align-items: center;
+			gap: 0.75rem;
+			white-space: nowrap;
+			text-align: left;
+			border-radius: 8px;
+			padding: 0.5rem 0.9rem;
+			margin: 0;
+			box-shadow: 0 8px 30px rgba(0, 0, 0, 0.55);
+		}
+		.banner h1 { font-size: 1rem; margin: 0; }
+		.banner .sub { margin: 0; }
+		.banner-actions { margin-top: 0; flex-wrap: nowrap; }
+		/* Let the page's last content scroll clear of the floating banner. */
+		main { padding-bottom: 4.5rem; }
+	}
 
 	/* Top row: overall stats table + the two shared-axis charts, side by side
 	   above the moment viewer. Charts grey out everything after the selected
