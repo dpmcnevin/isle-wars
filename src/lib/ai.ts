@@ -743,6 +743,40 @@ function findBreachTarget(s: GameState, p: Player): WallChoice | null {
 	}
 	return best;
 }
+// Pick a river edge between us and an enemy to drain (Levee): permanently
+// removes the +1 river-crossing defender bonus there, prepping a future
+// attack across that edge. Prefer the edge where we already have the bigger
+// army edge, i.e. the crossing we're most likely to actually use.
+function findLeveeTarget(s: GameState, p: Player): WallChoice | null {
+	let best: WallChoice | null = null;
+	let bestScore = -Infinity;
+	for (const [a, b] of s.map.rivers) {
+		const oa = s.states[a].owner, ob = s.states[b].owner;
+		let mine = -1, foe = -1;
+		if (oa === p && ob && ob !== p) { mine = a; foe = b; }
+		else if (ob === p && oa && oa !== p) { mine = b; foe = a; }
+		else continue;
+		const score = s.states[mine].armies - s.states[foe].armies;
+		if (score > bestScore) { bestScore = score; best = { from: mine, to: foe }; }
+	}
+	return best;
+}
+// Pick an adjacent enemy plains/forest hex to burn to desert (Scorched
+// Earth): unlike Deforestation's one-time bonus removal, this saddles
+// whoever holds the hex with ongoing per-turn attrition, so the biggest
+// enemy garrison on a burnable border hex is the best payoff.
+function findScorchedTarget(s: GameState, p: Player): number | null {
+	let best = -1, bestArm = -1;
+	for (const g of s.map.grids) {
+		if (g.production) continue;
+		if (g.terrain !== 'plain' && g.terrain !== 'forest') continue;
+		const st = s.states[g.id];
+		if (!st.owner || st.owner === p) continue;
+		if (!s.map.adj[g.id].some((n) => s.states[n].owner === p)) continue;
+		if (st.armies > bestArm) { bestArm = st.armies; best = g.id; }
+	}
+	return best >= 0 ? best : null;
+}
 // Pick an adjacent enemy forest hex to clear.
 function findForestNeighbor(s: GameState, p: Player): number | null {
 	for (const g of s.map.grids) {
@@ -1063,6 +1097,17 @@ function tryPlayCardAction(p: Player) {
 			return;
 		}
 	}
+	// Scorched Earth: burn a border enemy hex to desert for ongoing attrition.
+	s = get(game);
+	{
+		const idx = s.hands[p].findIndex((c) => c === 'scorched');
+		const target = findScorchedTarget(s, p);
+		if (idx >= 0 && target != null) {
+			playCard(idx);
+			if (get(game).phase === 'scorched_select') selectGrid(target);
+			return;
+		}
+	}
 	// Oasis: irrigate one of our own desert hexes to remove heat attrition.
 	s = get(game);
 	{
@@ -1131,6 +1176,19 @@ function tryPlayCardAction(p: Player) {
 			playCard(idx);
 			if (get(game).phase === 'canal_from') selectGrid(target.from);
 			if (get(game).phase === 'canal_to') selectGrid(target.to);
+			return;
+		}
+	}
+	// Levee: drain a river edge we're likely to attack across, permanently
+	// removing the crossing bonus that's holding that attack back.
+	s = get(game);
+	{
+		const idx = s.hands[p].findIndex((c) => c === 'levee');
+		const target = findLeveeTarget(s, p);
+		if (idx >= 0 && target != null) {
+			playCard(idx);
+			if (get(game).phase === 'levee_from') selectGrid(target.from);
+			if (get(game).phase === 'levee_to') selectGrid(target.to);
 			return;
 		}
 	}
