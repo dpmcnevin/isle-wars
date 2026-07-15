@@ -17,6 +17,9 @@ import {
 	playCard,
 	canInvasionConnect,
 	canTunnelConnect,
+	canFerryConnect,
+	canArtilleryTarget,
+	confirmAir,
 	defenseBonus,
 	attackerBonus,
 	winProbability,
@@ -152,6 +155,23 @@ export async function runAiTurn(p: Player, tickMs = 90) {
 		if (target == null) break;
 		// Place all remaining on best target (simple but decisive)
 		placeArmies(target, s.armiesToPlace);
+		if (!synchronousAi) await wait();
+	}
+
+	// --- Pre-attack buff cards (Elite / Bridge / Mountaineering) ---
+	// Must run BEFORE the attack loop: each sets a one-shot flag
+	// (eliteAttackActive/bridgeAttackActive/mountainAttackActive) that's
+	// consumed by the first attack roll AND unconditionally reset by the very
+	// next beginTurn — including the next PLAYER's beginTurn, since these
+	// flags aren't scoped per-player. Playing one of these cards after this
+	// player's own attack loop already ran (as tryPlayCardAction alone would)
+	// wastes the card: the buff never gets used before it's wiped. None of
+	// these bonuses factor into findBestAttack's target choice (attackerBonus
+	// deliberately excludes Elite; the opening odds check doesn't know about
+	// Bridge/Mountaineering either), so playing the card here doesn't change
+	// which target the attack loop below picks.
+	if (get(game).phase === 'action' && get(game).current === p) {
+		tryPlayAttackBuffCard(p);
 		if (!synchronousAi) await wait();
 	}
 
@@ -735,6 +755,132 @@ function findForestNeighbor(s: GameState, p: Player): number | null {
 	return null;
 }
 
+// Best Artillery shot: from one of our cities (2+ armies), bombard the
+// strongest reachable (within 2 steps) enemy/neutral hex — the card's four
+// guaranteed hits with zero attacker risk make raw target strength (not
+// margin) the right thing to maximize.
+function bestArtilleryPlan(s: GameState, p: Player): { from: number; to: number } | null {
+	let best: { from: number; to: number } | null = null;
+	let bestScore = -Infinity;
+	for (const g of s.map.grids) {
+		if (s.states[g.id].owner !== p || !g.production) continue;
+		if (s.states[g.id].armies < 2) continue;
+		for (const t of s.map.grids) {
+			if (!canArtilleryTarget(s, g.id, t.id)) continue;
+			const st = s.states[t.id];
+			if (st.armies < 3) continue; // not worth the card on a nearly-empty hex
+			const score = st.armies + (st.owner ? 2 : 0);
+			if (score > bestScore) { bestScore = score; best = { from: g.id, to: t.id }; }
+		}
+	}
+	return best;
+}
+
+// Best Air Move: instantly relocate our biggest stack that has no overland
+// route to any front-line hex (e.g. stranded on an islet with no sea lane)
+// onto the front-line hex facing the biggest threat. Mirrors
+// tryRepositionStack's frontline BFS, but Air Move is worth spending on a
+// stack that BFS can't reach at all, not just one that's merely far away.
+function bestAirLiftPlan(s: GameState, p: Player): { from: number; to: number; qty: number } | null {
+	const frontline: number[] = [];
+	for (const g of s.map.grids) {
+		if (s.states[g.id].owner !== p) continue;
+		if (s.map.adj[g.id].some((n) => s.states[n].owner !== p)) frontline.push(g.id);
+	}
+	if (frontline.length === 0) return null;
+	const dist = new Map<number, number>();
+	const queue: number[] = [];
+	for (const id of frontline) { dist.set(id, 0); queue.push(id); }
+	let qi = 0;
+	while (qi < queue.length) {
+		const cur = queue[qi++];
+		const d = dist.get(cur)!;
+		for (const n of s.map.adj[cur]) {
+			if (s.states[n].owner !== p || dist.has(n)) continue;
+			if (wallBetween(s.map, cur, n)) continue;
+			dist.set(n, d + 1);
+			queue.push(n);
+		}
+	}
+	let from = -1, fromArm = -1;
+	for (const g of s.map.grids) {
+		if (s.states[g.id].owner !== p || dist.has(g.id)) continue; // reachable overland — not stranded
+		if (s.states[g.id].armies < 4) continue;
+		if (s.states[g.id].armies > fromArm) { fromArm = s.states[g.id].armies; from = g.id; }
+	}
+	if (from < 0) return null;
+	let to = -1, bestScore = -Infinity;
+	for (const id of frontline) {
+		let enemyForce = 0;
+		for (const n of s.map.adj[id]) {
+			const st = s.states[n];
+			if (st.owner && st.owner !== p) enemyForce += st.armies;
+		}
+		const score = enemyForce - s.states[id].armies;
+		if (score > bestScore) { bestScore = score; to = id; }
+	}
+	if (to < 0) return null;
+	return { from, to, qty: Math.max(1, s.states[from].armies - 1) };
+}
+
+// Best Ferry Route: link our strongest owned hex (the "mainland" anchor) to
+// whichever of our own hexes is cut off from it by water — same "stranded"
+// definition as bestAirLiftPlan, but a Ferry is a permanent fix rather than a
+// one-off airlift, so prefer it when a clean water path exists.
+function bestFerryPlan(s: GameState, p: Player): { from: number; to: number } | null {
+	let anchor = -1, anchorArm = -1;
+	for (const g of s.map.grids) {
+		if (s.states[g.id].owner === p && s.states[g.id].armies > anchorArm) {
+			anchorArm = s.states[g.id].armies;
+			anchor = g.id;
+		}
+	}
+	if (anchor < 0) return null;
+	const reachable = new Set<number>([anchor]);
+	const queue = [anchor];
+	let qi = 0;
+	while (qi < queue.length) {
+		const cur = queue[qi++];
+		for (const n of s.map.adj[cur]) {
+			if (s.states[n].owner !== p || reachable.has(n)) continue;
+			if (wallBetween(s.map, cur, n)) continue;
+			reachable.add(n);
+			queue.push(n);
+		}
+	}
+	let bestFrom = -1, bestTo = -1, bestScore = -Infinity;
+	for (const g of s.map.grids) {
+		if (s.states[g.id].owner !== p || reachable.has(g.id)) continue;
+		for (const m of reachable) {
+			if (!canFerryConnect(s, m, g.id)) continue;
+			const score = s.states[g.id].armies + s.states[m].armies;
+			if (score > bestScore) { bestScore = score; bestFrom = m; bestTo = g.id; }
+		}
+	}
+	return bestFrom >= 0 ? { from: bestFrom, to: bestTo } : null;
+}
+
+// Best Storm target: sever a sea lane that gives an enemy a water route
+// straight onto one of our hexes — an existing invasion/ferry lane sitting on
+// our border is a standing threat, so cutting the biggest one (by the
+// attacker's army edge) is the priority. Mirrors bestCollapseTarget's
+// same-shape "cut the threatening route" logic for tunnels.
+function findStormTarget(s: GameState, p: Player): { from: number; to: number } | null {
+	let best: { from: number; to: number } | null = null;
+	let bestScore = -Infinity;
+	for (const [a, b] of s.map.seaLanes) {
+		const oa = s.states[a].owner, ob = s.states[b].owner;
+		let mine = -1, foe = -1;
+		if (oa === p && ob && ob !== p) { mine = a; foe = b; }
+		else if (ob === p && oa && oa !== p) { mine = b; foe = a; }
+		else continue;
+		const threat = s.states[foe].armies - s.states[mine].armies;
+		if (threat < 1) continue;
+		if (threat > bestScore) { bestScore = threat; best = { from: mine, to: foe }; }
+	}
+	return best;
+}
+
 // Try to play one card during the placement phase. First eligible wins
 // because of the one-card-per-turn rule.
 function tryPlayCardPlacement(p: Player) {
@@ -772,36 +918,37 @@ function tryPlayCardPlacement(p: Player) {
 	// (see cards.ts's ACTION_ONLY) — tryPlayCardAction handles them.
 }
 
-// Try to play one card during the action phase. Elite before big attacks;
-// bomb on beefy targets; deforest to clear an attack lane.
+// Play Elite Troops / Bridge / Mountaineering ahead of the attack loop, if we
+// hold one and it would apply to the attack the loop is about to make. Must
+// run BEFORE findBestAttack's chosen target is attacked — see the call site
+// in runAiTurn for why. Priority mirrors the old in-loop order: Elite (always
+// good) > Bridge (river crossing) > Mountaineering (mountain target).
+function tryPlayAttackBuffCard(p: Player): boolean {
+	const s = get(game);
+	if (s.cardPlayedThisTurn) return false;
+	const opp = valueNetPlayers.has(p) ? findBestAttackWithValueNet(s, p) : findBestAttack(s, p);
+	if (!opp) return false;
+	{
+		const idx = s.hands[p].findIndex((c) => c === 'elite');
+		if (idx >= 0) { playCard(idx); return true; }
+	}
+	{
+		const idx = s.hands[p].findIndex((c) => c === 'bridge');
+		if (idx >= 0 && crossesRiver(s.map, opp.from, opp.to)) { playCard(idx); return true; }
+	}
+	{
+		const idx = s.hands[p].findIndex((c) => c === 'mountaineer');
+		if (idx >= 0 && s.map.grids[opp.to].terrain === 'mountain') { playCard(idx); return true; }
+	}
+	return false;
+}
+
+// Try to play one card during the action phase. Bomb on beefy targets;
+// deforest to clear an attack lane; etc. Elite/Bridge/Mountaineering are
+// handled earlier, before the attack loop — see tryPlayAttackBuffCard.
 function tryPlayCardAction(p: Player) {
 	let s = get(game);
 	if (s.cardPlayedThisTurn) return;
-	const opp = findBestAttack(s, p);
-	// Elite Troops before a good attack.
-	{
-		const idx = s.hands[p].findIndex((c) => c === 'elite');
-		if (idx >= 0 && opp) {
-			playCard(idx);
-			return;
-		}
-	}
-	// Bridge before an attack that crosses a river.
-	{
-		const idx = s.hands[p].findIndex((c) => c === 'bridge');
-		if (idx >= 0 && opp && crossesRiver(s.map, opp.from, opp.to)) {
-			playCard(idx);
-			return;
-		}
-	}
-	// Mountaineering before an attack on a mountain hex.
-	{
-		const idx = s.hands[p].findIndex((c) => c === 'mountaineer');
-		if (idx >= 0 && opp && s.map.grids[opp.to].terrain === 'mountain') {
-			playCard(idx);
-			return;
-		}
-	}
 	// Paratroop a strong stack onto a weak, valuable enemy hex.
 	{
 		const idx = s.hands[p].findIndex((c) => c === 'paratroop');
@@ -812,6 +959,18 @@ function tryPlayCardAction(p: Player) {
 			if (get(game).phase === 'paratroop_to') selectGrid(plan.to);
 			if (get(game).phase === 'paratroop_qty') confirmParatroop(plan.qty);
 			else cancelAction();
+			return;
+		}
+	}
+	// Artillery: risk-free hits on the strongest reachable target from a city.
+	s = get(game);
+	{
+		const idx = s.hands[p].findIndex((c) => c === 'artillery');
+		const plan = idx >= 0 ? bestArtilleryPlan(s, p) : null;
+		if (idx >= 0 && plan) {
+			playCard(idx);
+			if (get(game).phase === 'artillery_from') selectGrid(plan.from);
+			if (get(game).phase === 'artillery_to') selectGrid(plan.to);
 			return;
 		}
 	}
@@ -856,6 +1015,18 @@ function tryPlayCardAction(p: Player) {
 			playCard(idx);
 			if (get(game).phase === 'breach_from') selectGrid(target.from);
 			if (get(game).phase === 'breach_to') selectGrid(target.to);
+			return;
+		}
+	}
+	// Storm a sea lane an enemy could invade us through.
+	s = get(game);
+	{
+		const idx = s.hands[p].findIndex((c) => c === 'storm');
+		const target = findStormTarget(s, p);
+		if (idx >= 0 && target != null) {
+			playCard(idx);
+			if (get(game).phase === 'storm_from') selectGrid(target.from);
+			if (get(game).phase === 'storm_to') selectGrid(target.to);
 			return;
 		}
 	}
@@ -960,6 +1131,33 @@ function tryPlayCardAction(p: Player) {
 			playCard(idx);
 			if (get(game).phase === 'canal_from') selectGrid(target.from);
 			if (get(game).phase === 'canal_to') selectGrid(target.to);
+			return;
+		}
+	}
+	// Ferry: permanently link a stranded holding back to our main network.
+	s = get(game);
+	{
+		const idx = s.hands[p].findIndex((c) => c === 'ferry');
+		const plan = idx >= 0 ? bestFerryPlan(s, p) : null;
+		if (idx >= 0 && plan) {
+			playCard(idx);
+			if (get(game).phase === 'ferry_from') selectGrid(plan.from);
+			if (get(game).phase === 'ferry_to') selectGrid(plan.to);
+			return;
+		}
+	}
+	// Air Move: last resort to rescue a stack stranded with no overland or
+	// lane route to any front line at all.
+	s = get(game);
+	{
+		const idx = s.hands[p].findIndex((c) => c === 'air');
+		const plan = idx >= 0 ? bestAirLiftPlan(s, p) : null;
+		if (idx >= 0 && plan) {
+			playCard(idx);
+			if (get(game).phase === 'air_from') selectGrid(plan.from);
+			if (get(game).phase === 'air_to') selectGrid(plan.to);
+			if (get(game).phase === 'air_qty') confirmAir(plan.qty);
+			else cancelAction();
 			return;
 		}
 	}
