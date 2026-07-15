@@ -82,10 +82,12 @@ export async function runAiTurn(p: Player, tickMs = 90) {
 			while (get(game).phase === 'attack_rolling' && rolls++ < 20000) {
 				rollAttack();
 				const s2 = get(game);
-				if (s2.phase === 'attack_rolling' && s2.selectedFrom != null && s2.selectedTo != null) {
-					const fromArm = s2.states[s2.selectedFrom].armies;
-					const toArm = s2.states[s2.selectedTo].armies;
-					if (fromArm <= toArm + 1 || fromArm < 3) { quitAttack(); break; }
+				if (
+					s2.phase === 'attack_rolling' && s2.selectedFrom != null && s2.selectedTo != null &&
+					!attackWorthContinuing(s2, s2.selectedFrom, s2.selectedTo)
+				) {
+					quitAttack();
+					break;
 				}
 			}
 		}
@@ -187,13 +189,12 @@ export async function runAiTurn(p: Player, tickMs = 90) {
 		while (get(game).phase === 'attack_rolling' && rolls++ < 20000) {
 			rollAttack();
 			const s2 = get(game);
-			if (s2.phase === 'attack_rolling' && s2.selectedFrom != null && s2.selectedTo != null) {
-				const fromArm = s2.states[s2.selectedFrom].armies;
-				const toArm = s2.states[s2.selectedTo].armies;
-				if (fromArm <= toArm + 1 || fromArm < 3) {
-					quitAttack();
-					break;
-				}
+			if (
+				s2.phase === 'attack_rolling' && s2.selectedFrom != null && s2.selectedTo != null &&
+				!attackWorthContinuing(s2, s2.selectedFrom, s2.selectedTo)
+			) {
+				quitAttack();
+				break;
 			}
 		}
 		if (get(game).phase === 'attack_move_in') {
@@ -271,10 +272,12 @@ function rollOutCurrentAttack() {
 	while (get(game).phase === 'attack_rolling' && rolls++ < 20000) {
 		rollAttack();
 		const s = get(game);
-		if (s.phase === 'attack_rolling' && s.selectedFrom != null && s.selectedTo != null) {
-			const fromArm = s.states[s.selectedFrom].armies;
-			const toArm = s.states[s.selectedTo].armies;
-			if (fromArm <= toArm + 1 || fromArm < 3) { quitAttack(); break; }
+		if (
+			s.phase === 'attack_rolling' && s.selectedFrom != null && s.selectedTo != null &&
+			!attackWorthContinuing(s, s.selectedFrom, s.selectedTo)
+		) {
+			quitAttack();
+			break;
 		}
 	}
 	if (get(game).phase === 'attack_move_in') {
@@ -564,6 +567,25 @@ function attackWorthOpening(s: GameState, from: number, to: number): boolean {
 	if (def <= 0) return true;
 	const floor = ATTACK_PROB_FLOOR[s.difficulty] ?? 0.45;
 	return winProbability(s.states[from].armies, def, defenseBonus(s, to, from), attackerBonus(s, to)) >= floor;
+}
+
+// Below this in-progress win probability, an already-committed attack is no
+// longer worth continuing to roll. Lower than ATTACK_PROB_FLOOR (which gates
+// *opening* a fight) since a few unlucky early rolls in an otherwise-good
+// fight shouldn't cause an instant bail — but it stops the AI from grinding a
+// stack down round after round once the odds have clearly turned against it
+// (e.g. a defender bonus the raw army-count comparison doesn't see).
+const ATTACK_CONTINUE_FLOOR = 0.2;
+
+// Whether an in-progress attack (already past the opening odds check) is
+// still worth another round of rolling, using the same win-probability model
+// as attackWorthOpening rather than a raw army-count comparison.
+function attackWorthContinuing(s: GameState, from: number, to: number): boolean {
+	const fromArm = s.states[from].armies;
+	if (fromArm < 3) return false;
+	const toArm = s.states[to].armies;
+	if (toArm <= 0) return true;
+	return winProbability(fromArm, toArm, defenseBonus(s, to, from), attackerBonus(s, to)) >= ATTACK_CONTINUE_FLOOR;
 }
 
 interface AttackChoice { from: number; to: number; }

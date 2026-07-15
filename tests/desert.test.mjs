@@ -20,6 +20,12 @@ test('start of turn: each owned desert hex loses 1 army, floored at 0', () => {
 	const next = ORDER[(ORDER.indexOf(s.current) + 1) % ORDER.length];
 	const owned = s.states.map((st, i) => (st.owner === next ? i : -1)).filter((i) => i >= 0);
 	assert.ok(owned.length >= 3, 'next player needs 3 hexes for the scenario');
+	// The map is procedurally generated (unseeded), so `next` may already own
+	// other desert hexes by chance — neutralize those first so only the three
+	// hexes below contribute to the attrition count.
+	for (const g of s.map.grids) {
+		if (g.terrain === 'desert' && s.states[g.id].owner === next) g.terrain = 'plain';
+	}
 	const [d3, d1, d0] = owned;
 	s.map.grids[d3].terrain = 'desert';
 	s.states[d3].armies = 3;
@@ -28,6 +34,10 @@ test('start of turn: each owned desert hex loses 1 army, floored at 0', () => {
 	s.map.grids[d0].terrain = 'desert';
 	s.states[d0].armies = 0;
 	s.phase = 'action';
+	// startGame's own initial beginTurn may have already logged desert events
+	// for whichever player went first (if they happened to own a natural
+	// desert hex) — clear the log so only this test's turn transition counts.
+	s.armyEvents = [];
 	load(IW, s);
 
 	const after = advanceToNextTurn(IW);
