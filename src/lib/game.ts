@@ -79,7 +79,8 @@ export type CardType =
 	| 'mountaineer'
 	| 'tunnel'
 	| 'collapse'
-	| 'levee';
+	| 'levee'
+	| 'relocate';
 
 // Re-export the card registry's public surface so consumers keep importing it
 // from '$lib/game'. The definitions themselves live in ./cards.
@@ -139,6 +140,7 @@ export type Phase =
 	| 'collapse_to'
 	| 'levee_from'
 	| 'levee_to'
+	| 'relocate_select'
 	| 'discard'
 	| 'game_over';
 

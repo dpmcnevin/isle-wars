@@ -620,6 +620,30 @@ export const CARD_DEFS: CardDef[] = [
 			log(s, `${PLAYER_NAMES[s.current]} collapsed the tunnel between ${gridLabel(s, from)} and ${gridLabel(s, to)}.`, 'card');
 			s.phase = 'action'; s.selectedFrom = null; s.selectedTo = null; s.message = 'Attack, move, or pass.';
 		}
+	},
+	{
+		id: 'relocate', label: 'Relocate Capital', icon: '🏛', kind: 'terrain', weight: 1,
+		when: 'Action phase',
+		desc: 'Move your capital to any territory you control. The old capital stays a regular city; your new capital pays the usual +3 reinforcements per turn while you hold it. The destination becomes a city if it wasn’t already one.',
+		playableIn: ACTION_ONLY,
+		steps: [{ phase: 'relocate_select', prompt: 'Relocate Capital: click one of your territories to become your new capital.',
+			check: (s, id) => {
+				if (s.states[id].owner !== s.current) return 'Pick one of your territories.';
+				if (s.capitals?.[s.current] === id) return 'Already your capital.';
+				return null;
+			} }],
+		onResolve: (s, [id], idx) => {
+			const g = s.map.grids[id];
+			if (!g.production) {
+				g.production = true;
+				g.cityName = `${PLAYER_NAMES[s.current]} Capital`;
+			}
+			if (!s.capitals) s.capitals = {};
+			s.capitals[s.current] = id;
+			consumeCard(s, idx);
+			log(s, `${PLAYER_NAMES[s.current]} relocated their capital to ${gridLabel(s, id)}.`, 'card');
+			s.phase = 'action'; s.message = 'Attack, move, or pass.';
+		}
 	}
 ];
 

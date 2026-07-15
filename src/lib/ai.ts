@@ -761,6 +761,31 @@ function findLeveeTarget(s: GameState, p: Player): WallChoice | null {
 	}
 	return best;
 }
+// Worth relocating our capital? Either we've already lost it (occupied by an
+// enemy — relocating immediately regains the +3 capitalBonus on a hex we
+// actually hold) or it's sitting exposed on the front line (bordering an
+// enemy), which is worth trading a card to fix before it's captured.
+function needsCapitalRelocation(s: GameState, p: Player): boolean {
+	const cap = s.capitals?.[p];
+	if (cap == null) return false;
+	const st = s.states[cap];
+	if (st.owner !== p) return true;
+	return s.map.adj[cap].some((n) => s.states[n].owner && s.states[n].owner !== p);
+}
+// Best relocation target: our strongest owned hex that ISN'T on the front
+// line (a safe interior hex), so the new capital doesn't just repeat the
+// problem next turn.
+function bestRelocateTarget(s: GameState, p: Player): number | null {
+	let best = -1, bestScore = -Infinity;
+	for (const g of s.map.grids) {
+		if (s.states[g.id].owner !== p) continue;
+		if (s.capitals?.[p] === g.id) continue;
+		const onFront = s.map.adj[g.id].some((n) => s.states[n].owner && s.states[n].owner !== p);
+		const score = s.states[g.id].armies - (onFront ? 20 : 0);
+		if (score > bestScore) { bestScore = score; best = g.id; }
+	}
+	return best >= 0 ? best : null;
+}
 // Pick an adjacent enemy plains/forest hex to burn to desert (Scorched
 // Earth): unlike Deforestation's one-time bonus removal, this saddles
 // whoever holds the hex with ongoing per-turn attrition, so the biggest
@@ -1189,6 +1214,18 @@ function tryPlayCardAction(p: Player) {
 			playCard(idx);
 			if (get(game).phase === 'levee_from') selectGrid(target.from);
 			if (get(game).phase === 'levee_to') selectGrid(target.to);
+			return;
+		}
+	}
+	// Relocate Capital: reclaim it after losing it, or move it off the front
+	// line before it's captured.
+	s = get(game);
+	{
+		const idx = s.hands[p].findIndex((c) => c === 'relocate');
+		const target = idx >= 0 && needsCapitalRelocation(s, p) ? bestRelocateTarget(s, p) : null;
+		if (idx >= 0 && target != null) {
+			playCard(idx);
+			if (get(game).phase === 'relocate_select') selectGrid(target);
 			return;
 		}
 	}
