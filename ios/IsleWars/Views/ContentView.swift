@@ -19,9 +19,29 @@ struct ContentView: View {
     }
 }
 
+/// `.labelStyle(isCompact ? .iconOnly : .automatic)` doesn't type-check —
+/// the two style types aren't equivalent — so branch as a view modifier
+/// instead of inline in the static-member ternary.
+private struct CompactLabelStyle: ViewModifier {
+    let isCompact: Bool
+    func body(content: Content) -> some View {
+        if isCompact {
+            content.labelStyle(.iconOnly)
+        } else {
+            content.labelStyle(.automatic)
+        }
+    }
+}
+
 private struct GameView: View {
     @ObservedObject var vm: GameViewModel
     let state: GameState
+    /// iPhone landscape is `.compact` vertically (short/wide), vs. iPad
+    /// landscape's `.regular` (tall/wide) — the HUD's fixed iPad-tuned
+    /// insets/padding/fonts leave too little vertical room on iPhone, so a
+    /// compact variant trims them rather than reflowing the whole layout.
+    @Environment(\.verticalSizeClass) private var verticalSizeClass
+    private var isCompact: Bool { verticalSizeClass == .compact }
 
     /// User-initiated placement quantity request (tap on an owned hex
     /// during `.placing`). The other three quantity contexts (move-in,
@@ -35,42 +55,15 @@ private struct GameView: View {
 
     @State private var showingQuitConfirm = false
     @State private var showingLog = false
+    @State private var showingCareer = false
 
     var body: some View {
-        // Full-bleed map with floating HUD overlays (scoreboard/actions/cards)
-        // and a right-edge slide-over for the log + history graphs, rather than
-        // a fixed sidebar — the map gets the entire screen.
         ZStack {
-            MapView(
-                state: state,
-                selectableHexes: vm.selectableHexes,
-                onTapHex: handleTap,
-                onDragAttack: vm.dragAttack,
-                onDragMove: vm.dragMove,
-                onDragFerry: vm.dragFerry,
-                contentInsets: EdgeInsets(top: 68, leading: 16, bottom: 104, trailing: 16)
-            )
-            .ignoresSafeArea()
-            .background(AppTheme.bg.ignoresSafeArea())
-            .accessibilityElement(children: .ignore)
-            .accessibilityLabel(mapAccessibilitySummary)
-
-            // Compact HUD in the four corners; the open center/edges between the
-            // pills stay tappable so the map underneath is reachable.
-            VStack(spacing: 0) {
-                HStack(alignment: .top, spacing: 8) {
-                    topLeftPill
-                    Spacer(minLength: 8)
-                    topRightPill
-                }
-                Spacer(minLength: 0)
-                HStack(alignment: .bottom, spacing: 8) {
-                    cardsPill
-                    Spacer(minLength: 8)
-                    bottomBar
-                }
+            if isCompact {
+                compactLayout
+            } else {
+                regularLayout
             }
-            .padding(12)
 
             if showingLog {
                 Color.black.opacity(0.3)
@@ -88,6 +81,10 @@ private struct GameView: View {
                 .ignoresSafeArea()
                 .transition(.move(edge: .trailing))
             }
+
+            if showingCareer {
+                LifetimeStatsView(vm: vm) { showingCareer = false }
+            }
         }
         .overlay { modalOverlay }
         .alert("Start a new game?", isPresented: $showingQuitConfirm) {
@@ -96,6 +93,185 @@ private struct GameView: View {
         } message: {
             Text("This abandons your current game in progress.")
         }
+    }
+
+    /// iPad: full-bleed map with floating HUD pills in the four corners —
+    /// the map's own aspect ratio (~1.4-1.6:1, see map.ts's tight viewBox)
+    /// is close enough to iPad landscape's that this wastes very little
+    /// space, so there's no reason to give up the simpler floating design.
+    private var regularLayout: some View {
+        ZStack {
+            MapView(
+                state: state,
+                selectableHexes: vm.selectableHexes,
+                onTapHex: handleTap,
+                onDragAttack: vm.dragAttack,
+                onDragMove: vm.dragMove,
+                onDragFerry: vm.dragFerry,
+                contentInsets: EdgeInsets(top: 68, leading: 16, bottom: 104, trailing: 16)
+            )
+            .ignoresSafeArea()
+            .background(AppTheme.bg.ignoresSafeArea())
+            .accessibilityElement(children: .ignore)
+            .accessibilityLabel(mapAccessibilitySummary)
+
+            VStack(spacing: 0) {
+                HStack(alignment: .top, spacing: 8) {
+                    topLeftPill
+                    Spacer(minLength: 8)
+                    topRightPill
+                }
+                Spacer(minLength: 0)
+                HStack(alignment: .bottom, spacing: 8) {
+                    cardsPill
+                    Spacer(minLength: 8)
+                    bottomBar
+                }
+            }
+            .padding(12)
+        }
+    }
+
+    /// iPhone: every generated map is ~1.4-1.6:1 (map.ts's tight viewBox),
+    /// while an iPhone's landscape drawing area is ~2.3-2.9:1 — no amount of
+    /// trimming top/bottom bars fixes that mismatch, since width is always
+    /// the binding constraint (see MapTransform's aspect-preserving fit).
+    /// All the HUD chrome lives in a single rail on one side (rather than
+    /// splitting it across both) so the map gets the most possible width —
+    /// past a certain point, extra width doesn't even matter (once the map
+    /// is comfortably height-bound it can't get any taller), but giving up
+    /// the least width guarantees that for every seed, not just most.
+    private var compactLayout: some View {
+        // The whole layout ignores the safe area (full-bleed background,
+        // full map width) except the rail, which gets exactly the measured
+        // notch/Dynamic-Island inset added as extra padding on whichever
+        // edge it's actually on — the app allows both landscape rotations,
+        // so the cutout can land on either side of the rail depending on
+        // how the device is held.
+        GeometryReader { geo in
+            // The reported safe-area insets under-report the actual notch/
+            // Dynamic-Island clearance needed in this ignoresSafeArea
+            // configuration (measured empirically), so both edges get a
+            // flat floor rather than trusting whichever raw value comes
+            // back — the app allows both landscape rotations, so the
+            // cutout can land on either side (rail or map) depending on
+            // how the device is held, and only a fixed floor is reliable
+            // regardless of which one it turns out to be.
+            let notchFloor: CGFloat = 60
+            let railNotchInset = max(geo.safeAreaInsets.trailing, geo.safeAreaInsets.leading, notchFloor)
+            HStack(spacing: 0) {
+                MapView(
+                    state: state,
+                    selectableHexes: vm.selectableHexes,
+                    onTapHex: handleTap,
+                    onDragAttack: vm.dragAttack,
+                    onDragMove: vm.dragMove,
+                    onDragFerry: vm.dragFerry,
+                    contentInsets: EdgeInsets(top: 6, leading: 6 + notchFloor, bottom: 6, trailing: 6)
+                )
+                .accessibilityElement(children: .ignore)
+                .accessibilityLabel(mapAccessibilitySummary)
+
+                hudRail
+                    .padding(.trailing, railNotchInset)
+                    .frame(width: 150 + railNotchInset)
+            }
+        }
+        .background(AppTheme.bg.ignoresSafeArea())
+        .ignoresSafeArea()
+    }
+
+    /// The single rail: turn/player status (a compact 2x2 grid instead of 4
+    /// stacked rows), icon-only log/career/new-game, the card hand (as a
+    /// vertical grid — see `CardHandGridView`'s `.vertical` axis), and the
+    /// action panel, all stacked top to bottom so none of it competes with
+    /// the map for width.
+    private var hudRail: some View {
+        let total = state.states.count
+        let playerColumns = [GridItem(.flexible()), GridItem(.flexible())]
+
+        return VStack(spacing: 8) {
+            Text("Turn \(state.turn)").font(.subheadline).bold()
+                .frame(maxWidth: .infinity, alignment: .leading)
+
+            LazyVGrid(columns: playerColumns, spacing: 4) {
+                ForEach(Player.allCases) { p in
+                    let count = state.states.filter { $0.owner == p }.count
+                    let alive = state.alive[p.rawValue] ?? true
+                    HStack(spacing: 4) {
+                        Circle().fill(p.color).frame(width: 9, height: 9).opacity(alive ? 1 : 0.3)
+                        Text("\(count)/\(total)").font(.caption2).monospacedDigit().strikethrough(!alive)
+                    }
+                    .padding(.horizontal, 4).padding(.vertical, 3)
+                    .frame(maxWidth: .infinity)
+                    .background(
+                        RoundedRectangle(cornerRadius: 5)
+                            .fill(state.current == p ? Color.yellow.opacity(0.25) : .clear)
+                    )
+                }
+            }
+
+            HStack(spacing: 6) {
+                Button {
+                    withAnimation(.easeInOut(duration: 0.25)) { showingLog.toggle() }
+                } label: {
+                    Image(systemName: "list.bullet.rectangle.portrait")
+                }
+                .buttonStyle(GameButtonStyle(kind: .secondary, small: true))
+                Button {
+                    showingCareer = true
+                } label: {
+                    Image(systemName: "trophy")
+                }
+                .buttonStyle(GameButtonStyle(kind: .secondary, small: true))
+                Button {
+                    showingQuitConfirm = true
+                } label: {
+                    Image(systemName: "arrow.counterclockwise")
+                }
+                .buttonStyle(GameButtonStyle(kind: .secondary, small: true))
+            }
+
+            Divider().overlay(AppTheme.border)
+
+            let hand = state.humanHand
+            let isHumanTurn = state.current == .human
+            if hand.isEmpty {
+                VStack(spacing: 4) {
+                    Image(systemName: "rectangle.stack.badge.minus")
+                    Text("No cards").font(.caption2)
+                }
+                .foregroundStyle(AppTheme.textDim)
+                .frame(maxWidth: .infinity)
+                .padding(.vertical, 10)
+            } else {
+                CardHandGridView(
+                    cards: hand,
+                    phase: state.phase,
+                    canPlay: { vm.playableCards.contains($0) },
+                    onTap: { index in
+                        if state.phase == .discard {
+                            vm.discardCard(index)
+                        } else {
+                            vm.playCard(index)
+                        }
+                    },
+                    axis: .vertical
+                )
+                .disabled(!isHumanTurn)
+                .opacity(isHumanTurn ? 1 : 0.55)
+            }
+
+            Spacer(minLength: 0)
+
+            if state.phase != .gameOver {
+                ActionPanelView(vm: vm, state: state)
+                    .foregroundStyle(AppTheme.text)
+            }
+        }
+        .foregroundStyle(AppTheme.text)
+        .padding(10)
+        .padding(.top, 8)
     }
 
     /// All full-screen modals, presented in place over a dimmed scrim (rather
@@ -185,16 +361,16 @@ private struct GameView: View {
     // Top-left: turn + per-player territory counts.
     private var topLeftPill: some View {
         let total = state.states.count
-        return HStack(spacing: 12) {
-            Text("Turn \(state.turn)").font(.headline).bold()
+        return HStack(spacing: isCompact ? 8 : 12) {
+            Text("Turn \(state.turn)").font(isCompact ? .subheadline : .headline).bold()
             ForEach(Player.allCases) { p in
                 let count = state.states.filter { $0.owner == p }.count
                 let alive = state.alive[p.rawValue] ?? true
                 HStack(spacing: 5) {
-                    Circle().fill(p.color).frame(width: 13, height: 13).opacity(alive ? 1 : 0.3)
-                    Text("\(count)/\(total)").font(.subheadline).monospacedDigit().strikethrough(!alive)
+                    Circle().fill(p.color).frame(width: isCompact ? 10 : 13, height: isCompact ? 10 : 13).opacity(alive ? 1 : 0.3)
+                    Text("\(count)/\(total)").font(isCompact ? .caption : .subheadline).monospacedDigit().strikethrough(!alive)
                 }
-                .padding(.horizontal, 7).padding(.vertical, 4)
+                .padding(.horizontal, isCompact ? 5 : 7).padding(.vertical, isCompact ? 2 : 4)
                 .background(
                     RoundedRectangle(cornerRadius: 6)
                         .fill(state.current == p ? Color.yellow.opacity(0.25) : .clear)
@@ -202,24 +378,31 @@ private struct GameView: View {
             }
         }
         .foregroundStyle(AppTheme.text)
-        .padding(.horizontal, 14).padding(.vertical, 9)
+        .padding(.horizontal, isCompact ? 9 : 14).padding(.vertical, isCompact ? 5 : 9)
         .background(hudBackground)
     }
 
-    // Top-right: log + new game.
+    // Top-right: log + career + new game.
     private var topRightPill: some View {
-        HStack(spacing: 8) {
+        HStack(spacing: isCompact ? 6 : 8) {
             Button {
                 withAnimation(.easeInOut(duration: 0.25)) { showingLog.toggle() }
             } label: {
                 Label("Log", systemImage: "list.bullet.rectangle.portrait")
             }
             .buttonStyle(GameButtonStyle(kind: .secondary, small: true))
+            Button {
+                showingCareer = true
+            } label: {
+                Label("Career", systemImage: "trophy")
+            }
+            .buttonStyle(GameButtonStyle(kind: .secondary, small: true))
             Button("New Game") { showingQuitConfirm = true }
                 .buttonStyle(GameButtonStyle(kind: .secondary, small: true))
         }
+        .modifier(CompactLabelStyle(isCompact: isCompact))
         .foregroundStyle(AppTheme.text)
-        .padding(.horizontal, 10).padding(.vertical, 6)
+        .padding(.horizontal, isCompact ? 7 : 10).padding(.vertical, isCompact ? 4 : 6)
         .background(hudBackground)
     }
 
@@ -247,14 +430,14 @@ private struct GameView: View {
                 .frame(height: 72)
                 .padding(.horizontal, 18)
             } else {
-                CardHandGridView(cards: hand, phase: state.phase, canPlay: vm.canPlayCardNow) { index in
+                CardHandGridView(cards: hand, phase: state.phase, canPlay: { vm.playableCards.contains($0) }) { index in
                     if state.phase == .discard {
                         vm.discardCard(index)
                     } else {
                         vm.playCard(index)
                     }
                 }
-                .frame(maxWidth: 380)
+                .frame(maxWidth: isCompact ? 260 : 380)
                 .disabled(!isHumanTurn)
                 .opacity(isHumanTurn ? 1 : 0.55)
             }
@@ -296,21 +479,20 @@ private struct GameView: View {
     }
 
     /// Live destination-hex preview: the target territory with the arriving
-    /// armies added (minus 1 for desert heat, matching the web modal), and
-    /// tinted to the mover's color if it's currently a neutral hex.
+    /// armies added, tinted to the mover's color if it's currently a neutral
+    /// hex. (Desert heat is no longer paid on arrival — it's a start-of-turn
+    /// attrition now, so the preview shows the full arriving count.)
     private var destHexBuilder: ((Int) -> HexPreview)? {
         guard let from = state.selectedFrom, let to = state.selectedTo,
               state.states.indices.contains(from), state.states.indices.contains(to),
               state.map.grids.indices.contains(to) else { return nil }
         let base = state.states[to].armies
-        let isDesert = state.map.grids[to].terrain == .desert
         let destOwner = state.states[to].owner
         let moverColor = state.states[from].owner?.color
         return { qty in
-            let desertLoss = (isDesert && qty > 0) ? 1 : 0
             let fill: Color? = (destOwner == nil && qty > 0) ? moverColor : nil
             return HexPreview(state: state, gridId: to,
-                              armiesOverride: max(0, base + qty - desertLoss),
+                              armiesOverride: max(0, base + qty),
                               fillOverride: fill)
         }
     }

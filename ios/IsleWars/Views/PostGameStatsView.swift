@@ -15,11 +15,14 @@ struct PostGameStatsView: View {
     @State private var seedCopied = false
     @State private var turningPointIndex = 0
 
+    // Identity must be stable across renders — a per-init UUID would hand
+    // Swift Charts a "completely new" dataset on every body evaluation,
+    // forcing it to rebuild both charts each time anything on screen changes.
     private struct Point: Identifiable {
-        let id = UUID()
         let turn: Int
         let player: Player
         let value: Int
+        var id: String { "\(turn)-\(player.rawValue)" }
     }
 
     private var territoryPoints: [Point] {
@@ -207,7 +210,7 @@ struct PostGameStatsView: View {
                     HStack(spacing: 6) {
                         ForEach(Array(points.enumerated()), id: \.offset) { i, p in
                             Button {
-                                withAnimation { turningPointIndex = i }
+                                turningPointIndex = i
                             } label: {
                                 Text(p.isFinal ? "★" : "\(i + 1)")
                                     .font(.caption2.bold())
@@ -218,14 +221,36 @@ struct PostGameStatsView: View {
                         }
                     }
 
-                    TabView(selection: $turningPointIndex) {
-                        ForEach(Array(points.enumerated()), id: \.offset) { i, point in
-                            turningPointPage(vm, point: point, index: i, count: points.count)
-                                .tag(i)
-                        }
-                    }
-                    .tabViewStyle(.page(indexDisplayMode: .never))
-                    .frame(height: 440)
+                    // One rendered page + an explicit swipe gesture, instead
+                    // of a page-style TabView. The TabView built every page
+                    // (~15 × 2 mini-map Canvases) eagerly, which read as
+                    // scroll lag on the whole screen — and lazily swapping
+                    // far pages for placeholders changed page identity
+                    // mid-swipe, making the page turn bounce back. A single
+                    // page with a drag handler keeps the swipe interaction
+                    // and only ever draws the selected moment's mini-maps.
+                    // No .id()/transition on the page: an animated identity
+                    // swap left the old and new page frozen mid-flight
+                    // (verified via simulator screenshots), so the content
+                    // just swaps in place when the index changes.
+                    let selected = min(turningPointIndex, points.count - 1)
+                    turningPointPage(vm, point: points[selected], index: selected, count: points.count)
+                        .frame(height: 440)
+                        .contentShape(Rectangle())
+                        // Plain .gesture (not highPriority) so the enclosing
+                        // vertical ScrollView still wins vertical pans; only
+                        // clearly-horizontal swipes step the moment.
+                        .gesture(
+                            DragGesture(minimumDistance: 25)
+                                .onEnded { value in
+                                    let dx = value.translation.width
+                                    guard abs(dx) > 50, abs(dx) > abs(value.translation.height) else { return }
+                                    // Swipe left = advance (content moves left).
+                                    turningPointIndex = dx < 0
+                                        ? min(points.count - 1, selected + 1)
+                                        : max(0, selected - 1)
+                                }
+                        )
                 }
                 .frame(maxWidth: modalWidth)
                 .padding(12)
@@ -243,7 +268,7 @@ struct PostGameStatsView: View {
         VStack(alignment: .leading, spacing: 10) {
             HStack {
                 Button {
-                    withAnimation { turningPointIndex = max(0, index - 1) }
+                    turningPointIndex = max(0, index - 1)
                 } label: { Image(systemName: "chevron.left") }
                     .disabled(index == 0)
                 VStack(alignment: .leading, spacing: 4) {
@@ -257,7 +282,7 @@ struct PostGameStatsView: View {
                 }
                 Spacer()
                 Button {
-                    withAnimation { turningPointIndex = min(count - 1, index + 1) }
+                    turningPointIndex = min(count - 1, index + 1)
                 } label: { Image(systemName: "chevron.right") }
                     .disabled(index == count - 1)
             }

@@ -8,6 +8,12 @@ final class GameViewModel: ObservableObject {
     /// Grid ids the human can currently select, sourced from the engine so the
     /// map never reimplements per-phase/per-card selection rules (Tier 3).
     @Published private(set) var selectableHexes: Set<Int> = []
+    /// Card types in the human hand that the engine says are legal to play
+    /// right now. Computed once per state change rather than per card tile per
+    /// SwiftUI body evaluation — each `canPlayCardNow` check is a JSC bridge
+    /// round-trip, and the hand renders on every published change (including
+    /// `isAiThinking`/log-highlight toggles that don't affect legality).
+    @Published private(set) var playableCards: Set<CardType> = []
     @Published var errorMessage: String?
     @Published private(set) var isAiThinking = false
     @Published private(set) var debugSettings: DebugSettings?
@@ -19,6 +25,12 @@ final class GameViewModel: ObservableObject {
     private let engine: GameEngine
     private var aiTask: Task<Void, Never>?
     private var logHighlightTask: Task<Void, Never>?
+    /// Guards against folding the same finished game into lifetime stats
+    /// twice. The web guards this with a persisted `lifetimeRecorded` flag on
+    /// `GameState` because a finished save can be reloaded there; iOS clears
+    /// its save as soon as a winner is set (see `apply` below), so a finished
+    /// game is never reloaded and a plain in-memory flag is enough.
+    private var lifetimeRecordedForThisGame = false
 
     init() {
         do {
@@ -39,6 +51,7 @@ final class GameViewModel: ObservableObject {
 
     func startNewGame(difficulty: Int = 2, startingArmies: Int = 3, seed: String? = nil) {
         clearRecapCaches()
+        lifetimeRecordedForThisGame = false
         run { try $0.startGame(difficulty: difficulty, startingArmies: startingArmies, seed: seed) }
         // Skip the "Ready to play" gate and drop straight into the game (the AI
         // takes over too, if auto-play is on).
@@ -57,6 +70,7 @@ final class GameViewModel: ObservableObject {
         aiTask?.cancel()
         SaveStore.clear()
         clearRecapCaches()
+        lifetimeRecordedForThisGame = false
         state = nil
     }
 
@@ -65,6 +79,7 @@ final class GameViewModel: ObservableObject {
         do {
             let loaded = try engine.loadState(json: json)
             state = loaded
+            lifetimeRecordedForThisGame = false
             scheduleAiTurnIfNeeded()
         } catch {
             // Corrupt or incompatible save (e.g. from an older schema) —
@@ -155,13 +170,6 @@ final class GameViewModel: ObservableObject {
         (try? engine.crossingDefenseBonus(fromId: from, toId: to)) ?? 0
     }
 
-    /// Whether `card` can be played right now, straight from the engine's
-    /// `canPlayCardNow` (phase/`cardPlayedThisTurn`/passive rules) rather than
-    /// a Swift-side approximation.
-    func canPlayCardNow(_ card: CardType) -> Bool {
-        (try? engine.canPlayCardNow(card: card)) ?? false
-    }
-
     /// Both post-game recap calls below hit the JS engine (JSON-encoding the
     /// full owner/edge arrays each time) and were previously recomputed on
     /// *every* SwiftUI body evaluation — the `TabView` in `PostGameStatsView`
@@ -172,10 +180,12 @@ final class GameViewModel: ObservableObject {
     /// change; `clearRecapCaches()` drops them when a new game starts.
     private var turningPointsCache: [TurningPoint]?
     private var turningPointCompareCache: [Int: TurningPointCompare] = [:]
+    private var recapShareURLCache: URL??
 
     private func clearRecapCaches() {
         turningPointsCache = nil
         turningPointCompareCache.removeAll()
+        recapShareURLCache = nil
     }
 
     func turningPoints(count: Int = 15) -> [TurningPoint] {
@@ -213,12 +223,33 @@ final class GameViewModel: ObservableObject {
     /// mirrors the web's own `recapUrl()`/`encodeRecap` (see entry.ts's
     /// `buildRecapJSON` for why this is uncompressed 'r' rather than gzip 'z').
     func recapShareURL() -> URL? {
+        // Cached (double-optional: "not computed yet" vs "computed, nil") —
+        // building the recap payload serializes the whole game history in the
+        // JS engine, far too heavy to re-run on every body evaluation of the
+        // post-game screen.
+        if let cached = recapShareURLCache { return cached }
+        let url = buildRecapShareURL()
+        recapShareURLCache = .some(url)
+        return url
+    }
+
+    private func buildRecapShareURL() -> URL? {
         guard let json = try? engine.buildRecapJSON() else { return nil }
         let encoded = Data(json.utf8).base64EncodedString()
             .replacingOccurrences(of: "+", with: "-")
             .replacingOccurrences(of: "/", with: "_")
             .replacingOccurrences(of: "=", with: "")
         return URL(string: "https://corrupt.net/isle-wars/recap/#d=r\(encoded)")
+    }
+
+    // MARK: - Career (lifetime) stats
+
+    func lifetimeStats() -> LifetimeStats {
+        LifetimeStore.load()
+    }
+
+    func resetLifetimeStats() -> LifetimeStats {
+        LifetimeStore.reset()
     }
 
     // MARK: - Debug settings
@@ -238,8 +269,13 @@ final class GameViewModel: ObservableObject {
     /// sync via `state`'s didSet so every code path (actions, AI turns, load)
     /// updates it. Cheap: a single JSC call returning a small id array.
     private func refreshSelectableHexes() {
-        guard state != nil else { selectableHexes = []; return }
+        guard let state else {
+            selectableHexes = []
+            playableCards = []
+            return
+        }
         selectableHexes = Set((try? engine.selectableHexes()) ?? [])
+        playableCards = Set(Set(state.humanHand).filter { (try? engine.canPlayCardNow(card: $0)) ?? false })
     }
 
     private func run(_ action: (GameEngine) throws -> GameState) {
@@ -265,11 +301,18 @@ final class GameViewModel: ObservableObject {
             }
         }
         if debugSettings?.disableSave != true, newState.gameStarted, newState.winner == nil {
-            if let json = try? engine.getStateJSON() {
+            // `lastStateJSON` is the exact bytes this state was decoded from,
+            // so persisting it avoids asking the JS engine to re-serialize the
+            // whole state a second time on every single action.
+            if let json = engine.lastStateJSON ?? (try? engine.getStateJSON()) {
                 SaveStore.saveJSON(json)
             }
         } else if newState.winner != nil {
             SaveStore.clear()
+            if !lifetimeRecordedForThisGame {
+                lifetimeRecordedForThisGame = true
+                LifetimeStore.record(state: newState, human: .human)
+            }
         }
         scheduleAiTurnIfNeeded()
     }
@@ -307,12 +350,46 @@ final class GameViewModel: ObservableObject {
     }
 
     private func runAiTurn(for player: Player) {
+        let logCountBefore = state?.log.count ?? 0
         do {
             let newState = try engine.runAiTurn(player: player)
             isAiThinking = false
-            apply(newState)
+            // Self-heal from a silent stall: the AI "succeeded" but the game
+            // didn't move at all (same player's turn, no new log lines). Left
+            // alone, apply → scheduleAiTurnIfNeeded would re-run the same
+            // stuck turn every 400ms with the thinking spinner up forever, so
+            // hand the turn to the next player instead.
+            if newState.current == player, newState.phase != .gameOver,
+               newState.log.count == logCountBefore {
+                print("[GameViewModel] AI turn for \(player.rawValue) made no progress — force-ending turn")
+                forceEndStuckTurn(for: player, fallback: newState)
+            } else {
+                apply(newState)
+            }
         } catch {
+            // Same recovery the web's AI effect got (2026-07-06): log the real
+            // error and unstick the game rather than freezing on the spinner.
+            // No alert when recovery works — this can recur every turn for the
+            // same board state, and the game continuing is the fix.
             isAiThinking = false
+            print("[GameViewModel] AI turn for \(player.rawValue) failed: \(error)")
+            forceEndStuckTurn(for: player, fallback: state)
+        }
+    }
+
+    /// Ends a wedged AI turn so play continues with the next player. Guarded:
+    /// only force-ends while it's still `player`'s turn (a human action could
+    /// have raced us here). If even force-ending fails, surface the alert —
+    /// at that point the engine itself is wedged and hiding it helps nobody.
+    private func forceEndStuckTurn(for player: Player, fallback: GameState?) {
+        guard state?.current == player || fallback?.current == player else {
+            if let fallback { apply(fallback) }
+            return
+        }
+        do {
+            apply(try engine.forceEndTurn())
+        } catch {
+            if let fallback { apply(fallback) }
             errorMessage = "\(error)"
         }
     }

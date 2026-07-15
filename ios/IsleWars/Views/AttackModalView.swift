@@ -64,7 +64,10 @@ struct AttackModalView: View {
             }
         }
     }
-    private struct AttackMod: Identifiable { let id = UUID(); let text: String; let style: ModStyle }
+    // Identity is the text itself (unique within one side's list) — a fresh
+    // UUID per init would give every row a new identity on every re-render,
+    // making SwiftUI rebuild the list on each roll.
+    private struct AttackMod: Identifiable { let text: String; let style: ModStyle; var id: String { text } }
 
     private func modifiers(attacker: Bool) -> [AttackMod] {
         var mods: [AttackMod] = [AttackMod(text: "Base die 1–\(dieSides)", style: .neutral)]
@@ -81,7 +84,7 @@ struct AttackModalView: View {
             else if crossingBonus == 1 { mods.append(.init(text: "+1 💧 river crossing", style: .bonus)) }
             if bridgeCancels { mods.append(.init(text: "🌉 Bridge cancels river bonus", style: .warn)) }
             if defenderGrid?.terrain == .forest { mods.append(.init(text: "🌲 Forest — attacker gets +1", style: .warn)) }
-            if defenderGrid?.terrain == .desert { mods.append(.init(text: "🏜 Desert — heat burns 1 army on move-in", style: .warn)) }
+            if defenderGrid?.terrain == .desert { mods.append(.init(text: "🏜 Desert — loses 1 army at the start of its owner's turns", style: .warn)) }
         }
         return mods
     }

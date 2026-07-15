@@ -101,8 +101,19 @@ final class GameEngine {
         return try decoder.decode(T.self, from: data)
     }
 
+    /// The raw JSON string of the most recently decoded `GameState`, kept so
+    /// SaveStore can persist the exact bytes without asking the JS engine to
+    /// serialize the whole state a second time on every action.
+    private(set) var lastStateJSON: String?
+
     private func callState(_ method: String, args: [Any] = []) throws -> GameState {
-        try call(method, args: args, as: GameState.self)
+        let result = try rawCall(method, args: args)
+        guard let jsonString = result.toString(), let data = jsonString.data(using: .utf8) else {
+            throw EngineError.invalidResult
+        }
+        let state = try decoder.decode(GameState.self, from: data)
+        lastStateJSON = jsonString
+        return state
     }
 
     // MARK: - Game lifecycle
@@ -173,8 +184,19 @@ final class GameEngine {
     /// Fire-and-forget: relies on the setTimeout shim (see above) so the
     /// whole AI turn completes before this returns. A subsequent
     /// `getState()` reads the result.
+    ///
+    /// An exception inside the async JS `runAiTurn` surfaces as a rejected
+    /// promise, not a `JSContext.exception` — the bridge captures it into
+    /// `globalThis.__aiTurnError` (settled by the time the call returns,
+    /// thanks to the synchronous timer shim), and it's rethrown here so the
+    /// view model can recover instead of silently rescheduling forever.
     func runAiTurn(player: Player) throws -> GameState {
         try rawCall("runAiTurn", args: [player.rawValue])
+        if let err = context.objectForKeyedSubscript("__aiTurnError"),
+           !err.isUndefined, !err.isNull {
+            context.evaluateScript("delete globalThis.__aiTurnError")
+            throw EngineError.evaluationFailed("AI turn threw: \(err.toString() ?? "unknown")")
+        }
         return try getState()
     }
 

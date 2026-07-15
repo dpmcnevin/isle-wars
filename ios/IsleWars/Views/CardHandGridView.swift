@@ -7,11 +7,15 @@ import SwiftUI
 struct CardHandGridView: View {
     let cards: [CardType]
     let phase: Phase
-    /// Per-card legality straight from the engine's `canPlayCardNow` (phase/
-    /// `cardPlayedThisTurn`/passive rules) — mirrors web's `canPlayCardNow`
-    /// check rather than a coarser Swift-side phase approximation.
+    /// Per-card legality, engine-derived (`GameViewModel.playableCards`, the
+    /// same phase/`cardPlayedThisTurn`/passive rules web's `canPlayCardNow`
+    /// applies) rather than a coarser Swift-side phase approximation.
     let canPlay: (CardType) -> Bool
     let onTap: (Int) -> Void
+    /// iPhone's side-rail HUD stacks the hand as a narrow vertical grid
+    /// instead of the horizontal scroll strip iPad uses, so it doesn't need
+    /// to steal any height from the map.
+    var axis: Axis = .horizontal
 
     @State private var detailIndex: Int?
 
@@ -20,19 +24,31 @@ struct CardHandGridView: View {
     }
 
     var body: some View {
-        ScrollView(.horizontal, showsIndicators: false) {
-            HStack(spacing: 8) {
-                ForEach(Array(cards.enumerated()), id: \.offset) { index, card in
-                    cardTile(card, index: index)
+        switch axis {
+        case .horizontal:
+            ScrollView(.horizontal, showsIndicators: false) {
+                HStack(spacing: 8) {
+                    ForEach(Array(cards.enumerated()), id: \.offset) { index, card in
+                        cardTile(card, index: index)
+                    }
                 }
+                .padding(.horizontal, 8)
+                .padding(.vertical, 6)
             }
-            .padding(.horizontal, 8)
-            .padding(.vertical, 6)
+            .frame(height: 72)
+        case .vertical:
+            ScrollView(.vertical, showsIndicators: false) {
+                LazyVGrid(columns: [GridItem(.flexible()), GridItem(.flexible())], spacing: 6) {
+                    ForEach(Array(cards.enumerated()), id: \.offset) { index, card in
+                        cardTile(card, index: index, compact: true)
+                    }
+                }
+                .padding(8)
+            }
         }
-        .frame(height: 72)
     }
 
-    private func cardTile(_ card: CardType, index: Int) -> some View {
+    private func cardTile(_ card: CardType, index: Int, compact: Bool = false) -> some View {
         let meta = card.meta
         let playable = isPlayable(card)
         // A plain tile with tap/long-press gestures rather than a `Button` — a
@@ -43,7 +59,8 @@ struct CardHandGridView: View {
             Text(card.label).font(.system(size: 9)).lineLimit(2).multilineTextAlignment(.center)
         }
         .padding(5)
-        .frame(width: 64, height: 58)
+        .frame(width: compact ? nil : 64, height: compact ? 54 : 58)
+        .frame(maxWidth: compact ? .infinity : nil)
         .background(RoundedRectangle(cornerRadius: 8).fill(meta.kind.color.opacity(0.28)))
         .overlay(RoundedRectangle(cornerRadius: 8).stroke(meta.kind.color, lineWidth: 1.5))
         .contentShape(RoundedRectangle(cornerRadius: 8))

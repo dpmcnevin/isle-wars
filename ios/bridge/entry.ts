@@ -166,8 +166,21 @@ function withState<Args extends unknown[]>(fn: (...args: Args) => void) {
 	// drained and the whole AI turn (including all state mutation) has run
 	// to completion. Swift reads the result via a separate getState() call
 	// rather than relying on this function's own return value.
+	//
+	// The rejection handler is load-bearing: an exception inside the async
+	// `runAiTurn` rejects a promise nobody awaits — JSContext.exception never
+	// fires for that, so without capturing it here Swift would see a
+	// "successful" call with an unchanged state, reschedule the AI, and loop
+	// on the thinking spinner forever (the "stuck on green thinking" bug).
+	// Swift reads `__aiTurnError` right after the call (the synchronous shim
+	// guarantees the promise has already settled by then).
 	runAiTurn: (player: Player) => {
-		void runAiTurn(player, 0);
+		delete (globalThis as { __aiTurnError?: string }).__aiTurnError;
+		runAiTurn(player, 0).catch((e: unknown) => {
+			(globalThis as { __aiTurnError?: string }).__aiTurnError = String(
+				(e instanceof Error && e.stack) || e
+			);
+		});
 	},
 
 	// Lets a headless sim (or, later, a Swift debug toggle) put a subset of

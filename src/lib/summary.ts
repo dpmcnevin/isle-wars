@@ -114,7 +114,8 @@ const CAUSE_PHRASE: Record<ArmyEvent['cause'], string> = {
 	rebellion: 'A rebellion',
 	earthquake: 'An earthquake',
 	flood: 'A flood',
-	production: 'A production surge'
+	production: 'A production surge',
+	desert: 'Desert heat'
 };
 
 function describeForWinner(

@@ -49,8 +49,11 @@ struct HexArmyDelta: Codable {
     let delta: Int
 }
 
+// Every case here must stay in sync with ArmyEvent['cause'] in game.ts — a
+// value this enum can't decode fails the WHOLE GameState decode (see the
+// EdgeEventKind/'tunnel' incident).
 enum ArmyEventCause: String, Codable {
-    case bomb, sabotage, artillery, rebellion, earthquake, flood, production
+    case bomb, sabotage, artillery, rebellion, earthquake, flood, production, desert
 }
 
 struct ArmyEvent: Codable {
@@ -70,7 +73,7 @@ struct TerrainEvent: Codable {
 }
 
 enum EdgeEventKind: String, Codable {
-    case wall, seaLane
+    case wall, seaLane, tunnel
 }
 
 struct EdgeEvent: Codable {

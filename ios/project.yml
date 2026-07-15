@@ -19,7 +19,7 @@ targets:
       base:
         PRODUCT_NAME: IsleWars
         PRODUCT_BUNDLE_IDENTIFIER: com.isle-wars.ipad
-        TARGETED_DEVICE_FAMILY: "2" # iPad only
+        TARGETED_DEVICE_FAMILY: "1,2" # iPad + iPhone, both landscape-only
         SUPPORTS_MACCATALYST: false
         SWIFT_VERSION: "6.0"
         INFOPLIST_KEY_UILaunchScreen_Generation: true

@@ -276,7 +276,7 @@ export interface ArmyEvent {
 	grid: number;
 	player: Player; // whose armies moved
 	delta: number; // signed: negative = lost, positive = gained
-	cause: 'bomb' | 'sabotage' | 'artillery' | 'rebellion' | 'earthquake' | 'flood' | 'production';
+	cause: 'bomb' | 'sabotage' | 'artillery' | 'rebellion' | 'earthquake' | 'flood' | 'production' | 'desert';
 	by: Player | null; // who played the card; null for world events
 }
 
@@ -1428,6 +1428,24 @@ function beginTurn(s: GameState): GameState {
 		log(s, EVENT_OMENS[type], 'event', null);
 	}
 
+	// Desert attrition: at the start of your turn, every desert hex you hold
+	// loses 1 army to the heat. Can drop a garrison to 0 (never negative) —
+	// the hex stays owned, just undefended. This replaced the old
+	// move-in/"heat on arrival" desert rule.
+	let desertLosses = 0;
+	for (const g of s.map.grids) {
+		if (g.terrain !== 'desert') continue;
+		const st = s.states[g.id];
+		if (st.owner === s.current && st.armies > 0) {
+			st.armies -= 1;
+			desertLosses++;
+			pushArmyEvent(s, g.id, s.current, -1, 'desert', null);
+		}
+	}
+	if (desertLosses > 0) {
+		log(s, `Desert heat cost ${PLAYER_NAMES[s.current]} ${desertLosses} arm${desertLosses === 1 ? 'y' : 'ies'} (1 per desert hex).`, 'event');
+	}
+
 	// Reinforcements (city income replaced the old random production surge —
 	// see cityIncome).
 	let reinf = computeReinforcements(s, s.current);
@@ -1835,10 +1853,6 @@ function autoConquer(s: GameState, fromId: number, toId: number): void {
 	}
 	from.armies -= 1;
 	to.armies = 1;
-	if (s.map.grids[toId].terrain === 'desert' && from.armies > 1) {
-		from.armies -= 1;
-		log(s, `Desert heat cost ${PLAYER_NAMES[attacker]} 1 army entering ${gridLabel(s, toId)}.`, 'attack');
-	}
 	updateAlive(s);
 	if (checkWin(s)) return;
 	if (from.armies > 0) {
@@ -1938,13 +1952,6 @@ export function rollAttack(): void {
 			// move at least 1 in
 			from.armies -= 1;
 			to.armies = 1;
-			// Desert attrition: attackers moving into a desert lose 1 more army
-			// to the heat. Applied against the source (follow-on force), but
-			// never below 1 — a hex must always keep a garrison.
-			if (s.map.grids[s.selectedTo].terrain === 'desert' && from.armies > 1) {
-				from.armies -= 1;
-				log(s, `Desert heat cost ${PLAYER_NAMES[from.owner!]} 1 army entering ${gridLabel(s, s.selectedTo)}.`, 'attack');
-			}
 			updateAlive(s);
 			if (checkWin(s)) return s;
 			if (from.armies > 0) {
@@ -2050,11 +2057,6 @@ export function confirmMove(qty: number) {
 		from.armies -= q;
 		to.armies += q;
 		log(s, `${PLAYER_NAMES[s.current]} moved ${q} from ${gridLabel(s, s.selectedFrom)} to ${gridLabel(s, s.selectedTo)}.`, 'info');
-		// Desert heat attrition: moving armies into a desert costs 1 army.
-		if (s.map.grids[s.selectedTo].terrain === 'desert' && to.armies > 0) {
-			to.armies -= 1;
-			log(s, `Desert heat cost ${PLAYER_NAMES[s.current]} 1 army at ${gridLabel(s, s.selectedTo)}.`, 'info');
-		}
 		s.phase = 'action';
 		s.selectedFrom = null;
 		s.selectedTo = null;
@@ -2235,10 +2237,6 @@ export function confirmAir(qty: number) {
 			delete (s as any)._pendingCardIdx;
 		}
 		log(s, `${PLAYER_NAMES[s.current]} air-moved ${q} from ${gridLabel(s, s.selectedFrom)} to ${gridLabel(s, s.selectedTo)}.`, 'card');
-		if (s.map.grids[s.selectedTo].terrain === 'desert' && to.armies > 0) {
-			to.armies -= 1;
-			log(s, `Desert heat cost ${PLAYER_NAMES[s.current]} 1 army at ${gridLabel(s, s.selectedTo)}.`, 'card');
-		}
 		s.phase = 'action';
 		s.selectedFrom = null;
 		s.selectedTo = null;

@@ -43,7 +43,7 @@ struct HexInfo {
             .mountain: ("Mountain", "Defender rolls +1 on every die."),
             .forest: ("Forest", "Attacker rolls +1 (cover on approach)."),
             .marsh: ("Marsh", "After attacking from here, cannot launch another attack from this hex this turn."),
-            .desert: ("Desert", "Heat attrition — any move into a desert (conquest, regular move, or air move) burns 1 army. Cannot host a production center.")
+            .desert: ("Desert", "Heat attrition — whoever holds this hex loses 1 army here at the start of each of their turns (can drop to 0). Cannot host a production center.")
         ]
         let (tName, tDesc) = terrainInfo[g.terrain] ?? ("Plain", "")
         // Only surface terrain when it has an effect; plain adds nothing unless

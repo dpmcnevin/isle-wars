@@ -45,11 +45,13 @@
 		canPlayCardNow,
 		setHumanPlayers,
 		type Player,
+		type Phase,
 		type CardType,
 		type GameState,
 		type DebugSettings,
 		type EventIntensity
 	} from '$lib/game';
+	import { PHASE_TO_STEP } from '$lib/cards';
 	import { wallBetween, polygonPoints, wallSegmentsFor, seaLanePath, type GameMap } from '$lib/map';
 	import { runAiTurn, setValueNetPlayers } from '$lib/ai';
 	import { loadLifetimeStats, recordFinishedGame, resetLifetimeStats, type LifetimeStats } from '$lib/lifetime';
@@ -246,6 +248,33 @@
 		try { localStorage.setItem(AI_SPEED_KEY, String(aiSpeed)); } catch { /* ignore */ }
 	});
 	function aiTickMs() { return aiSpeed === 0 ? 0 : aiSpeed === 2 ? 20 : 60; }
+
+	// Friendly names for the side panel's phase indicator — never show a raw
+	// Phase value like "game_over" or "bomb_select" in the UI. Card-targeting
+	// phases fall back to their card's display label via PHASE_TO_STEP, and
+	// anything still unmapped just gets its underscores stripped.
+	const PHASE_LABELS: Partial<Record<Phase, string>> = {
+		placing: 'place armies',
+		action: 'attack, move, or pass',
+		attack_select_from: 'attack — choose source',
+		attack_select_to: 'attack — choose target',
+		attack_rolling: 'battle',
+		attack_move_in: 'move armies in',
+		move_select_from: 'move — choose source',
+		move_select_to: 'move — choose destination',
+		move_qty: 'move — choose how many',
+		air_qty: 'Air Move — choose how many',
+		paratroop_qty: 'Paratroop — choose how many',
+		discard: 'discard a card',
+		game_over: 'game over'
+	};
+	function phaseLabel(phase: Phase): string {
+		const label = PHASE_LABELS[phase];
+		if (label) return label;
+		const step = PHASE_TO_STEP[phase];
+		if (step) return step.def.label;
+		return phase.replace(/_/g, ' ');
+	}
 
 	let showShortcuts = $state(false);
 	// The '?' help content — keep in sync with onKey's actual bindings.
@@ -1038,7 +1067,7 @@
 			mountain: ['Mountain', 'Defender rolls +1 on every die.'],
 			forest: ['Forest', 'Attacker rolls +1 (cover on approach).'],
 			marsh: ['Marsh', 'After attacking from here, cannot launch another attack from this hex this turn.'],
-			desert: ['Desert', 'Heat attrition — any move into a desert (conquest, regular move, or air move) burns 1 army. Cannot host a production center.']
+			desert: ['Desert', 'Heat attrition — whoever holds this hex loses 1 army here at the start of each of their turns (can drop to 0). Cannot host a production center.']
 		};
 		const modifiers: HexModifier[] = [];
 		if (g.production) {
@@ -1573,7 +1602,7 @@
 
 		<aside class="side">
 			<section class="panel">
-				<h3>{PLAYER_NAMES[$game.current]}'s turn — {$game.phase}</h3>
+				<h3>{PLAYER_NAMES[$game.current]}'s turn — {phaseLabel($game.phase)}</h3>
 				{#if $game.current === HUMAN && $game.phase === 'placing'}
 					<p class="hint">Armies remaining: <strong>{$game.armiesToPlace}</strong>. Click one of your territories.</p>
 				{/if}
@@ -1782,11 +1811,9 @@
 				{#if dstId != null}
 					{@const dstG = $game.map.grids[dstId]}
 					{@const q = qtyValue()}
-					{@const desertApplies = $game.phase === 'move_qty' || $game.phase === 'air_qty'}
-					{@const desertLoss = desertApplies && dstG.terrain === 'desert' && q > 0 ? 1 : 0}
 					{@const dstOwner = $game.states[dstId].owner}
 					{@const srcOwner = $game.states[src].owner}
-					{@const dstAfter = Math.max(0, $game.states[dstId].armies + q - desertLoss)}
+					{@const dstAfter = Math.max(0, $game.states[dstId].armies + q)}
 					{@const srcAfter = Math.max(0, srcArmies - q)}
 					{@const dstFillOverride = dstOwner == null && q > 0 && srcOwner ? PLAYER_COLORS[srcOwner] : null}
 					<div class="qty-hex-row">
@@ -1796,8 +1823,7 @@
 					</div>
 					{#if dstG.terrain === 'desert' || dstG.terrain === 'mountain' || dstG.terrain === 'forest' || dstG.terrain === 'marsh'}
 						<ul class="qty-mods">
-							{#if dstG.terrain === 'desert' && desertApplies}<li class="warn">🏜 Desert — 1 army lost to heat on arrival</li>{/if}
-							{#if dstG.terrain === 'desert' && !desertApplies}<li>🏜 Desert — heat toll already paid on conquest</li>{/if}
+							{#if dstG.terrain === 'desert'}<li class="warn">🏜 Desert — loses 1 army at the start of each of its owner's turns</li>{/if}
 							{#if dstG.terrain === 'mountain'}<li>⛰ Mountain — defender bonus if attacked from here</li>{/if}
 							{#if dstG.terrain === 'forest'}<li>🌲 Forest — attackers get cover on approach</li>{/if}
 							{#if dstG.terrain === 'marsh'}<li class="warn">💧 Marsh — can't launch a second attack after using this as a source</li>{/if}

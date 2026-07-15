@@ -7,6 +7,13 @@ struct NewGameSheet: View {
     @State private var seedText: String = ""
     @State private var showingDebug = false
 
+    /// iPhone landscape (`.compact` vertically) is too short for the
+    /// iPad-tuned vertical stack (hero, then settings, then start button)
+    /// to fit without scrolling — there's plenty of width to spare instead,
+    /// so this lays hero and settings out side by side.
+    @Environment(\.verticalSizeClass) private var verticalSizeClass
+    private var isCompact: Bool { verticalSizeClass == .compact }
+
     private let difficultyLabels = ["", "Easy", "Normal", "Hard", "Brutal"]
     private let difficultyBlurbs = [
         "",
@@ -33,23 +40,82 @@ struct NewGameSheet: View {
             )
             .ignoresSafeArea()
 
-            ScrollView {
-                VStack(spacing: 28) {
-                    hero
-                    settingsCard
-                    startButton
-                    Button("Debug Settings…") { showingDebug = true }
-                        .font(.caption)
-                        .tint(AppTheme.accent)
-                }
-                .padding(40)
-                .frame(maxWidth: 620)
-                .frame(maxWidth: .infinity)
+            if isCompact {
+                compactBody
+            } else {
+                regularBody
             }
         }
         .foregroundStyle(AppTheme.text)
         .sheet(isPresented: $showingDebug) {
             DebugSettingsSheet(vm: vm)
+        }
+    }
+
+    /// iPad: the original single-column, scrollable layout — plenty of
+    /// vertical room there, so a straightforward stack is fine.
+    private var regularBody: some View {
+        ScrollView {
+            VStack(spacing: 28) {
+                hero
+                settingsCard
+                startButton
+                Button("Debug Settings…") { showingDebug = true }
+                    .font(.caption)
+                    .tint(AppTheme.accent)
+            }
+            .padding(40)
+            .frame(maxWidth: 620)
+            .frame(maxWidth: .infinity)
+        }
+    }
+
+    /// iPhone landscape: side-by-side instead of stacked, so everything
+    /// fits within the short available height without needing to scroll.
+    private var compactBody: some View {
+        HStack(spacing: 24) {
+            VStack(spacing: 10) {
+                Spacer(minLength: 0)
+                compactHero
+                Spacer(minLength: 0)
+            }
+            .frame(maxWidth: .infinity)
+
+            VStack(spacing: 14) {
+                settingsCard
+                startButton
+                Button("Debug Settings…") { showingDebug = true }
+                    .font(.caption2)
+                    .tint(AppTheme.accent)
+            }
+            .frame(maxWidth: .infinity)
+        }
+        .padding(20)
+    }
+
+    private var compactHero: some View {
+        VStack(spacing: 8) {
+            Text("ISLE WARS")
+                .font(.system(size: 32, weight: .heavy, design: .serif))
+                .foregroundStyle(
+                    LinearGradient(colors: [AppTheme.gold, Color(hex: 0xffcf6a)],
+                                   startPoint: .top, endPoint: .bottom)
+                )
+                .shadow(color: .black.opacity(0.5), radius: 4, y: 2)
+            Text("Conquer the archipelago, one isle at a time.")
+                .font(.caption)
+                .foregroundStyle(AppTheme.textDim)
+                .multilineTextAlignment(.center)
+            HStack(spacing: 8) {
+                ForEach(Player.allCases) { p in
+                    Circle()
+                        .fill(p.color)
+                        .frame(width: 11, height: 11)
+                        .overlay(Circle().stroke(.white.opacity(0.25), lineWidth: 1))
+                        .shadow(color: p.color.opacity(0.6), radius: 3)
+                }
+            }
+            .padding(.top, 2)
         }
     }
 

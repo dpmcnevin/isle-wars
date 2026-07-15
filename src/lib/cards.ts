@@ -339,7 +339,7 @@ export const CARD_DEFS: CardDef[] = [
 	{
 		id: 'oasis', label: 'Oasis', icon: '🌴', kind: 'terrain', weight: 1,
 		when: 'Action phase',
-		desc: 'Irrigate a desert hex you control, turning it back into plains. Removes the heat attrition (1 army lost per move into it).',
+		desc: 'Irrigate a desert hex you control, turning it back into plains. Removes the heat attrition (1 army lost there at the start of each of your turns).',
 		playableIn: ACTION_ONLY,
 		steps: [{ phase: 'oasis_select', prompt: 'Oasis: click one of your desert hexes to convert it to plains.',
 			check: (s, id) => s.map.grids[id].terrain !== 'desert' ? 'Pick a desert hex.'
@@ -534,7 +534,7 @@ export const CARD_DEFS: CardDef[] = [
 	{
 		id: 'scorched', label: 'Scorched Earth', icon: '🔥', kind: 'terrain', weight: 1,
 		when: 'Action phase',
-		desc: 'Burn any plains or forest hex into desert. Every move into it (conquest, move, or air move) costs 1 army to the heat. Cities cannot be burned.',
+		desc: 'Burn any plains or forest hex into desert. Whoever holds it loses 1 army there at the start of each of their turns (can drop to 0). Cities cannot be burned.',
 		playableIn: ACTION_ONLY,
 		steps: [{ phase: 'scorched_select', prompt: 'Scorched Earth: click any plains or forest hex to burn it to desert.',
 			check: (s, id) => {

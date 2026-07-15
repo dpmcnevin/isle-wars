@@ -43,6 +43,7 @@ struct GameMap: Codable {
     let waterFeatures: [WaterFeature]
     let rivers: [[Int]]
     let walls: [[Int]]?
+    let tunnels: [[Int]]?
     let width: Double
     let height: Double
     let viewBox: ViewBox

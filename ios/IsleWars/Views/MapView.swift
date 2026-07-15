@@ -48,27 +48,41 @@ struct MapView: View {
             let transform = MapTransform(viewBox: map.viewBox, containerSize: geo.size, insets: contentInsets)
 
             ZStack(alignment: .topLeading) {
+                // Split from the drag-highlight/arrow overlay below: this layer
+                // only depends on `state`/`selectableHexes`/`transform`, none of
+                // which change during a drag or hover, so SwiftUI can skip
+                // re-rendering its (expensive — terrain patterns, river blur,
+                // per-hex text/badges) Canvas on every touch-move frame instead
+                // of redrawing the whole scene ~60x/sec just to move an arrow.
+                StaticMapLayer(
+                    state: state,
+                    selectableHexes: selectableHexes,
+                    transform: transform,
+                    size: geo.size
+                )
+
+                // Cheap, drag-state-dependent overlay: candidate/target hex
+                // glows plus the drag arrow. Redraws every touch-move frame,
+                // but it's only ever a handful of strokes + one arrow path.
                 Canvas { context, _ in
-                    drawWater(context: context, size: geo.size, transform: transform)
-                    drawSeaLanes(context: context, transform: transform)
-                    drawTerritories(context: context, transform: transform)
-                    drawRivers(context: context, transform: transform)
-                    drawWalls(context: context, transform: transform)
-                    drawBadgesAndLabels(context: context, transform: transform)
+                    drawDragHighlights(context: context, transform: transform)
                     drawDragArrowIfNeeded(context: context, transform: transform)
                 }
-                .contentShape(Rectangle())
-                .gesture(dragGesture(transform: transform))
-                .simultaneousGesture(infoPressGesture(transform: transform))
-                .onContinuousHover { phase in
-                    switch phase {
-                    case .active(let location):
-                        infoGrid = hexAt(location, transform: transform)
-                        infoPoint = location
-                    case .ended:
-                        infoGrid = nil
+                .allowsHitTesting(false)
+
+                Color.clear
+                    .contentShape(Rectangle())
+                    .gesture(dragGesture(transform: transform))
+                    .simultaneousGesture(infoPressGesture(transform: transform))
+                    .onContinuousHover { phase in
+                        switch phase {
+                        case .active(let location):
+                            infoGrid = hexAt(location, transform: transform)
+                            infoPoint = location
+                        case .ended:
+                            infoGrid = nil
+                        }
                     }
-                }
 
                 if let id = infoGrid, let info = HexInfo.make(gridId: id, state: state) {
                     HexInfoCard(info: info)
@@ -112,9 +126,184 @@ struct MapView: View {
             }
     }
 
-    // MARK: - Drawing passes
+    // MARK: - Drag-dependent overlay (cheap; redraws every touch-move frame)
 
-    private func drawWater(context: GraphicsContext, size: CGSize, transform: MapTransform) {
+    /// Glow strokes for hexes whose highlight depends on the live drag
+    /// (drag-from, hover target, attack/move candidates) — everything else
+    /// (selectable/selected/default outlines) lives in `StaticMapLayer`
+    /// since it only changes when `state` itself changes, not every frame.
+    private func drawDragHighlights(context: GraphicsContext, transform: MapTransform) {
+        guard let from = dragFrom else { return }
+        let attackCandidates = attackCandidateSet
+        let moveCandidates = moveCandidateSet
+
+        func stroke(_ gridId: Int, color: Color, width: CGFloat, glow: Color, glowRadius: CGFloat) {
+            guard map.grids.indices.contains(gridId) else { return }
+            let path = transform.polygonPath(map.grids[gridId].cell)
+            context.drawLayer { layer in
+                layer.addFilter(.shadow(color: glow, radius: glowRadius))
+                layer.stroke(path, with: .color(color), lineWidth: width)
+            }
+            context.stroke(path, with: .color(color), lineWidth: width)
+        }
+
+        for candidate in attackCandidates {
+            let isHover = candidate == dragHoverTarget
+            stroke(candidate, color: MapColors.attack, width: isHover ? 5 : 3,
+                   glow: isHover ? MapColors.attack : MapColors.attack.opacity(0.7), glowRadius: isHover ? 12 : 6)
+        }
+        for candidate in moveCandidates {
+            let isHover = candidate == dragHoverTarget
+            stroke(candidate, color: MapColors.move, width: isHover ? 5 : 3,
+                   glow: isHover ? MapColors.move : MapColors.move.opacity(0.7), glowRadius: isHover ? 12 : 6)
+        }
+        stroke(from, color: .white, width: 4, glow: .white, glowRadius: 8)
+    }
+
+    private func drawDragArrowIfNeeded(context: GraphicsContext, transform: MapTransform) {
+        guard let from = dragFrom, let currentPoint = dragCurrentPoint,
+              map.grids.indices.contains(from) else { return }
+        let sourceCenter = transform.point(map.grids[from].cellCenter)
+        let kind = dragActionKind(from: from, hover: dragHoverTarget)
+        drawDragArrow(in: context, from: sourceCenter, to: currentPoint, color: kind.color, solid: kind != .invalid)
+    }
+
+    // MARK: - Drag gesture
+
+    /// True if a Wall barrier sits on the shared edge between two hexes.
+    private func wallBetween(_ a: Int, _ b: Int) -> Bool {
+        guard let walls = map.walls else { return false }
+        let lo = min(a, b), hi = max(a, b)
+        return walls.contains { $0.count == 2 && $0[0] == lo && $0[1] == hi }
+    }
+
+    private var attackCandidateSet: Set<Int> {
+        guard let from = dragFrom, map.adj.indices.contains(from) else { return [] }
+        return Set(map.adj[from].filter { states.indices.contains($0) && states[$0].owner != state.current && !wallBetween(from, $0) })
+    }
+
+    private var moveCandidateSet: Set<Int> {
+        guard let from = dragFrom, map.adj.indices.contains(from) else { return [] }
+        return Set(map.adj[from].filter { $0 != from && states.indices.contains($0) && states[$0].owner == state.current && !wallBetween(from, $0) })
+    }
+
+    private func dragActionKind(from: Int, hover: Int?) -> DragActionKind {
+        // Ferry crosses open water (non-adjacent), so it doesn't go through the
+        // adjacency check — any of the player's other territories is a candidate
+        // drop; the engine rejects unreachable ones on release.
+        if state.phase == .ferryFrom {
+            guard let hover, hover != from, states.indices.contains(hover),
+                  states[hover].owner == state.current else { return .invalid }
+            return .ferry
+        }
+        guard let hover, hover != from, map.adj.indices.contains(from), map.adj[from].contains(hover) else { return .invalid }
+        guard states.indices.contains(hover) else { return .invalid }
+        if wallBetween(from, hover) { return .invalid }
+        if states[hover].owner == state.current { return .move }
+        return .attack
+    }
+
+    /// Whether a drag can start from this hex given the current phase — the
+    /// `action` phase (attack/move) or a Ferry card's `ferry_from` phase.
+    private func canDragFrom(_ gridId: Int) -> Bool {
+        guard states.indices.contains(gridId), states[gridId].owner == state.current else { return false }
+        return state.phase == .action || state.phase == .ferryFrom
+    }
+
+    private func dragGesture(transform: MapTransform) -> some Gesture {
+        DragGesture(minimumDistance: 0)
+            .onChanged { value in
+                if dragStart == nil { dragStart = value.startLocation }
+                let dist = hypot(value.location.x - value.startLocation.x, value.location.y - value.startLocation.y)
+                if !isDragArmed && dist > 10 {
+                    isDragArmed = true
+                    let startMapPoint = transform.reverse(value.startLocation)
+                    if let grid = map.grids.first(where: { pointInPolygon(startMapPoint, polygon: $0.cell) }),
+                       canDragFrom(grid.id) {
+                        dragFrom = grid.id
+                    }
+                }
+                if isDragArmed, dragFrom != nil {
+                    dragCurrentPoint = value.location
+                    let mapPoint = transform.reverse(value.location)
+                    dragHoverTarget = map.grids.first(where: { pointInPolygon(mapPoint, polygon: $0.cell) })?.id
+                }
+            }
+            .onEnded { value in
+                let wasArmed = isDragArmed
+                let from = dragFrom
+                let to = dragHoverTarget
+                let peeked = suppressTapAfterInfo
+                dragStart = nil
+                isDragArmed = false
+                dragFrom = nil
+                dragCurrentPoint = nil
+                dragHoverTarget = nil
+                suppressTapAfterInfo = false
+
+                guard wasArmed, let from else {
+                    // A long-press "peek" happened on this touch — consume it
+                    // rather than treating the lift as a tap (select/place).
+                    if peeked { return }
+                    let mapPoint = transform.reverse(value.location)
+                    if let grid = map.grids.first(where: { pointInPolygon(mapPoint, polygon: $0.cell) }) {
+                        onTapHex(grid.id)
+                    }
+                    return
+                }
+                // Ferry: any of the player's other hexes is a candidate drop;
+                // the engine validates reachability.
+                if state.phase == .ferryFrom {
+                    guard let to, to != from, states.indices.contains(to),
+                          states[to].owner == state.current else { return }
+                    onDragFerry(from, to)
+                    return
+                }
+                guard let to, to != from, map.adj.indices.contains(from), map.adj[from].contains(to),
+                      states.indices.contains(to), !wallBetween(from, to) else { return }
+                if states[to].owner == state.current {
+                    onDragMove(from, to)
+                } else {
+                    onDragAttack(from, to)
+                }
+            }
+    }
+}
+
+/// Everything that only depends on `state`/`selectableHexes`/`transform` —
+/// water, sea lanes, territory fills/terrain, base hex borders (default/
+/// selectable/selected — NOT the live drag highlight, which changes every
+/// touch-move frame and lives in `MapView`'s separate overlay Canvas
+/// instead), rivers, walls, tunnels, badges and labels. Extracted into its
+/// own view so SwiftUI can skip re-invoking this (expensive) Canvas when
+/// only drag/hover `@State` changes in the parent.
+private struct StaticMapLayer: View {
+    let state: GameState
+    let selectableHexes: Set<Int>
+    let transform: MapTransform
+    let size: CGSize
+
+    private var map: GameMap { state.map }
+    private var states: [GridState] { state.states }
+
+    private var riverPolylines: [[Point]] {
+        RiverCache.shared.polylines(for: map)
+    }
+
+    var body: some View {
+        Canvas { context, _ in
+            drawWater(context: context)
+            drawSeaLanes(context: context)
+            drawTerritories(context: context)
+            drawRivers(context: context)
+            drawWalls(context: context)
+            drawTunnels(context: context)
+            drawBadgesAndLabels(context: context)
+        }
+        .allowsHitTesting(false)
+    }
+
+    private func drawWater(context: GraphicsContext) {
         context.fill(Path(CGRect(origin: .zero, size: size)), with: .color(Color(red: 0.09, green: 0.22, blue: 0.35)))
         for hex in map.waterHexes {
             context.stroke(transform.polygonPath(hex), with: .color(.white.opacity(0.05)), lineWidth: 1)
@@ -134,7 +323,7 @@ struct MapView: View {
         return keys
     }
 
-    private func drawSeaLanes(context: GraphicsContext, transform: MapTransform) {
+    private func drawSeaLanes(context: GraphicsContext) {
         let created = createdLaneKeys
         for lane in map.seaLanes where lane.count == 2 {
             let (a, b) = (lane[0], lane[1])
@@ -151,10 +340,7 @@ struct MapView: View {
         }
     }
 
-    private func drawTerritories(context: GraphicsContext, transform: MapTransform) {
-        let attackCandidates = attackCandidateSet
-        let moveCandidates = moveCandidateSet
-
+    private func drawTerritories(context: GraphicsContext) {
         for grid in map.grids {
             let path = transform.polygonPath(grid.cell)
             let owner = states.indices.contains(grid.id) ? states[grid.id].owner : nil
@@ -163,14 +349,10 @@ struct MapView: View {
 
             TerrainPatterns.draw(terrain: grid.terrain, in: context, hexPath: path, bounds: path.boundingRect)
 
-            let style = strokeStyle(
-                for: grid.id,
-                attackCandidates: attackCandidates,
-                moveCandidates: moveCandidates
-            )
+            let style = strokeStyle(for: grid.id)
             if let glow = style.glow {
                 // Mirrors the web app's `drop-shadow` on highlighted hexes so
-                // selectable/selected/drag-target outlines read as glowing.
+                // selectable/selected outlines read as glowing.
                 context.drawLayer { layer in
                     layer.addFilter(.shadow(color: glow, radius: style.glowRadius))
                     layer.stroke(path, with: .color(style.color), lineWidth: style.width)
@@ -187,16 +369,10 @@ struct MapView: View {
         var glowRadius: CGFloat = 6
     }
 
-    private func strokeStyle(for gridId: Int, attackCandidates: Set<Int>, moveCandidates: Set<Int>) -> HexStroke {
-        if gridId == dragFrom {
-            return HexStroke(color: .white, width: 4, glow: .white, glowRadius: 8)
-        }
-        if let hover = dragHoverTarget, hover == gridId {
-            if attackCandidates.contains(gridId) { return HexStroke(color: MapColors.attack, width: 5, glow: MapColors.attack, glowRadius: 12) }
-            if moveCandidates.contains(gridId) { return HexStroke(color: MapColors.move, width: 5, glow: MapColors.move, glowRadius: 12) }
-        }
-        if attackCandidates.contains(gridId) { return HexStroke(color: MapColors.attack, width: 3, glow: MapColors.attack.opacity(0.7), glowRadius: 6) }
-        if moveCandidates.contains(gridId) { return HexStroke(color: MapColors.move, width: 3, glow: MapColors.move.opacity(0.7), glowRadius: 6) }
+    /// The live drag-highlight (drag-from/hover/candidate) states are drawn
+    /// by `MapView`'s separate overlay Canvas on top of this, so this only
+    /// needs the "resting" outline states.
+    private func strokeStyle(for gridId: Int) -> HexStroke {
         if gridId == state.selectedFrom { return HexStroke(color: MapColors.selectedFrom, width: 4, glow: .white, glowRadius: 8) }
         if gridId == state.selectedTo { return HexStroke(color: MapColors.selectedTo, width: 4, glow: MapColors.selectedTo, glowRadius: 8) }
         if isSelectable(gridId) {
@@ -214,7 +390,7 @@ struct MapView: View {
         state.current == .human && selectableHexes.contains(id)
     }
 
-    private func drawRivers(context: GraphicsContext, transform: MapTransform) {
+    private func drawRivers(context: GraphicsContext) {
         guard !riverPolylines.isEmpty else { return }
         let layers: [(Color, CGFloat)] = [
             (Color(red: 0.04, green: 0.18, blue: 0.36), 14),
@@ -240,13 +416,6 @@ struct MapView: View {
         }
     }
 
-    /// True if a Wall barrier sits on the shared edge between two hexes.
-    private func wallBetween(_ a: Int, _ b: Int) -> Bool {
-        guard let walls = map.walls else { return false }
-        let lo = min(a, b), hi = max(a, b)
-        return walls.contains { $0.count == 2 && $0[0] == lo && $0[1] == hi }
-    }
-
     /// The two vertices shared by two adjacent hexes — the edge a wall sits on.
     private func sharedEdge(_ a: Int, _ b: Int) -> (Point, Point)? {
         guard map.grids.indices.contains(a), map.grids.indices.contains(b) else { return nil }
@@ -259,7 +428,7 @@ struct MapView: View {
 
     /// Stone slab straddling the shared hex edge — the visual for a wall that
     /// blocks movement and attacks across it (mirrors the web `wallSegments`).
-    private func drawWalls(context: GraphicsContext, transform: MapTransform) {
+    private func drawWalls(context: GraphicsContext) {
         guard let walls = map.walls, !walls.isEmpty else { return }
         for wall in walls where wall.count == 2 {
             guard let (a, b) = sharedEdge(wall[0], wall[1]) else { continue }
@@ -275,7 +444,33 @@ struct MapView: View {
         }
     }
 
-    private func drawBadgesAndLabels(context: GraphicsContext, transform: MapTransform) {
+    /// Tunnel-card connections: a straight hex-center-to-hex-center channel
+    /// (unlike rivers/walls, which hug the shared hex edge) — mirrors the
+    /// web's dark casing + amber dashed core + end-cap dots.
+    private func drawTunnels(context: GraphicsContext) {
+        guard let tunnels = map.tunnels, !tunnels.isEmpty else { return }
+        let casing = Color(red: 0.14, green: 0.07, blue: 0.02)
+        let core = Color(red: 1.0, green: 0.71, blue: 0.33)
+        for tunnel in tunnels where tunnel.count == 2 {
+            let (a, b) = (tunnel[0], tunnel[1])
+            guard map.grids.indices.contains(a), map.grids.indices.contains(b) else { continue }
+            let pa = transform.point(map.grids[a].cellCenter)
+            let pb = transform.point(map.grids[b].cellCenter)
+            var path = Path()
+            path.move(to: pa)
+            path.addLine(to: pb)
+            context.stroke(path, with: .color(casing), style: StrokeStyle(lineWidth: 9, lineCap: .round))
+            context.stroke(path, with: .color(core), style: StrokeStyle(lineWidth: 4, lineCap: .round, dash: [7, 6]))
+            for center in [pa, pb] {
+                let r: CGFloat = 4.5
+                let dot = Path(ellipseIn: CGRect(x: center.x - r, y: center.y - r, width: r * 2, height: r * 2))
+                context.fill(dot, with: .color(casing))
+                context.stroke(dot, with: .color(core), lineWidth: 2)
+            }
+        }
+    }
+
+    private func drawBadgesAndLabels(context: GraphicsContext) {
         for grid in map.grids {
             guard states.indices.contains(grid.id) else { continue }
             let st = states[grid.id]
@@ -392,108 +587,6 @@ struct MapView: View {
                 outlineRadius: 1.0
             )
         }
-    }
-
-    private func drawDragArrowIfNeeded(context: GraphicsContext, transform: MapTransform) {
-        guard let from = dragFrom, let currentPoint = dragCurrentPoint,
-              map.grids.indices.contains(from) else { return }
-        let sourceCenter = transform.point(map.grids[from].cellCenter)
-        let kind = dragActionKind(from: from, hover: dragHoverTarget)
-        drawDragArrow(in: context, from: sourceCenter, to: currentPoint, color: kind.color, solid: kind != .invalid)
-    }
-
-    // MARK: - Drag gesture
-
-    private var attackCandidateSet: Set<Int> {
-        guard let from = dragFrom, map.adj.indices.contains(from) else { return [] }
-        return Set(map.adj[from].filter { states.indices.contains($0) && states[$0].owner != state.current && !wallBetween(from, $0) })
-    }
-
-    private var moveCandidateSet: Set<Int> {
-        guard let from = dragFrom, map.adj.indices.contains(from) else { return [] }
-        return Set(map.adj[from].filter { $0 != from && states.indices.contains($0) && states[$0].owner == state.current && !wallBetween(from, $0) })
-    }
-
-    private func dragActionKind(from: Int, hover: Int?) -> DragActionKind {
-        // Ferry crosses open water (non-adjacent), so it doesn't go through the
-        // adjacency check — any of the player's other territories is a candidate
-        // drop; the engine rejects unreachable ones on release.
-        if state.phase == .ferryFrom {
-            guard let hover, hover != from, states.indices.contains(hover),
-                  states[hover].owner == state.current else { return .invalid }
-            return .ferry
-        }
-        guard let hover, hover != from, map.adj.indices.contains(from), map.adj[from].contains(hover) else { return .invalid }
-        guard states.indices.contains(hover) else { return .invalid }
-        if wallBetween(from, hover) { return .invalid }
-        if states[hover].owner == state.current { return .move }
-        return .attack
-    }
-
-    /// Whether a drag can start from this hex given the current phase — the
-    /// `action` phase (attack/move) or a Ferry card's `ferry_from` phase.
-    private func canDragFrom(_ gridId: Int) -> Bool {
-        guard states.indices.contains(gridId), states[gridId].owner == state.current else { return false }
-        return state.phase == .action || state.phase == .ferryFrom
-    }
-
-    private func dragGesture(transform: MapTransform) -> some Gesture {
-        DragGesture(minimumDistance: 0)
-            .onChanged { value in
-                if dragStart == nil { dragStart = value.startLocation }
-                let dist = hypot(value.location.x - value.startLocation.x, value.location.y - value.startLocation.y)
-                if !isDragArmed && dist > 10 {
-                    isDragArmed = true
-                    let startMapPoint = transform.reverse(value.startLocation)
-                    if let grid = map.grids.first(where: { pointInPolygon(startMapPoint, polygon: $0.cell) }),
-                       canDragFrom(grid.id) {
-                        dragFrom = grid.id
-                    }
-                }
-                if isDragArmed, dragFrom != nil {
-                    dragCurrentPoint = value.location
-                    let mapPoint = transform.reverse(value.location)
-                    dragHoverTarget = map.grids.first(where: { pointInPolygon(mapPoint, polygon: $0.cell) })?.id
-                }
-            }
-            .onEnded { value in
-                let wasArmed = isDragArmed
-                let from = dragFrom
-                let to = dragHoverTarget
-                let peeked = suppressTapAfterInfo
-                dragStart = nil
-                isDragArmed = false
-                dragFrom = nil
-                dragCurrentPoint = nil
-                dragHoverTarget = nil
-                suppressTapAfterInfo = false
-
-                guard wasArmed, let from else {
-                    // A long-press "peek" happened on this touch — consume it
-                    // rather than treating the lift as a tap (select/place).
-                    if peeked { return }
-                    let mapPoint = transform.reverse(value.location)
-                    if let grid = map.grids.first(where: { pointInPolygon(mapPoint, polygon: $0.cell) }) {
-                        onTapHex(grid.id)
-                    }
-                    return
-                }
-                // Ferry: any of the player's other hexes is a candidate drop;
-                // the engine validates reachability.
-                if state.phase == .ferryFrom {
-                    guard let to, to != from, states.indices.contains(to),
-                          states[to].owner == state.current else { return }
-                    onDragFerry(from, to)
-                    return
-                }
-                guard let to, to != from, map.adj.indices.contains(from), map.adj[from].contains(to),
-                      states.indices.contains(to), !wallBetween(from, to) else { return }
-                if states[to].owner == state.current {
-                    onDragMove(from, to)
-                } else {
-                    onDragAttack(from, to)
-                }
-            }
     }
 }
 
