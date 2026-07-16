@@ -1029,91 +1029,127 @@ function tryPlayAttackBuffCard(p: Player): boolean {
 	return false;
 }
 
-// Try to play one card during the action phase. Bomb on beefy targets;
-// deforest to clear an attack lane; etc. Elite/Bridge/Mountaineering are
-// handled earlier, before the attack loop — see tryPlayAttackBuffCard.
+// A legal, executable card play the AI is considering this turn, plus a
+// score in the same rough "army-equivalent value" currency across every
+// card kind (grounded in the same magnitude estimates used for the card
+// rarity rebalance -- see the card-power analysis this session). Gathered
+// for every card the AI holds a legal play for, then the single
+// highest-scoring one is executed. Replaces the old approach of trying
+// cards in a fixed priority order and playing the first legal one: that
+// meant a card late in the list (Air Move, in particular) effectively
+// never got played, since almost anything else legal would pre-empt it.
+interface CardCandidate {
+	score: number;
+	execute: () => void;
+}
+
+// Try to play one card during the action phase. Elite/Bridge/Mountaineering
+// are handled earlier, before the attack loop — see tryPlayAttackBuffCard.
 function tryPlayCardAction(p: Player) {
-	let s = get(game);
+	const s = get(game);
 	if (s.cardPlayedThisTurn) return;
+	const candidates: CardCandidate[] = [];
+
 	// Paratroop a strong stack onto a weak, valuable enemy hex.
 	{
 		const idx = s.hands[p].findIndex((c) => c === 'paratroop');
 		const plan = idx >= 0 ? bestParatroopPlan(s, p) : null;
 		if (idx >= 0 && plan) {
-			playCard(idx);
-			if (get(game).phase === 'paratroop_from') selectGrid(plan.from);
-			if (get(game).phase === 'paratroop_to') selectGrid(plan.to);
-			if (get(game).phase === 'paratroop_qty') confirmParatroop(plan.qty);
-			else cancelAction();
-			return;
+			candidates.push({
+				score: 4,
+				execute: () => {
+					playCard(idx);
+					if (get(game).phase === 'paratroop_from') selectGrid(plan.from);
+					if (get(game).phase === 'paratroop_to') selectGrid(plan.to);
+					if (get(game).phase === 'paratroop_qty') confirmParatroop(plan.qty);
+					else cancelAction();
+				}
+			});
 		}
 	}
 	// Artillery: risk-free hits on the strongest reachable target from a city.
-	s = get(game);
 	{
 		const idx = s.hands[p].findIndex((c) => c === 'artillery');
 		const plan = idx >= 0 ? bestArtilleryPlan(s, p) : null;
 		if (idx >= 0 && plan) {
-			playCard(idx);
-			if (get(game).phase === 'artillery_from') selectGrid(plan.from);
-			if (get(game).phase === 'artillery_to') selectGrid(plan.to);
-			return;
+			candidates.push({
+				score: 5,
+				execute: () => {
+					playCard(idx);
+					if (get(game).phase === 'artillery_from') selectGrid(plan.from);
+					if (get(game).phase === 'artillery_to') selectGrid(plan.to);
+				}
+			});
 		}
 	}
 	// Tunnel under a fortified/mountain hex (or one we can't reach overland)
 	// and storm it with every defense bonus stripped away. Drives the roll
 	// out just like a Water Invasion, since it also drops into attack_rolling.
-	s = get(game);
+	// Scored highest of the attack cards: it's the only hard counter to a
+	// permanently-fortified hex (see this session's late-game-grind finding).
 	{
 		const idx = s.hands[p].findIndex((c) => c === 'tunnel');
 		const plan = idx >= 0 ? bestTunnelPlan(s, p) : null;
 		if (idx >= 0 && plan) {
-			playCard(idx);
-			if (get(game).phase !== 'tunnel_from') { cancelAction(); return; }
-			selectGrid(plan.from);
-			if (get(game).phase !== 'tunnel_to') { cancelAction(); return; }
-			selectGrid(plan.to);
-			if (get(game).phase === 'attack_rolling') rollOutCurrentAttack();
-			else cancelAction();
-			return;
+			candidates.push({
+				score: 6,
+				execute: () => {
+					playCard(idx);
+					if (get(game).phase !== 'tunnel_from') { cancelAction(); return; }
+					selectGrid(plan.from);
+					if (get(game).phase !== 'tunnel_to') { cancelAction(); return; }
+					selectGrid(plan.to);
+					if (get(game).phase === 'attack_rolling') rollOutCurrentAttack();
+					else cancelAction();
+				}
+			});
 		}
 	}
 	// Collapse an enemy tunnel that opens onto us before they can exploit it.
-	s = get(game);
 	{
 		const idx = s.hands[p].findIndex((c) => c === 'collapse');
 		const target = idx >= 0 ? bestCollapseTarget(s, p) : null;
 		if (idx >= 0 && target) {
-			playCard(idx);
-			if (get(game).phase === 'collapse_from') selectGrid(target.from);
-			if (get(game).phase === 'collapse_to') selectGrid(target.to);
-			return;
+			candidates.push({
+				score: 3,
+				execute: () => {
+					playCard(idx);
+					if (get(game).phase === 'collapse_from') selectGrid(target.from);
+					if (get(game).phase === 'collapse_to') selectGrid(target.to);
+				}
+			});
 		}
 	}
 	// Breach a wall blocking an attack — critical when an enemy has sealed
 	// itself in behind Wall cards, since that's otherwise unconquerable and
-	// would deadlock the game (see findBreachTarget).
-	s = get(game);
+	// would deadlock the game (see findBreachTarget) — scored accordingly high.
 	{
 		const idx = s.hands[p].findIndex((c) => c === 'breach');
 		const target = findBreachTarget(s, p);
 		if (idx >= 0 && target != null) {
-			playCard(idx);
-			if (get(game).phase === 'breach_from') selectGrid(target.from);
-			if (get(game).phase === 'breach_to') selectGrid(target.to);
-			return;
+			candidates.push({
+				score: 5,
+				execute: () => {
+					playCard(idx);
+					if (get(game).phase === 'breach_from') selectGrid(target.from);
+					if (get(game).phase === 'breach_to') selectGrid(target.to);
+				}
+			});
 		}
 	}
 	// Storm a sea lane an enemy could invade us through.
-	s = get(game);
 	{
 		const idx = s.hands[p].findIndex((c) => c === 'storm');
 		const target = findStormTarget(s, p);
 		if (idx >= 0 && target != null) {
-			playCard(idx);
-			if (get(game).phase === 'storm_from') selectGrid(target.from);
-			if (get(game).phase === 'storm_to') selectGrid(target.to);
-			return;
+			candidates.push({
+				score: 2,
+				execute: () => {
+					playCard(idx);
+					if (get(game).phase === 'storm_from') selectGrid(target.from);
+					if (get(game).phase === 'storm_to') selectGrid(target.to);
+				}
+			});
 		}
 	}
 	// Coalition: rally everyone (ourselves included) against whoever's
@@ -1121,184 +1157,235 @@ function tryPlayCardAction(p: Player) {
 	// cousin of the LEADER_ATTACK_BONUS nudge above. Skip if one's already
 	// active (don't waste a second copy) or if we ourselves are the leader
 	// (nothing to gang up on).
-	s = get(game);
 	{
 		const idx = s.hands[p].findIndex((c) => c === 'coalition');
 		const leader = !s.coalitionTarget ? territoryLeader(s) : null;
 		const targetHex = leader && leader !== p ? s.map.grids.find((g) => s.states[g.id].owner === leader)?.id : undefined;
 		if (idx >= 0 && targetHex != null) {
-			playCard(idx);
-			if (get(game).phase === 'coalition_select') selectGrid(targetHex);
-			return;
+			candidates.push({
+				score: 3,
+				execute: () => {
+					playCard(idx);
+					if (get(game).phase === 'coalition_select') selectGrid(targetHex);
+				}
+			});
 		}
 	}
-	// Bomb a beefy enemy hex on our border.
-	s = get(game);
+	// Bomb a beefy enemy hex on our border — scaled up with target size on
+	// top of the base value, so a truly juicy target can outrank cards that
+	// otherwise score higher on a thin one.
 	{
 		const idx = s.hands[p].findIndex((c) => c === 'bomb');
 		const target = findStrongestBorderEnemy(s, p);
 		if (idx >= 0 && target != null && s.states[target].armies >= 6) {
-			playCard(idx);
-			if (get(game).phase === 'bomb_select') selectGrid(target);
-			return;
+			candidates.push({
+				score: 3 + s.states[target].armies * 0.3,
+				execute: () => {
+					playCard(idx);
+					if (get(game).phase === 'bomb_select') selectGrid(target);
+				}
+			});
 		}
 	}
 	// Sabotage as a fallback.
-	s = get(game);
 	{
 		const idx = s.hands[p].findIndex((c) => c === 'sabotage');
 		const target = findStrongestBorderEnemy(s, p);
 		if (idx >= 0 && target != null && s.states[target].armies >= 5) {
-			playCard(idx);
-			if (get(game).phase === 'sabotage_select') selectGrid(target);
-			return;
+			candidates.push({
+				score: 3 + s.states[target].armies * 0.3,
+				execute: () => {
+					playCard(idx);
+					if (get(game).phase === 'sabotage_select') selectGrid(target);
+				}
+			});
 		}
 	}
 	// Deforest an adjacent enemy forest to weaken future defense.
-	s = get(game);
 	{
 		const idx = s.hands[p].findIndex((c) => c === 'deforest');
 		const target = findForestNeighbor(s, p);
 		if (idx >= 0 && target != null) {
-			playCard(idx);
-			if (get(game).phase === 'deforest_select') selectGrid(target);
-			return;
+			candidates.push({
+				score: 2,
+				execute: () => {
+					playCard(idx);
+					if (get(game).phase === 'deforest_select') selectGrid(target);
+				}
+			});
 		}
 	}
 	// Scorched Earth: burn a border enemy hex to desert for ongoing attrition.
-	s = get(game);
 	{
 		const idx = s.hands[p].findIndex((c) => c === 'scorched');
 		const target = findScorchedTarget(s, p);
 		if (idx >= 0 && target != null) {
-			playCard(idx);
-			if (get(game).phase === 'scorched_select') selectGrid(target);
-			return;
+			candidates.push({
+				score: 3,
+				execute: () => {
+					playCard(idx);
+					if (get(game).phase === 'scorched_select') selectGrid(target);
+				}
+			});
 		}
 	}
 	// Oasis: irrigate one of our own desert hexes to remove heat attrition.
-	s = get(game);
 	{
 		const idx = s.hands[p].findIndex((c) => c === 'oasis');
 		const target = s.map.grids.findIndex(
 			(g) => g.terrain === 'desert' && s.states[g.id].owner === p
 		);
 		if (idx >= 0 && target >= 0) {
-			playCard(idx);
-			if (get(game).phase === 'oasis_select') selectGrid(target);
-			return;
+			candidates.push({
+				score: 2,
+				execute: () => {
+					playCard(idx);
+					if (get(game).phase === 'oasis_select') selectGrid(target);
+				}
+			});
 		}
 	}
-	// Fortify weakest border if nothing else applies.
-	s = get(game);
+	// Fortify weakest border.
 	{
 		const idx = s.hands[p].findIndex((c) => c === 'fortify');
 		const target = findWeakestBorder(s, p);
 		if (idx >= 0 && target != null) {
-			playCard(idx);
-			if (get(game).phase === 'fortify_select') selectGrid(target);
-			return;
+			candidates.push({
+				score: 4,
+				execute: () => {
+					playCard(idx);
+					if (get(game).phase === 'fortify_select') selectGrid(target);
+				}
+			});
 		}
 	}
-	// Rampart weakest border if nothing else applies.
-	s = get(game);
+	// Rampart weakest border.
 	{
 		const idx = s.hands[p].findIndex((c) => c === 'rampart');
 		const target = findWeakestBorder(s, p);
 		if (idx >= 0 && target != null) {
-			playCard(idx);
-			if (get(game).phase === 'rampart_select') selectGrid(target);
-			return;
+			candidates.push({
+				score: 2,
+				execute: () => {
+					playCard(idx);
+					if (get(game).phase === 'rampart_select') selectGrid(target);
+				}
+			});
 		}
 	}
 	// Spy: steal from the richest hand as soon as anyone has cards to take.
-	s = get(game);
 	{
 		const idx = s.hands[p].findIndex((c) => c === 'spy');
 		const anyLoot = PLAYERS.some((q) => q !== p && s.alive[q] && s.hands[q].length > 0);
 		if (idx >= 0 && anyLoot) {
-			playCard(idx);
-			return;
+			candidates.push({ score: 3, execute: () => playCard(idx) });
 		}
 	}
-	// Wall off a threatening enemy edge if nothing else applies.
-	s = get(game);
+	// Wall off a threatening enemy edge.
 	{
 		const idx = s.hands[p].findIndex((c) => c === 'wall');
 		const target = findWallPlacement(s, p);
 		if (idx >= 0 && target != null) {
-			playCard(idx);
-			if (get(game).phase === 'wall_from') selectGrid(target.from);
-			if (get(game).phase === 'wall_to') selectGrid(target.to);
-			return;
+			candidates.push({
+				score: 4,
+				execute: () => {
+					playCard(idx);
+					if (get(game).phase === 'wall_from') selectGrid(target.from);
+					if (get(game).phase === 'wall_to') selectGrid(target.to);
+				}
+			});
 		}
 	}
 	// Canal: same "seal the scariest border edge" logic as Wall, but with the
 	// +1 river-crossing bonus instead of a hard block (identical edge
 	// constraints, so findWallPlacement's choice is always canal-legal).
-	s = get(game);
 	{
 		const idx = s.hands[p].findIndex((c) => c === 'canal');
 		const target = findWallPlacement(s, p);
 		if (idx >= 0 && target != null) {
-			playCard(idx);
-			if (get(game).phase === 'canal_from') selectGrid(target.from);
-			if (get(game).phase === 'canal_to') selectGrid(target.to);
-			return;
+			candidates.push({
+				score: 3,
+				execute: () => {
+					playCard(idx);
+					if (get(game).phase === 'canal_from') selectGrid(target.from);
+					if (get(game).phase === 'canal_to') selectGrid(target.to);
+				}
+			});
 		}
 	}
 	// Levee: drain a river edge we're likely to attack across, permanently
 	// removing the crossing bonus that's holding that attack back.
-	s = get(game);
 	{
 		const idx = s.hands[p].findIndex((c) => c === 'levee');
 		const target = findLeveeTarget(s, p);
 		if (idx >= 0 && target != null) {
-			playCard(idx);
-			if (get(game).phase === 'levee_from') selectGrid(target.from);
-			if (get(game).phase === 'levee_to') selectGrid(target.to);
-			return;
+			candidates.push({
+				score: 2,
+				execute: () => {
+					playCard(idx);
+					if (get(game).phase === 'levee_from') selectGrid(target.from);
+					if (get(game).phase === 'levee_to') selectGrid(target.to);
+				}
+			});
 		}
 	}
 	// Relocate Capital: reclaim it after losing it, or move it off the front
-	// line before it's captured.
-	s = get(game);
+	// line before it's captured. Only ever a candidate when actually needed
+	// (needsCapitalRelocation), so it's scored high — when it applies, it's
+	// usually urgent.
 	{
 		const idx = s.hands[p].findIndex((c) => c === 'relocate');
 		const target = idx >= 0 && needsCapitalRelocation(s, p) ? bestRelocateTarget(s, p) : null;
 		if (idx >= 0 && target != null) {
-			playCard(idx);
-			if (get(game).phase === 'relocate_select') selectGrid(target);
-			return;
+			candidates.push({
+				score: 5,
+				execute: () => {
+					playCard(idx);
+					if (get(game).phase === 'relocate_select') selectGrid(target);
+				}
+			});
 		}
 	}
 	// Ferry: permanently link a stranded holding back to our main network.
-	s = get(game);
 	{
 		const idx = s.hands[p].findIndex((c) => c === 'ferry');
 		const plan = idx >= 0 ? bestFerryPlan(s, p) : null;
 		if (idx >= 0 && plan) {
-			playCard(idx);
-			if (get(game).phase === 'ferry_from') selectGrid(plan.from);
-			if (get(game).phase === 'ferry_to') selectGrid(plan.to);
-			return;
+			candidates.push({
+				score: 2,
+				execute: () => {
+					playCard(idx);
+					if (get(game).phase === 'ferry_from') selectGrid(plan.from);
+					if (get(game).phase === 'ferry_to') selectGrid(plan.to);
+				}
+			});
 		}
 	}
-	// Air Move: last resort to rescue a stack stranded with no overland or
-	// lane route to any front line at all.
-	s = get(game);
+	// Air Move: rescue a stack stranded with no overland or lane route to any
+	// front line at all. Under the old fixed-priority dispatch this was last
+	// in line and almost never actually won a turn (nearly any other legal
+	// card pre-empted it) — scoring puts it on equal footing whenever it's
+	// the genuinely best (or only) option.
 	{
 		const idx = s.hands[p].findIndex((c) => c === 'air');
 		const plan = idx >= 0 ? bestAirLiftPlan(s, p) : null;
 		if (idx >= 0 && plan) {
-			playCard(idx);
-			if (get(game).phase === 'air_from') selectGrid(plan.from);
-			if (get(game).phase === 'air_to') selectGrid(plan.to);
-			if (get(game).phase === 'air_qty') confirmAir(plan.qty);
-			else cancelAction();
-			return;
+			candidates.push({
+				score: 3,
+				execute: () => {
+					playCard(idx);
+					if (get(game).phase === 'air_from') selectGrid(plan.from);
+					if (get(game).phase === 'air_to') selectGrid(plan.to);
+					if (get(game).phase === 'air_qty') confirmAir(plan.qty);
+					else cancelAction();
+				}
+			});
 		}
 	}
+
+	if (candidates.length === 0) return;
+	candidates.sort((a, b) => b.score - a.score);
+	candidates[0].execute();
 }
 
 // The best paratroop drop, or null when none is worth the card: launch from
