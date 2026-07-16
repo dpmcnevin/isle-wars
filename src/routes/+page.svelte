@@ -1932,7 +1932,7 @@
 									{:else if xBonus === 1}<li class="pos">+1 💧 river crossing</li>{/if}
 									{#if bridgeCancels}<li class="warn">🌉 Bridge cancels river bonus</li>{/if}
 									{#if g.terrain === 'forest'}<li class="warn">Forest — attacker gets +1</li>{/if}
-									{#if g.terrain === 'desert'}<li class="warn">Desert — heat burns 1 army when moving in</li>{/if}
+									{#if g.terrain === 'desert'}<li class="warn">🏜 Desert — loses 1 army at the start of each of its owner's turns</li>{/if}
 								{/if}
 							</ul>
 						</div>
