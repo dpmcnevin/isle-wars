@@ -312,7 +312,7 @@ export const CARD_DEFS: CardDef[] = [
 	{
 		id: 'artillery', label: 'Artillery', icon: '💥', kind: 'attack', weight: 1,
 		when: 'Action phase (from a city ★)',
-		desc: 'Bombard any hex up to 2 steps away, launched from one of your cities (★). Roll four times — each hit removes one defender. Attackers never lose armies. Terrain and fortification bonuses still count.',
+		desc: 'Bombard any hex up to 2 steps away, launched from one of your cities (★). Roll four times — each hit removes one defender. Attackers never lose armies. Ignores mountain, fortification, and rampart bonuses — the direct counter to a dug-in defender.',
 		playableIn: ACTION_OR_ATTACK,
 		steps: [
 			{ phase: 'artillery_from', prompt: 'Artillery: click one of your territories to bombard from (2+ armies).',
@@ -642,6 +642,27 @@ export const CARD_DEFS: CardDef[] = [
 			s.capitals[s.current] = id;
 			consumeCard(s, idx);
 			log(s, `${PLAYER_NAMES[s.current]} relocated their capital to ${gridLabel(s, id)}.`, 'card');
+			s.phase = 'action'; s.message = 'Attack, move, or pass.';
+		}
+	},
+	{
+		id: 'coalition', label: 'Coalition', icon: '🤝', kind: 'attack', weight: 1,
+		when: 'Action phase',
+		desc: 'Name a rival: every player (you included) gets +1 attacking them until your next turn begins. If anyone bound by it attacks someone else instead, the coalition breaks immediately and the bonus is gone for everyone.',
+		playableIn: ACTION_ONLY,
+		steps: [{ phase: 'coalition_select', prompt: 'Coalition: click any territory belonging to the player to gang up on.',
+			check: (s, id) => {
+				const owner = s.states[id].owner;
+				if (!owner) return 'Pick a territory owned by a rival.';
+				if (owner === s.current) return 'Pick a rival, not yourself.';
+				return null;
+			} }],
+		onResolve: (s, [id], idx) => {
+			const target = s.states[id].owner!;
+			s.coalitionTarget = target;
+			s.coalitionCaster = s.current;
+			consumeCard(s, idx);
+			log(s, `${PLAYER_NAMES[s.current]} formed a Coalition against ${PLAYER_NAMES[target]} — everyone gets +1 attacking them until ${PLAYER_NAMES[s.current]}'s next turn.`, 'card');
 			s.phase = 'action'; s.message = 'Attack, move, or pass.';
 		}
 	}

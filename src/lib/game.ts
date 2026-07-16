@@ -80,7 +80,8 @@ export type CardType =
 	| 'tunnel'
 	| 'collapse'
 	| 'levee'
-	| 'relocate';
+	| 'relocate'
+	| 'coalition';
 
 // Re-export the card registry's public surface so consumers keep importing it
 // from '$lib/game'. The definitions themselves live in ./cards.
@@ -112,6 +113,7 @@ export type Phase =
 	| 'air_qty'
 	| 'reinforce_select'
 	| 'sabotage_select'
+	| 'coalition_select'
 	| 'fortify_select'
 	| 'ferry_from'
 	| 'ferry_to'
@@ -207,6 +209,13 @@ export interface GameState {
 	// mountain hex, for the next attack sequence. Consumed like Elite Troops.
 	// Optional: absent on saves from before the card existed.
 	mountainAttackActive?: boolean;
+	// Coalition card: everyone gets +1 attacking coalitionTarget until
+	// coalitionCaster's next turn begins. Broken immediately (both cleared) if
+	// any bound player (the caster included) launches a conventional attack on
+	// someone OTHER than the target. Optional: absent on saves from before the
+	// card existed.
+	coalitionTarget?: Player | null;
+	coalitionCaster?: Player | null;
 	// Water Invasion card added a temporary sea lane for this attack. If the
 	// attack succeeds it stays; if it fails, it's removed.
 	pendingInvasionLane: [number, number] | null;
@@ -597,10 +606,13 @@ export function defenseBonus(s: GameState, gridId: number, fromId?: number): num
 }
 
 /** Attacker bonus for a hex being attacked: forest terrain gives attacker
- * cover (+1). Does not include the Elite Troops card — that's applied
- * separately in the roll. */
+ * cover (+1), plus +1 from an active Coalition against this hex's owner.
+ * Does not include the Elite Troops card — that's applied separately in
+ * the roll. */
 export function attackerBonus(s: GameState, gridId: number): number {
-	return s.map.grids[gridId].terrain === 'forest' ? 1 : 0;
+	let b = s.map.grids[gridId].terrain === 'forest' ? 1 : 0;
+	if (s.coalitionTarget && s.states[gridId].owner === s.coalitionTarget) b += 1;
+	return b;
 }
 
 function pointInPoly(px: number, py: number, poly: [number, number][]): boolean {
@@ -922,6 +934,8 @@ function finishGameSetup(
 		eliteAttackActive: false,
 		bridgeAttackActive: false,
 		mountainAttackActive: false,
+		coalitionTarget: null,
+		coalitionCaster: null,
 		pendingInvasionLane: null,
 		pendingTunnel: null,
 		cardPlayedThisTurn: false,
@@ -1398,6 +1412,15 @@ function beginTurn(s: GameState): GameState {
 	s.eliteAttackActive = false;
 	s.bridgeAttackActive = false;
 	s.mountainAttackActive = false;
+	// Coalition lasts through the other players' turns by design (see field
+	// doc) — only clear it once it's actually the caster's turn again, or if
+	// either side of it died in the meantime.
+	if (s.coalitionTarget) {
+		if (s.current === s.coalitionCaster || !s.alive[s.coalitionTarget] || (s.coalitionCaster && !s.alive[s.coalitionCaster])) {
+			s.coalitionTarget = null;
+			s.coalitionCaster = null;
+		}
+	}
 	s.pendingInvasionLane = null;
 	s.pendingTunnel = null;
 	s.cardPlayedThisTurn = false;
@@ -1787,6 +1810,15 @@ export function selectGrid(gridId: number): void {
 				if (!s.map.adj[s.selectedFrom].includes(gridId)) { s.message = 'Not adjacent.'; break; }
 				if (wallBetween(s.map, s.selectedFrom, gridId)) { s.message = 'A wall blocks that edge.'; break; }
 				if (s.states[gridId].owner === s.current) { s.message = 'Choose an enemy or neutral territory.'; break; }
+				// A Coalition binds every player but its target (the caster
+				// included) to attacking only the target — striking anyone else
+				// while it's active breaks it immediately, for everyone.
+				const attackedOwner = s.states[gridId].owner;
+				if (s.coalitionTarget && s.current !== s.coalitionTarget && attackedOwner && attackedOwner !== s.coalitionTarget) {
+					log(s, `${PLAYER_NAMES[s.current]} broke the coalition against ${PLAYER_NAMES[s.coalitionTarget]} by attacking ${PLAYER_NAMES[attackedOwner]} — bonus cancelled!`, 'card');
+					s.coalitionTarget = null;
+					s.coalitionCaster = null;
+				}
 				devLogAction(s.current, { kind: 'attack_begin', from: s.selectedFrom, to: gridId }, s);
 				s.selectedTo = gridId;
 				// Empty target (typically neutral, 0 armies): walk right in, no
@@ -2172,7 +2204,10 @@ export function resolveBomb(s: GameState, targetId: number, idx: number) {
 export function resolveArtillery(s: GameState, fromId: number, toId: number, idx: number) {
 	const target = s.states[toId];
 	const defenderBefore = target.armies;
-	const defBonus = defenseBonus(s, toId);
+	// Artillery ignores mountain/fortified/rampart bonuses — unlike a normal
+	// attack, it's the one repeatable, geometry-unconstrained hard counter to
+	// a dug-in defender (Tunnel is the other, but needs a legal land path).
+	const defBonus = 0;
 	const forestBonus = attackerBonus(s, toId); // forest cover helps attacker even here
 	let hits = 0;
 	const ARTILLERY_SHOTS = 4;
@@ -2211,7 +2246,6 @@ export function resolveArtillery(s: GameState, fromId: number, toId: number, idx
 	}
 	consumeCard(s, idx);
 	const modTxt: string[] = [];
-	if (defBonus > 0) modTxt.push(`+${defBonus} def`);
 	if (forestBonus > 0) modTxt.push(`+${forestBonus} atk`);
 	const modStr = modTxt.length ? ` (${modTxt.join(', ')})` : '';
 	log(s, `${PLAYER_NAMES[s.current]} shelled ${gridLabel(s, toId)}: ${hits}/${ARTILLERY_SHOTS} hits${modStr}, ${defenderBefore} → ${target.armies} armies.${ownershipMsg}`, 'card');

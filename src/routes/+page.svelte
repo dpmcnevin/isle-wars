@@ -1202,11 +1202,14 @@
 		<div class="header-row">
 			<div class="scoreboard">
 				{#each PLAYERS as p}
-					<div class="score" class:current={$game.current === p} class:dead={!$game.alive[p]}>
+					<div class="score" class:current={$game.current === p} class:dead={!$game.alive[p]}
+						class:coalition-target={$game.coalitionTarget === p}
+						title={$game.coalitionTarget === p ? `Coalition: everyone gets +1 attacking ${PLAYER_NAMES[p]} until ${PLAYER_NAMES[$game.coalitionCaster ?? p]}'s next turn.` : ''}>
 						<span class="dot" style="background:{PLAYER_COLORS[p]}"></span>
 						<strong>{PLAYER_NAMES[p]}</strong>
 						<span class="score-nums">{countryCount($game, p)}<span class="dim">/{$game.map.grids.length}</span></span>
 						<span class="bonus">+{fullIslandBonus($game, p)}</span>
+						{#if $game.coalitionTarget === p}<span class="coalition-badge" aria-label="Coalition target">🤝</span>{/if}
 					</div>
 				{/each}
 			</div>
@@ -1625,7 +1628,7 @@
 							{@const defB = defenseBonus($game, target, $game.selectedFrom)}
 							{@const atkB = attackerBonus($game, target)}
 							{@const wp = Math.round(winProbability(atkA, defA, defB, atkB) * 100)}
-							{@const modTxt = defB ? ` +${defB} def` : atkB ? ` (atk +${atkB} 🌲)` : ''}
+							{@const modTxt = `${defB ? ` +${defB} def` : ''}${atkB ? ` (atk +${atkB})` : ''}`}
 							<p class="hint">{gridLabelLocal($game.selectedFrom, $game)} ({atkA}) vs {gridLabelLocal(target, $game)} ({defA}{modTxt}) · <strong style="color:{wp >= 65 ? '#7fff7f' : wp >= 35 ? '#ffd67f' : '#ff7f7f'}">{wp}% win</strong></p>
 						{:else}
 							<p class="hint">Attackable neighbors are outlined in white. Hover to preview odds.</p>
@@ -1876,6 +1879,8 @@
 		{@const defA = tgtSt.armies}
 		{@const defB = defenseBonus($game, tgt, src)}
 		{@const atkB = attackerBonus($game, tgt)}
+		{@const forestB = tgtG.terrain === 'forest' ? 1 : 0}
+		{@const coalitionB = $game.coalitionTarget != null && $game.coalitionTarget === tgtSt.owner ? 1 : 0}
 		{@const eliteB = $game.eliteAttackActive ? 2 : 0}
 		{@const xBonus = crossingDefenseBonus($game, src, tgt)}
 		{@const isInvasion = $game.pendingInvasionLane != null && (($game.pendingInvasionLane[0] === src && $game.pendingInvasionLane[1] === tgt) || ($game.pendingInvasionLane[0] === tgt && $game.pendingInvasionLane[1] === src))}
@@ -1913,7 +1918,8 @@
 							<ul class="side-mods">
 								<li>Base die 1–{debugDieSides}</li>
 								{#if role === 'attacker'}
-									{#if atkB > 0}<li class="pos">+{atkB} 🌲 forest cover on target</li>{/if}
+									{#if forestB > 0}<li class="pos">+{forestB} 🌲 forest cover on target</li>{/if}
+									{#if coalitionB > 0}<li class="pos">+{coalitionB} 🤝 Coalition vs {PLAYER_NAMES[tgtSt.owner!]}</li>{/if}
 									{#if eliteB > 0}<li class="pos">+{eliteB} 🛡 Elite Troops</li>{/if}
 									{#if g.terrain === 'marsh'}<li class="warn">Marsh — cannot re-attack from here this turn</li>{/if}
 									{#if atkA <= 2}<li class="warn">⚠ One more lost roll {tgtSt.owner ? 'FORFEITS this territory to the defender and ends your turn' : 'aborts the attack'}!</li>{/if}
@@ -2135,6 +2141,16 @@
 	}
 	.score.current { border-color: #7fcfff; box-shadow: 0 0 6px #4a9fcf; }
 	.score.dead { opacity: 0.4; text-decoration: line-through; }
+	/* Everyone's ganging up on this player — a warm ring distinct from the
+	   blue "current turn" glow, plus a pulse so it reads at a glance even
+	   when it's not this player's turn (the common case, since the bonus
+	   is meant to be visible to whoever's deciding what to attack). */
+	.score.coalition-target { border-color: #ff8a3d; box-shadow: 0 0 6px #ff8a3d; animation: coalition-pulse 1.6s ease-in-out infinite; }
+	@keyframes coalition-pulse {
+		0%, 100% { box-shadow: 0 0 4px #ff8a3d; }
+		50% { box-shadow: 0 0 10px #ff8a3d; }
+	}
+	.coalition-badge { font-size: 0.8rem; line-height: 1; }
 	.dot { width: 10px; height: 10px; border-radius: 50%; display: inline-block; flex: none; }
 	.score-nums { font-family: monospace; }
 	.score-nums .dim { color: #6a9abf; }
@@ -2482,8 +2498,14 @@
 	.end-turn-fab:hover { background: #3a6a9a; }
 	/* Informational, not actionable — muted like the other floating badges
 	   (.cards-fab/.chrome-toggle) instead of the bright "primary" action
-	   look, and no hover/pointer affordance since tapping it does nothing. */
+	   look, and no hover/pointer affordance since tapping it does nothing.
+	   Unlike the actionable "End Turn" fab above, this one is pure
+	   duplication of the side panel's own "Armies remaining" line whenever
+	   that panel is actually on screen — hidden by default like
+	   .cards-fab/.chrome-toggle, and only surfaced in the same compact-
+	   landscape breakpoint where the header/message bar collapses. */
 	.end-turn-fab.placing {
+		display: none;
 		background: rgba(15, 32, 53, 0.9);
 		border-color: #4a9fcf;
 		color: #a8bfd4;
@@ -2494,6 +2516,7 @@
 	@media (max-height: 600px) and (orientation: landscape) {
 		.cards-fab { display: flex; }
 		.chrome-toggle { display: flex; }
+		.end-turn-fab.placing { display: block; }
 		/* .end-turn-fab sits at top-right too, same corner as the header's
 		   own New/Share/Debug/Clear cluster. Everywhere else the header is
 		   always visible, so the fab's default top offset clears it — but

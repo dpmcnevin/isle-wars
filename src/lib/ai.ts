@@ -24,6 +24,7 @@ import {
 	attackerBonus,
 	winProbability,
 	hasClearWaterPath,
+	countryCount,
 	PLAYERS,
 	type Player,
 	type CardType,
@@ -609,9 +610,30 @@ function attackWorthContinuing(s: GameState, from: number, to: number): boolean 
 }
 
 interface AttackChoice { from: number; to: number; }
+// Anti-snowball nudge: the player with strictly the most territory among
+// those still alive (null if tied or fewer than 2 alive players), so attack
+// scoring can lean toward ganging up on whoever's currently ahead instead of
+// always picking the locally-best target. A flat bonus rather than a
+// multiplier so it breaks ties/near-ties without overriding a clearly better
+// opportunity elsewhere.
+function territoryLeader(s: GameState): Player | null {
+	let leader: Player | null = null;
+	let bestCount = -1;
+	let tied = false;
+	for (const q of PLAYERS) {
+		if (!s.alive[q]) continue;
+		const c = countryCount(s, q);
+		if (c > bestCount) { bestCount = c; leader = q; tied = false; }
+		else if (c === bestCount) tied = true;
+	}
+	return tied ? null : leader;
+}
+const LEADER_ATTACK_BONUS = 5;
+
 function findBestAttack(s: GameState, p: Player): AttackChoice | null {
 	let best: AttackChoice | null = null;
 	let bestScore = -Infinity;
+	const leader = territoryLeader(s);
 	for (const g of s.map.grids) {
 		if (s.states[g.id].owner !== p) continue;
 		const myArmies = s.states[g.id].armies;
@@ -628,7 +650,8 @@ function findBestAttack(s: GameState, p: Player): AttackChoice | null {
 			if (!attackWorthOpening(s, g.id, n)) continue;
 			// Neutrals are effectively free real estate; weight them so the AI
 			// prefers scooping up an empty hex over grinding an enemy.
-			const score = st.owner ? margin * 4 - st.armies : margin * 4 + 20;
+			let score = st.owner ? margin * 4 - st.armies : margin * 4 + 20;
+			if (st.owner && st.owner === leader) score += LEADER_ATTACK_BONUS;
 			if (score > bestScore) { bestScore = score; best = { from: g.id, to: n }; }
 		}
 	}
@@ -645,6 +668,7 @@ function findBestAttack(s: GameState, p: Player): AttackChoice | null {
 function findBestAttackWithValueNet(s: GameState, p: Player): AttackChoice | null {
 	let best: AttackChoice | null = null;
 	let bestScore = -Infinity;
+	const leader = territoryLeader(s);
 	for (const g of s.map.grids) {
 		const myArmies = s.states[g.id].armies;
 		if (s.states[g.id].owner !== p || myArmies < 3) continue;
@@ -665,7 +689,10 @@ function findBestAttackWithValueNet(s: GameState, p: Player): AttackChoice | nul
 					return state;
 				})
 			};
-			const score = predictWinProb(hypothetical, p);
+			// Value net scores are win probabilities in [0, 1]; a flat 5%
+			// nudge mirrors the heuristic's LEADER_ATTACK_BONUS in spirit.
+			let score = predictWinProb(hypothetical, p);
+			if (st.owner && st.owner === leader) score += 0.05;
 			if (score > bestScore) { bestScore = score; best = { from: g.id, to: n }; }
 		}
 	}
@@ -1086,6 +1113,22 @@ function tryPlayCardAction(p: Player) {
 			playCard(idx);
 			if (get(game).phase === 'storm_from') selectGrid(target.from);
 			if (get(game).phase === 'storm_to') selectGrid(target.to);
+			return;
+		}
+	}
+	// Coalition: rally everyone (ourselves included) against whoever's
+	// currently leading in territory -- the deliberate, player-triggerable
+	// cousin of the LEADER_ATTACK_BONUS nudge above. Skip if one's already
+	// active (don't waste a second copy) or if we ourselves are the leader
+	// (nothing to gang up on).
+	s = get(game);
+	{
+		const idx = s.hands[p].findIndex((c) => c === 'coalition');
+		const leader = !s.coalitionTarget ? territoryLeader(s) : null;
+		const targetHex = leader && leader !== p ? s.map.grids.find((g) => s.states[g.id].owner === leader)?.id : undefined;
+		if (idx >= 0 && targetHex != null) {
+			playCard(idx);
+			if (get(game).phase === 'coalition_select') selectGrid(targetHex);
 			return;
 		}
 	}
