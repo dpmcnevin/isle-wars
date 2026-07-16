@@ -100,7 +100,7 @@ export const CARD_DEFS: CardDef[] = [
 		}
 	},
 	{
-		id: 'bonus5', label: '+5 Armies', icon: '+5', kind: 'boost', weight: 3,
+		id: 'bonus5', label: '+5 Armies', icon: '+5', kind: 'boost', weight: 2,
 		when: 'Placement phase', desc: 'Add 5 armies to your placement pool this turn.',
 		playableIn: PLACE_ONLY,
 		onPlay: (s, idx) => {
@@ -110,7 +110,7 @@ export const CARD_DEFS: CardDef[] = [
 		}
 	},
 	{
-		id: 'bonus8', label: '+8 Armies', icon: '+8', kind: 'boost', weight: 2,
+		id: 'bonus8', label: '+8 Armies', icon: '+8', kind: 'boost', weight: 1,
 		when: 'Placement phase', desc: 'Add 8 armies to your placement pool this turn.',
 		playableIn: PLACE_ONLY,
 		onPlay: (s, idx) => {
@@ -130,7 +130,7 @@ export const CARD_DEFS: CardDef[] = [
 		}
 	},
 	{
-		id: 'double', label: 'Double', icon: '×2', kind: 'boost', weight: 2,
+		id: 'double', label: 'Double', icon: '×2', kind: 'boost', weight: 1,
 		when: 'Placement phase', desc: 'Double the number of armies you place this turn.',
 		playableIn: PLACE_ONLY,
 		onPlay: (s, idx) => {
@@ -141,7 +141,7 @@ export const CARD_DEFS: CardDef[] = [
 		}
 	},
 	{
-		id: 'bomb', label: 'Bomb', icon: '💣', kind: 'attack', weight: 2,
+		id: 'bomb', label: 'Bomb', icon: '💣', kind: 'attack', weight: 1,
 		when: 'Action phase',
 		desc: 'Detonate on any enemy territory to destroy 3–7 of their armies.',
 		playableIn: ACTION_ONLY,
@@ -174,7 +174,7 @@ export const CARD_DEFS: CardDef[] = [
 		}
 	},
 	{
-		id: 'elite', label: 'Elite Troops', icon: '⚔', kind: 'attack', weight: 2,
+		id: 'elite', label: 'Elite Troops', icon: '⚔', kind: 'attack', weight: 1,
 		when: 'Action phase, before attacking',
 		desc: 'Your next attack sequence rolls +2 on every die. Consumed by the first attack.',
 		playableIn: ACTION_OR_ATTACK,
@@ -214,7 +214,7 @@ export const CARD_DEFS: CardDef[] = [
 		}
 	},
 	{
-		id: 'ferry', label: 'Ferry Route', icon: '⚓', kind: 'movement', weight: 1,
+		id: 'ferry', label: 'Ferry Route', icon: '⚓', kind: 'movement', weight: 2,
 		when: 'Action phase',
 		desc: 'Open a permanent sea lane between two of your territories over clear water.',
 		playableIn: ACTION_ONLY,
@@ -337,7 +337,7 @@ export const CARD_DEFS: CardDef[] = [
 		}
 	},
 	{
-		id: 'oasis', label: 'Oasis', icon: '🌴', kind: 'terrain', weight: 1,
+		id: 'oasis', label: 'Oasis', icon: '🌴', kind: 'terrain', weight: 2,
 		when: 'Action phase',
 		desc: 'Irrigate a desert hex you control, turning it back into plains. Removes the heat attrition (1 army lost there at the start of each of your turns).',
 		playableIn: ACTION_ONLY,
@@ -551,7 +551,7 @@ export const CARD_DEFS: CardDef[] = [
 		}
 	},
 	{
-		id: 'navalpatrol', label: 'Naval Patrol', icon: '⛵', kind: 'defense', weight: 1,
+		id: 'navalpatrol', label: 'Naval Patrol', icon: '⛵', kind: 'defense', weight: 2,
 		when: 'Passive', passive: true, playableIn: [],
 		desc: 'Automatically sinks the next Water Invasion targeting one of your hexes before it lands. No action needed.'
 	},
