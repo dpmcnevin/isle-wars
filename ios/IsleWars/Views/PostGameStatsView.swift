@@ -14,6 +14,11 @@ struct PostGameStatsView: View {
 
     @State private var seedCopied = false
     @State private var turningPointIndex = 0
+    /// Live horizontal drag offset for the turning-point page, tracked while
+    /// the finger is down so the swipe visibly follows it — see
+    /// `turningPointsSection`'s gesture for why this doesn't go through a
+    /// full page-swap transition.
+    @State private var turningPointDragOffset: CGFloat = 0
 
     // Identity must be stable across renders — a per-init UUID would hand
     // Swift Charts a "completely new" dataset on every body evaluation,
@@ -229,26 +234,46 @@ struct PostGameStatsView: View {
                     // mid-swipe, making the page turn bounce back. A single
                     // page with a drag handler keeps the swipe interaction
                     // and only ever draws the selected moment's mini-maps.
-                    // No .id()/transition on the page: an animated identity
-                    // swap left the old and new page frozen mid-flight
-                    // (verified via simulator screenshots), so the content
-                    // just swaps in place when the index changes.
+                    // No .id()/transition-based page swap (an animated
+                    // identity swap left the old and new page frozen
+                    // mid-flight, verified via simulator screenshots) — the
+                    // content itself still swaps in place the instant the
+                    // index changes. What DOES animate is turningPointDragOffset,
+                    // applied as a plain .offset below: it tracks the finger
+                    // 1:1 while dragging (so the swipe is visibly happening,
+                    // not just a snap on release) and springs back to 0 once
+                    // the gesture ends, whether or not the index changed —
+                    // cheap because it never touches which mini-maps are
+                    // rendered, only where the existing page sits on screen.
                     let selected = min(turningPointIndex, points.count - 1)
                     turningPointPage(vm, point: points[selected], index: selected, count: points.count)
                         .frame(height: 440)
                         .contentShape(Rectangle())
+                        .offset(x: turningPointDragOffset)
                         // Plain .gesture (not highPriority) so the enclosing
                         // vertical ScrollView still wins vertical pans; only
                         // clearly-horizontal swipes step the moment.
                         .gesture(
-                            DragGesture(minimumDistance: 25)
+                            DragGesture(minimumDistance: 15)
+                                .onChanged { value in
+                                    guard abs(value.translation.width) > abs(value.translation.height) else { return }
+                                    // Deliberately NOT wrapped in withAnimation —
+                                    // this needs to track the finger 1:1 with no
+                                    // lag; only the release/snap below animates.
+                                    turningPointDragOffset = value.translation.width
+                                }
                                 .onEnded { value in
                                     let dx = value.translation.width
-                                    guard abs(dx) > 50, abs(dx) > abs(value.translation.height) else { return }
-                                    // Swipe left = advance (content moves left).
-                                    turningPointIndex = dx < 0
-                                        ? min(points.count - 1, selected + 1)
-                                        : max(0, selected - 1)
+                                    let advance = abs(dx) > 50 && abs(dx) > abs(value.translation.height)
+                                    if advance {
+                                        // Swipe left = advance (content moves left).
+                                        turningPointIndex = dx < 0
+                                            ? min(points.count - 1, selected + 1)
+                                            : max(0, selected - 1)
+                                    }
+                                    withAnimation(.interactiveSpring(response: 0.3, dampingFraction: 0.8)) {
+                                        turningPointDragOffset = 0
+                                    }
                                 }
                         )
                 }
