@@ -49,13 +49,14 @@ Derived automatically from `CARD_DEFS`:
 - `CARD_POOL: CardType[]` — each card repeated `weight` times (the weighted draw bag)
 - `PHASE_TO_STEP` — maps each step's `phase` back to `{ def, stepIdx }` for dispatch
 
-## The four card shapes
+## The three card shapes
 
-Every card fits one of these:
+Every card fits one of these (armies are bought directly with gold — see
+"The gold economy" below — so there's no longer an "immediate, adds armies"
+shape; every card is either a flag/passive or a targeting card):
 
 | Shape | Uses | Examples |
 |---|---|---|
-| **Immediate, placement** | `onPlay` mutates `armiesToPlace` | bonus5/8/15, double |
 | **Immediate flag/passive** | `onPlay` sets a flag; or `passive` | elite, bridge, antibomb |
 | **1-step target** | `steps: [1]` + `onResolve` | bomb, sabotage, reinforce, fortify, rampart, deforest, oasis |
 | **2-step from→to** | `steps: [2]` + `onResolve` | air, ferry, invasion, storm, artillery, wall |
@@ -64,13 +65,15 @@ Every card fits one of these:
 
 ```ts
 {
-  id: 'bonus5', label: '+5 Armies', icon: '+5', kind: 'boost', weight: 3,
-  when: 'Placement phase', desc: 'Add 5 armies to your placement pool this turn.',
-  playableIn: ['placing'],
+  id: 'elite', label: 'Elite Troops', icon: '⚔', kind: 'attack', weight: 1,
+  when: 'Action phase, before attacking',
+  desc: 'Your next attack sequence rolls +2 on every die. Consumed by the first attack.',
+  playableIn: ACTION_OR_ATTACK,
   onPlay: (s, idx) => {
-    s.armiesToPlace += 5; consumeCard(s, idx);
-    log(s, `${PLAYER_NAMES[s.current]} played +5 Armies (+5).`, 'card');
-    s.message = `Place ${s.armiesToPlace} armies.`;
+    s.phase = 'action'; s.selectedFrom = null; s.selectedTo = null;
+    s.eliteAttackActive = true; consumeCard(s, idx);
+    log(s, `${PLAYER_NAMES[s.current]} rallied Elite Troops (+2 attack next battle).`, 'card');
+    s.message = 'Elite Troops active. Attack now (+2 to each roll) — consumed by first attack.';
   }
 }
 ```
@@ -174,20 +177,34 @@ Both bridge functions are declared in `ios/bridge/entry.ts` and consumed in
 - **Map rendering.** A card that draws something on the map (walls, rivers, sea lanes)
   needs custom drawing in **both** `src/routes/+page.svelte` and
   `ios/IsleWars/Views/MapView.swift`. Most cards draw nothing and need neither.
-- **The AI.** Heuristics live in `src/lib/ai.ts` (`tryPlayCardPlacement` /
-  `tryPlayCardAction`). A new card won't be played by the AI until you add a heuristic
-  there. The AI drives the same public functions (`playCard`, `selectGrid`), so it
+- **The AI.** Heuristics live in `src/lib/ai.ts`: `runAiMarket` decides what to buy
+  during the `'buy'` phase, `tryPlayAttackBuffCard` handles Elite/Bridge/Mountaineering
+  right before the attack loop, and `tryPlayCardAction` scores everything else. A new
+  card won't be bought or played by the AI until you add it to the relevant one. The
+  AI drives the same public functions (`buyCard`, `playCard`, `selectGrid`), so it
   automatically respects `check` validation.
+
+## The gold economy
+
+Cards are never handed out for free. Each turn's `beginTurn` credits gold (the old
+free-army-placement formula, renamed `computeGoldIncome`) and draws 3 cards from the
+shared deck into `marketOffer`, priced by rarity (`cardPrice(weight)` in cards.ts —
+rarer/lower-weight cards cost more). The `'buy'` phase lets a player spend gold on
+`buyArmies` (1 gold = 1 army, added to `armiesToPlace`) and `buyCard` (straight into
+hand) any number of times, plus `rerollMarket` at an escalating per-turn cost, before
+calling `finishShopping` to move on to `'placing'` (if armies were bought) or `'action'`
+directly. Gold carries over unspent. See `computeGoldIncome`, `marketFill`,
+`buyArmies`, `buyCard`, `rerollMarket`, and `finishShopping` in game.ts.
 
 ## Placement gating
 
-Only cards that add armies (`kind: 'boost'` — the bonus/Double/Reinforce family) are
-playable during the placement phase. Everything else uses `ACTION_ONLY` (or
+Only `reinforce` (a targeting card, not `onPlay`) is playable during the placement
+phase (`TURN = ['placing', 'action']`) — everything else uses `ACTION_ONLY` (or
 `ACTION_OR_ATTACK`): card resolution lands in the action phase, so a card played
 mid-placement would silently forfeit the armies still waiting to be placed. The web
 hand greys unplayable cards via `canPlayCardNow` (cards.ts) — the same predicate
-`playCard` enforces. Reinforce, the one targeting card playable while placing,
-returns to `placing` in its `onResolve` when armies remain.
+`playCard` enforces. Reinforce returns to `placing` in its `onResolve` when armies
+remain.
 
 ## Terrain-changing cards
 

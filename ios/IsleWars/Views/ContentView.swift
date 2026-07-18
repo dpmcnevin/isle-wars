@@ -281,6 +281,13 @@ private struct GameView: View {
             PostGameStatsView(state: state, onNewGame: vm.startOver, vm: vm)
         } else if state.phase == .attackRolling || state.phase == .attackMoveIn {
             AttackModalView(vm: vm, state: state)
+        } else if state.phase == .buy {
+            // No tap-outside-to-cancel here (unlike the other modals) — there's
+            // no "cancel" concept for shopping, only "done" (finishShopping),
+            // which the view's own button drives.
+            modalScrim(onTapBackdrop: nil) {
+                MarketView(vm: vm, state: state)
+            }
         } else if let request = placeRequest {
             modalScrim(onTapBackdrop: { placeRequest = nil }) {
                 QuantityPickerSheet(

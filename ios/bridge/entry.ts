@@ -42,6 +42,13 @@ import {
 	selectableHexes,
 	cardCatalog,
 	armyCount,
+	buyArmies,
+	buyCard,
+	rerollMarket,
+	rerollCost,
+	finishShopping,
+	cardPrice,
+	CARD_BY_ID,
 	PLAYERS,
 	type GameState,
 	type Player,
@@ -111,6 +118,10 @@ function withState<Args extends unknown[]>(fn: (...args: Args) => void) {
 	playCard: withState(playCard),
 	startGamePlaying: withState(startGamePlaying),
 	forceEndTurn: withState(forceEndTurn),
+	buyArmies: withState(buyArmies),
+	buyCard: withState(buyCard),
+	rerollMarket: withState(rerollMarket),
+	finishShopping: withState(finishShopping),
 
 	winProbability: (atkArmies: number, defArmies: number, defenderBonus = 0, attackerBonusVal = 0) =>
 		winProbability(atkArmies, defArmies, defenderBonus, attackerBonusVal),
@@ -126,6 +137,8 @@ function withState<Args extends unknown[]>(fn: (...args: Args) => void) {
 	canTunnelConnect: (fromId: number, toId: number) => canTunnelConnect(latestState, fromId, toId),
 	countryCount: (player: Player) => countryCount(latestState, player),
 	fullIslandBonus: (player: Player) => fullIslandBonus(latestState, player),
+	rerollCost: () => rerollCost(latestState),
+	cardPrice: (card: CardType) => cardPrice(CARD_BY_ID[card].weight),
 
 	// Tier 3 additions: let Swift drive card display and hex-selection
 	// highlighting straight from the engine instead of re-declaring the rules.

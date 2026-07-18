@@ -16,6 +16,7 @@ import {
 	canPlayCardNow,
 	isSelectableHex,
 	selectableHexes,
+	cardPrice,
 	type CardMeta,
 	type CardDef,
 	type SelectStep
@@ -50,10 +51,6 @@ export const PLAYER_NAMES: Record<Player, string> = {
 
 export type CardType =
 	| 'air'
-	| 'bonus5'
-	| 'bonus8'
-	| 'bonus15'
-	| 'double'
 	| 'bomb'
 	| 'antibomb'
 	| 'reinforce'
@@ -89,15 +86,18 @@ export {
 	CARD_LABELS,
 	CARD_META,
 	CARD_DEFS,
+	CARD_BY_ID,
 	cardCatalog,
 	cardSelectableAt,
 	canPlayCardNow,
 	isSelectableHex,
-	selectableHexes
+	selectableHexes,
+	cardPrice
 };
 export type { CardMeta, CardDef, SelectStep };
 
 export type Phase =
+	| 'buy'
 	| 'placing'
 	| 'action'
 	| 'attack_select_from'
@@ -190,20 +190,25 @@ export interface GameState {
 	current: Player;
 	turn: number;
 	phase: Phase;
+	// Economy: gold carries over turn to turn, spent in the 'buy' phase on
+	// armies (added to armiesToPlace) and market cards (added to hand).
+	gold: Record<Player, number>;
+	goldIncomeThisTurn: number; // this turn's income, for UI/log display
+	// The 3 cards offered in the shop this turn; a null slot means it was
+	// bought and stays empty until a reroll or the next turn's refill.
+	marketOffer: (CardType | null)[];
+	marketRerollCount: number; // rerolls used this turn; resets in beginTurn
 	// Placement state
 	armiesToPlace: number;
-	doubleActive: boolean; // "Double" card just played, awaiting placement
 	// Selection scratch
 	selectedFrom: number | null;
 	selectedTo: number | null;
 	pendingArmies: number; // for move / air-move / place qty
-	// Flags
-	defeatedThisTurn: boolean;
-	turnCardAwarded: boolean;
 	// 'win' if the last attack ended in conquest; 'loss' if attacker was
 	// reduced to 1 or the player quit-attacked; null if no attack yet.
 	lastAttackResult: 'win' | 'loss' | null;
-	// Pending draws waiting for the player to choose a discard (hand > HAND_MAX).
+	// A market purchase pushed the hand over HAND_MAX; waiting for the player
+	// to pick a discard before shopping can continue.
 	pendingDiscard: boolean;
 	// Elite Troops card active — attacker rolls get +2 for the next attack sequence.
 	eliteAttackActive: boolean;
@@ -385,7 +390,7 @@ function emptyStatsMap(): Record<Player, PlayerStats> {
 	return { blue: emptyStats(), green: emptyStats(), red: emptyStats(), brown: emptyStats() };
 }
 
-export const SAVE_KEY = 'isle-wars-save-v15';
+export const SAVE_KEY = 'isle-wars-save-v16';
 export const DEBUG_KEY = 'isle-wars-debug';
 
 export interface DebugSettings {
@@ -786,6 +791,10 @@ function emptyAlive(): Record<Player, boolean> {
 	return { blue: true, green: true, red: true, brown: true };
 }
 
+function emptyGold(): Record<Player, number> {
+	return { blue: 0, green: 0, red: 0, brown: 0 };
+}
+
 /**
  * Initialize a new game. Difficulty 1..4 controls how many countries the
  * human player starts with; startingArmies is the initial armies per grid.
@@ -934,14 +943,15 @@ function finishGameSetup(
 		alive: emptyAlive(),
 		current: startPlayer,
 		turn: 1,
-		phase: 'placing',
+		phase: 'buy',
+		gold: emptyGold(),
+		goldIncomeThisTurn: 0,
+		marketOffer: [null, null, null],
+		marketRerollCount: 0,
 		armiesToPlace: 0,
-		doubleActive: false,
 		selectedFrom: null,
 		selectedTo: null,
 		pendingArmies: 0,
-		defeatedThisTurn: false,
-		turnCardAwarded: false,
 		lastAttackResult: null,
 		pendingDiscard: false,
 		eliteAttackActive: false,
@@ -1111,7 +1121,9 @@ export function cityIncome(s: GameState, p: Player): number {
 	return income;
 }
 
-function computeReinforcements(s: GameState, p: Player): number {
+/** Gold earned at the start of a turn — territory count, full-island bonus,
+ *  city/capital income. Spent in the 'buy' phase on armies and market cards. */
+export function computeGoldIncome(s: GameState, p: Player): number {
 	const c = countryCount(s, p);
 	const base = Math.max(2, Math.floor(c / 3));
 	return base + fullIslandBonus(s, p) + cityIncome(s, p) + capitalBonus(s, p) + allCapitalsBonus(s, p);
@@ -1418,8 +1430,6 @@ function beginTurn(s: GameState): GameState {
 	// Snapshot state for analytics at start of each player's turn
 	snapshot(s);
 	recordHexArmyDeltas(s);
-	s.defeatedThisTurn = false;
-	s.turnCardAwarded = false;
 	s.lastAttackResult = null;
 	s.pendingDiscard = false;
 	s.eliteAttackActive = false;
@@ -1438,7 +1448,6 @@ function beginTurn(s: GameState): GameState {
 	s.pendingTunnel = null;
 	s.cardPlayedThisTurn = false;
 	s.usedMarshHexes = [];
-	s.doubleActive = false;
 	s.selectedFrom = null;
 	s.selectedTo = null;
 	s.pendingArmies = 0;
@@ -1484,13 +1493,17 @@ function beginTurn(s: GameState): GameState {
 		log(s, `Desert heat cost ${PLAYER_NAMES[s.current]} ${desertLosses} arm${desertLosses === 1 ? 'y' : 'ies'} (1 per desert hex).`, 'event');
 	}
 
-	// Reinforcements (city income replaced the old random production surge —
-	// see cityIncome).
-	let reinf = computeReinforcements(s, s.current);
-	s.armiesToPlace = reinf;
-	log(s, `${PLAYER_NAMES[s.current]}'s turn ${s.turn}. Reinforcements: ${reinf} (${countryCount(s, s.current)} territories, +${fullIslandBonus(s, s.current)} island bonus${cityIncome(s, s.current) ? `, +${cityIncome(s, s.current)} cities` : ''}${capitalBonus(s, s.current) ? `, +${CAPITAL_BONUS} capital` : ''}${allCapitalsBonus(s, s.current) ? `, +${CAPITAL_BONUS} all capitals` : ''}).`, 'info');
-	s.phase = 'placing';
-	s.message = `${PLAYER_NAMES[s.current]}: place ${s.armiesToPlace} armies. Click one of your territories.`;
+	// Gold income (city income replaced the old random production surge — see
+	// cityIncome). Carries over turn to turn; spent in the 'buy' phase.
+	const income = computeGoldIncome(s, s.current);
+	s.gold[s.current] += income;
+	s.goldIncomeThisTurn = income;
+	s.armiesToPlace = 0;
+	s.marketRerollCount = 0;
+	s.marketOffer = marketFill(s);
+	log(s, `${PLAYER_NAMES[s.current]}'s turn ${s.turn}. +${income} gold (${s.gold[s.current]} total) — ${countryCount(s, s.current)} territories, +${fullIslandBonus(s, s.current)} island bonus${cityIncome(s, s.current) ? `, +${cityIncome(s, s.current)} cities` : ''}${capitalBonus(s, s.current) ? `, +${CAPITAL_BONUS} capital` : ''}${allCapitalsBonus(s, s.current) ? `, +${CAPITAL_BONUS} all capitals` : ''}.`, 'info');
+	s.phase = 'buy';
+	s.message = `${PLAYER_NAMES[s.current]}: shop for armies and cards, then click Done Shopping.`;
 	return s;
 }
 
@@ -1640,9 +1653,6 @@ export function placeArmies(gridId: number, qty: number): void {
 		s.states[gridId].armies += q;
 		s.armiesToPlace -= q;
 		if (s.armiesToPlace === 0) {
-			if (s.doubleActive) {
-				s.doubleActive = false;
-			}
 			s.phase = 'action';
 			s.message = `${PLAYER_NAMES[s.current]}: Attack, move, or pass.`;
 		} else {
@@ -1687,47 +1697,17 @@ export function cancelAction() {
 	});
 }
 
-/**
- * Card rule (per user spec): card at end of every round, UNLESS your turn
- * ends on a battle loss. i.e. it's the OUTCOME of your final attack that
- * matters — earlier wins don't rescue a losing finish. Shared by every path
- * that can end a turn (End Turn button, and a move that ends the turn).
- * Returns true if it paused the turn for a human discard (caller must not
- * advance the turn in that case).
- */
-function awardTurnCardIfDue(s: GameState): boolean {
-	const endedOnLoss = s.lastAttackResult === 'loss';
-	const shouldAward = !endedOnLoss && !s.turnCardAwarded;
-	if (!shouldAward) return false;
-	const card = drawCard(s);
-	if (!card) return false;
-	s.hands[s.current] = [...s.hands[s.current], card];
-	log(s, `${PLAYER_NAMES[s.current]} drew a ${CARD_LABELS[card]} card.`, 'card');
-	s.turnCardAwarded = true;
-	// If the human is over the hand limit, pause for them to pick a
-	// discard. In auto-play mode every player is AI-controlled — skip the
-	// pause and auto-discard. With the "blue starts with every card" debug
-	// option the limit is waived (see enforceHandLimit).
-	if (isHumanPlayer(s.current) && s.hands[s.current].length > HAND_MAX && !debugSettings.autoPlay && !debugSettings.starterCards) {
-		s.pendingDiscard = true;
-		s.phase = 'discard';
-		s.message = 'Hand full — click a card to discard.';
-		return true;
-	}
-	enforceHandLimit(s);
-	return false;
-}
-
 export function endTurn() {
 	game.update((s) => {
 		if (s.phase !== 'action') return s;
 		devLogAction(s.current, { kind: 'end_turn' }, s);
-		if (awardTurnCardIfDue(s)) return s;
 		return advanceTurn(s);
 	});
 }
 
-/** Human clicks a card to discard when their hand is over the limit. */
+/** Human clicks a card to discard when a market purchase pushed the hand
+ *  over the limit. Always resumes back into the 'buy' phase — the only way
+ *  to end up over HAND_MAX now is buying a card, there's no more free draw. */
 export function discardCard(index: number) {
 	game.update((s) => {
 		if (s.phase !== 'discard') return s;
@@ -1740,25 +1720,19 @@ export function discardCard(index: number) {
 		log(s, `${PLAYER_NAMES[s.current]} discarded ${CARD_LABELS[discarded]}.`, 'card');
 		if (s.hands[s.current].length <= HAND_MAX) {
 			s.pendingDiscard = false;
-			return advanceTurn(s);
+			s.phase = 'buy';
+			s.message = 'Continue shopping.';
+			return s;
 		}
 		s.message = 'Hand still full — pick another card to discard.';
 		return s;
 	});
 }
 
-function drawCard(s: GameState): CardType | null {
-	// Very rare Lose-All: clear hand instead of drawing. Only fires on a hand
-	// worth losing (3+ cards) — on a small hand it would just be a wasted draw.
-	// The cleared cards go to the discard pile rather than vanishing, so
-	// they're still in circulation for a future reshuffle.
-	if (s.hands[s.current].length >= 3 && Math.random() < 0.01) {
-		log(s, `${PLAYER_NAMES[s.current]} drew a Lose-All Cards event — their hand was cleared!`, 'card');
-		if (!s.discardPile) s.discardPile = [];
-		s.discardPile.push(...s.hands[s.current]);
-		s.hands[s.current] = [];
-		return null;
-	}
+/** Pops one card off the shared deck, reshuffling the discard pile back in
+ *  if the deck runs dry. The only source of cards now — bought via the
+ *  market (buyCard/marketFill), never handed out for free. */
+function drawFromDeck(s: GameState): CardType {
 	if (!s.deck) s.deck = shuffle(CARD_POOL, Math.random);
 	if (s.deck.length === 0) {
 		// Draw pile exhausted: reshuffle the spent-card pile back into a fresh
@@ -1769,9 +1743,13 @@ function drawCard(s: GameState): CardType | null {
 		s.discardPile = [];
 		log(s, 'The card deck ran out and was reshuffled.', 'card');
 	}
-	const card = s.deck.pop()!;
-	s.stats[s.current].cardsDrawn++;
-	return card;
+	return s.deck.pop()!;
+}
+
+/** Draws 3 fresh cards for the market offer (game start, and every
+ *  beginTurn/rerollMarket refill). */
+function marketFill(s: GameState): (CardType | null)[] {
+	return [drawFromDeck(s), drawFromDeck(s), drawFromDeck(s)];
 }
 
 function enforceHandLimit(s: GameState) {
@@ -1793,6 +1771,101 @@ function enforceHandLimit(s: GameState) {
 		s.discardPile.push(hand[worst]);
 		s.hands[s.current] = hand.filter((_, i) => i !== worst);
 	}
+}
+
+const ARMY_GOLD_COST = 1;
+const REROLL_BASE_COST = 2;
+const REROLL_STEP_COST = 2;
+
+/** Current reroll price — escalates within a turn, resets to base every
+ *  beginTurn (marketRerollCount resets there). */
+export function rerollCost(s: GameState): number {
+	return REROLL_BASE_COST + s.marketRerollCount * REROLL_STEP_COST;
+}
+
+/** Spend gold on armies (1:1), added to the placement pool for later in the
+ *  turn. Buyable any number of times during 'buy'; doesn't change phase. */
+export function buyArmies(qty: number): void {
+	game.update((s) => {
+		if (s.phase !== 'buy') return s;
+		const affordable = Math.floor(s.gold[s.current] / ARMY_GOLD_COST);
+		const q = Math.max(0, Math.min(Math.floor(qty), affordable));
+		if (q === 0) return s;
+		s.gold[s.current] -= q * ARMY_GOLD_COST;
+		s.armiesToPlace += q;
+		log(s, `${PLAYER_NAMES[s.current]} bought ${q} arm${q === 1 ? 'y' : 'ies'} for ${q * ARMY_GOLD_COST} gold.`, 'info');
+		s.message = `${PLAYER_NAMES[s.current]}: ${s.armiesToPlace} armies bought, ${s.gold[s.current]} gold left.`;
+		return s;
+	});
+}
+
+/** Buy one of the 3 offered market cards straight into hand. May pause for a
+ *  discard if it pushes a human over HAND_MAX — the only discard trigger
+ *  left now that cards are never handed out free. */
+export function buyCard(offerIdx: number): void {
+	game.update((s) => {
+		if (s.phase !== 'buy') return s;
+		const card = s.marketOffer[offerIdx];
+		if (offerIdx < 0 || offerIdx >= s.marketOffer.length || !card) return s;
+		const price = cardPrice(CARD_BY_ID[card].weight);
+		if (s.gold[s.current] < price) {
+			s.message = `Not enough gold — ${CARD_LABELS[card]} costs ${price}.`;
+			return s;
+		}
+		s.gold[s.current] -= price;
+		s.marketOffer = s.marketOffer.map((c, i) => (i === offerIdx ? null : c));
+		s.hands[s.current] = [...s.hands[s.current], card];
+		log(s, `${PLAYER_NAMES[s.current]} bought ${CARD_LABELS[card]} for ${price} gold.`, 'card');
+		if (isHumanPlayer(s.current) && s.hands[s.current].length > HAND_MAX && !debugSettings.autoPlay && !debugSettings.starterCards) {
+			s.pendingDiscard = true;
+			s.phase = 'discard';
+			s.message = 'Hand full — discard a card to keep shopping.';
+			return s;
+		}
+		enforceHandLimit(s);
+		s.message = `${PLAYER_NAMES[s.current]}: ${s.gold[s.current]} gold left.`;
+		return s;
+	});
+}
+
+/** Refresh all 3 market slots at an escalating (per-turn) cost. Unbought
+ *  offered cards are recirculated into the discard pile, not lost. */
+export function rerollMarket(): void {
+	game.update((s) => {
+		if (s.phase !== 'buy') return s;
+		const cost = rerollCost(s);
+		if (s.gold[s.current] < cost) {
+			s.message = `Not enough gold to reroll — costs ${cost}.`;
+			return s;
+		}
+		s.gold[s.current] -= cost;
+		if (!s.discardPile) s.discardPile = [];
+		for (const c of s.marketOffer) if (c) s.discardPile.push(c);
+		s.marketOffer = marketFill(s);
+		s.marketRerollCount += 1;
+		log(s, `${PLAYER_NAMES[s.current]} rerolled the market for ${cost} gold.`, 'card');
+		s.message = `${PLAYER_NAMES[s.current]}: ${s.gold[s.current]} gold left. Next reroll costs ${rerollCost(s)}.`;
+		return s;
+	});
+}
+
+/** Ends shopping: recirculates anything still unbought, then moves on to
+ *  placing (if armies were bought) or straight to the action phase. */
+export function finishShopping(): void {
+	game.update((s) => {
+		if (s.phase !== 'buy') return s;
+		if (!s.discardPile) s.discardPile = [];
+		for (const c of s.marketOffer) if (c) s.discardPile.push(c);
+		s.marketOffer = [null, null, null];
+		if (s.armiesToPlace > 0) {
+			s.phase = 'placing';
+			s.message = `${PLAYER_NAMES[s.current]}: place ${s.armiesToPlace} armies. Click one of your territories.`;
+		} else {
+			s.phase = 'action';
+			s.message = `${PLAYER_NAMES[s.current]}: Attack, move, or pass.`;
+		}
+		return s;
+	});
 }
 
 function advanceTurn(s: GameState): GameState {
@@ -1904,7 +1977,6 @@ function autoConquer(s: GameState, fromId: number, toId: number): void {
 	s.stats[attacker].territoriesCaptured++;
 	if (defender) s.stats[defender].territoriesLost++;
 	s.conquests.push({ turn: s.turn, grid: toId, attacker, defender, from: fromId, armies: from.armies, via: conquestVia(s, fromId, toId) });
-	s.defeatedThisTurn = true;
 	s.lastAttackResult = 'win';
 	s.eliteAttackActive = false;
 	s.bridgeAttackActive = false;
@@ -2002,7 +2074,6 @@ export function rollAttack(): void {
 			s.stats[attacker].territoriesCaptured++;
 			if (defender) s.stats[defender].territoriesLost++;
 			s.conquests.push({ turn: s.turn, grid: s.selectedTo, attacker, defender, from: s.selectedFrom, armies: from.armies, via: conquestVia(s, s.selectedFrom, s.selectedTo) });
-			s.defeatedThisTurn = true;
 			s.lastAttackResult = 'win';
 			// Elite Troops / Mountaineering were consumed by this successful attack.
 			s.eliteAttackActive = false;
@@ -2060,16 +2131,8 @@ export function rollAttack(): void {
 			s.phase = 'action';
 			s.selectedFrom = null;
 			s.selectedTo = null;
-			// End turn immediately
-			if (s.defeatedThisTurn && !s.turnCardAwarded) {
-				const card = drawCard(s);
-				if (card) {
-					s.hands[s.current] = [...s.hands[s.current], card];
-					log(s, `${PLAYER_NAMES[s.current]} drew a ${CARD_LABELS[card]} card.`, 'card');
-					enforceHandLimit(s);
-					s.turnCardAwarded = true;
-				}
-			}
+			// End turn immediately (no consolation card any more — armies/cards
+			// are bought, never handed out free).
 			return advanceTurn(s);
 		}
 		// Continue in attack_rolling phase — user can click Roll again
@@ -2126,7 +2189,6 @@ export function confirmMove(qty: number) {
 		s.selectedFrom = null;
 		s.selectedTo = null;
 		// per manual, move ends the turn
-		if (awardTurnCardIfDue(s)) return s;
 		return advanceTurn(s);
 	});
 }
@@ -2356,7 +2418,6 @@ export function resolveParatroop(s: GameState, fromId: number, toId: number, qty
 		s.stats[attacker].territoriesCaptured++;
 		if (defender) s.stats[defender].territoriesLost++;
 		s.conquests.push({ turn: s.turn, grid: toId, attacker, defender, from: fromId, armies: qty, via: 'paratroop' });
-		s.defeatedThisTurn = true;
 		s.lastAttackResult = 'win';
 		s.stats[attacker].attacksWon++;
 		log(s, `${PLAYER_NAMES[attacker]}'s paratroopers seized ${gridLabel(s, toId)}!`, 'defeat');

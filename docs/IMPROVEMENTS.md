@@ -1,8 +1,8 @@
 # Isle Wars — Web App Improvement Ideas
 
 Suggestions for the web app only (`src/lib` + `src/routes`), grounded in the
-current code. iOS/macOS follow-through is deliberately out of scope here,
-but remember the golden rule: anything that changes `src/lib` flows into the
+current code. iOS follow-through is deliberately out of scope here, but
+remember the golden rule: anything that changes `src/lib` flows into the
 iOS bundle, so rule changes below are "web-first" only in the sense that the
 web UI is where we'd surface them first.
 
@@ -101,14 +101,12 @@ no-draw on small hands too — the draw is skipped even when there's nothing
 to lose).
 
 ### 2.4 Card draw pacing and the one-card-per-turn rule
-- You draw a card ~every turn but may play only one — hands hit `HAND_MAX`
-  fast and the discard flow becomes routine. Consider: draw only when you
-  **conquered at least one territory** this turn (Risk-style; the code
-  already tracks `defeatedThisTurn` but doesn't use it for this), or raise
-  the play limit to 2 with "max 1 attack-kind card".
-- The `bonus15` (weight 1) is worth ~5 turns of base reinforcements on turn
-  2 and merely nice on turn 30. Consider scaling bonuses ("+3 per territory
-  you own, max 15") or weighting big bonuses into a "late deck".
+> **Status: superseded.** There's no more free per-turn draw or free army
+> placement at all — replaced by a gold economy (`computeGoldIncome`, the
+> `'buy'` phase, `buyArmies`/`buyCard`/`rerollMarket`/`finishShopping` in
+> game.ts). `defeatedThisTurn`/`turnCardAwarded` and the flat army-bonus cards
+> (`bonus5`/`bonus8`/`bonus15`/`double`) were removed outright. See
+> docs/CARDS.md's "The gold economy" section.
 
 ### 2.5 Capital stakes are asymmetric in a dull way
 Losing your capital costs you 3/turn, but the occupier gains nothing — so

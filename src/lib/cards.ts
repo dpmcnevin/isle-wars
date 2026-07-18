@@ -68,8 +68,16 @@ export interface CardDef {
 	onResolve?: (s: GameState, picks: number[], idx: number) => void;
 }
 
+// Rarer cards (fewer copies in the deck) cost more gold in the market —
+// inversely proportional to weight so it generalizes to any future weight,
+// floored so a high-weight "filler" card is never free.
+const BASE_CARD_PRICE = 8;
+const MIN_CARD_PRICE = 2;
+export function cardPrice(weight: number): number {
+	return Math.max(MIN_CARD_PRICE, Math.round(BASE_CARD_PRICE / weight));
+}
+
 // Phase groups reused across cards.
-const PLACE_ONLY: Phase[] = ['placing'];
 // Only cards that add to the army pool / board may run during placement —
 // anything else must wait until every reinforcement is placed, because card
 // resolution lands in the action phase and any unplaced armies would be lost.
@@ -97,47 +105,6 @@ export const CARD_DEFS: CardDef[] = [
 			s.pendingArmies = 1;
 			s.phase = 'air_qty';
 			s.message = 'Choose how many to airlift, then confirm.';
-		}
-	},
-	{
-		id: 'bonus5', label: '+5 Armies', icon: '+5', kind: 'boost', weight: 2,
-		when: 'Placement phase', desc: 'Add 5 armies to your placement pool this turn.',
-		playableIn: PLACE_ONLY,
-		onPlay: (s, idx) => {
-			s.armiesToPlace += 5; consumeCard(s, idx);
-			log(s, `${PLAYER_NAMES[s.current]} played +5 Armies (+5).`, 'card');
-			s.message = `Place ${s.armiesToPlace} armies.`;
-		}
-	},
-	{
-		id: 'bonus8', label: '+8 Armies', icon: '+8', kind: 'boost', weight: 1,
-		when: 'Placement phase', desc: 'Add 8 armies to your placement pool this turn.',
-		playableIn: PLACE_ONLY,
-		onPlay: (s, idx) => {
-			s.armiesToPlace += 8; consumeCard(s, idx);
-			log(s, `${PLAYER_NAMES[s.current]} played +8 Armies (+8).`, 'card');
-			s.message = `Place ${s.armiesToPlace} armies.`;
-		}
-	},
-	{
-		id: 'bonus15', label: '+15 Armies', icon: '+15', kind: 'boost', weight: 1,
-		when: 'Placement phase', desc: 'Add 15 armies to your placement pool this turn.',
-		playableIn: PLACE_ONLY,
-		onPlay: (s, idx) => {
-			s.armiesToPlace += 15; consumeCard(s, idx);
-			log(s, `${PLAYER_NAMES[s.current]} played +15 Armies (+15).`, 'card');
-			s.message = `Place ${s.armiesToPlace} armies.`;
-		}
-	},
-	{
-		id: 'double', label: 'Double', icon: '×2', kind: 'boost', weight: 1,
-		when: 'Placement phase', desc: 'Double the number of armies you place this turn.',
-		playableIn: PLACE_ONLY,
-		onPlay: (s, idx) => {
-			if (s.doubleActive) { s.message = 'Play Double during placement (once).'; return; }
-			s.armiesToPlace *= 2; s.doubleActive = true; consumeCard(s, idx);
-			log(s, `${PLAYER_NAMES[s.current]} played Double! Placement doubled to ${s.armiesToPlace}.`, 'card');
-			s.message = `Place ${s.armiesToPlace} armies.`;
 		}
 	},
 	{

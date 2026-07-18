@@ -181,6 +181,26 @@ final class GameEngine {
     func confirmParatroop(_ qty: Int) throws -> GameState { try callState("confirmParatroop", args: [qty]) }
     func playCard(_ index: Int) throws -> GameState { try callState("playCard", args: [index]) }
 
+    // MARK: - Shopping ('buy' phase)
+
+    func buyArmies(_ qty: Int) throws -> GameState { try callState("buyArmies", args: [qty]) }
+    func buyCard(offerIndex: Int) throws -> GameState { try callState("buyCard", args: [offerIndex]) }
+    func rerollMarket() throws -> GameState { try callState("rerollMarket") }
+    func finishShopping() throws -> GameState { try callState("finishShopping") }
+
+    /// Gold cost of a card at its current rarity — a pure query, not a
+    /// mutation, so the market UI can price all 3 offered slots without
+    /// spending anything.
+    func cardPrice(card: CardType) throws -> Int {
+        Int(try rawCall("cardPrice", args: [card.rawValue]).toInt32())
+    }
+
+    /// Current reroll cost — escalates within a turn (marketRerollCount),
+    /// resets at the next beginTurn.
+    func rerollCost() throws -> Int {
+        Int(try rawCall("rerollCost").toInt32())
+    }
+
     /// Fire-and-forget: relies on the setTimeout shim (see above) so the
     /// whole AI turn completes before this returns. A subsequent
     /// `getState()` reads the result.
