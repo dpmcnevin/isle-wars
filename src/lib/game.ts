@@ -180,6 +180,11 @@ export interface GameState {
 	// can react. Optional: absent on old saves.
 	pendingEventType?: WorldEventType | null;
 	states: GridState[]; // indexed by grid id
+	// Shuffled draw pile (pop from the end) and the spent-card pile it gets
+	// reshuffled from when it runs dry. Optional: absent on saves from before
+	// the deck existed — drawCard lazily builds one if missing.
+	deck?: CardType[];
+	discardPile?: CardType[];
 	hands: Record<Player, CardType[]>;
 	alive: Record<Player, boolean>;
 	current: Player;
@@ -917,6 +922,14 @@ function finishGameSetup(
 		pendingEventType: null,
 		states,
 		capitals,
+		// Seeded like the map/placement/capital/start-player rolls above, so
+		// pasting a seed reproduces the same starting deck order too. A
+		// different XOR constant than the placement rand's so the two don't
+		// walk in lockstep. Later mid-game reshuffles (drawCard, when the
+		// deck runs dry) use plain Math.random, same as dice rolls — full-game
+		// determinism from a seed was never a guarantee here.
+		deck: shuffle(CARD_POOL, mulberry32(hashSeedToInt(seed) ^ 0xc0ffee)),
+		discardPile: [],
 		hands: emptyHands(),
 		alive: emptyAlive(),
 		current: startPlayer,
@@ -1722,6 +1735,8 @@ export function discardCard(index: number) {
 		if (index < 0 || index >= hand.length) return s;
 		const discarded = hand[index];
 		s.hands[s.current] = hand.filter((_, i) => i !== index);
+		if (!s.discardPile) s.discardPile = [];
+		s.discardPile.push(discarded);
 		log(s, `${PLAYER_NAMES[s.current]} discarded ${CARD_LABELS[discarded]}.`, 'card');
 		if (s.hands[s.current].length <= HAND_MAX) {
 			s.pendingDiscard = false;
@@ -1735,12 +1750,26 @@ export function discardCard(index: number) {
 function drawCard(s: GameState): CardType | null {
 	// Very rare Lose-All: clear hand instead of drawing. Only fires on a hand
 	// worth losing (3+ cards) — on a small hand it would just be a wasted draw.
+	// The cleared cards go to the discard pile rather than vanishing, so
+	// they're still in circulation for a future reshuffle.
 	if (s.hands[s.current].length >= 3 && Math.random() < 0.01) {
 		log(s, `${PLAYER_NAMES[s.current]} drew a Lose-All Cards event — their hand was cleared!`, 'card');
+		if (!s.discardPile) s.discardPile = [];
+		s.discardPile.push(...s.hands[s.current]);
 		s.hands[s.current] = [];
 		return null;
 	}
-	const card = CARD_POOL[Math.floor(Math.random() * CARD_POOL.length)];
+	if (!s.deck) s.deck = shuffle(CARD_POOL, Math.random);
+	if (s.deck.length === 0) {
+		// Draw pile exhausted: reshuffle the spent-card pile back into a fresh
+		// deck. If both are somehow empty (shouldn't happen — CARD_POOL is
+		// never empty), fall back to a brand-new shuffled pool.
+		const reclaimed = s.discardPile && s.discardPile.length > 0 ? s.discardPile : CARD_POOL;
+		s.deck = shuffle(reclaimed, Math.random);
+		s.discardPile = [];
+		log(s, 'The card deck ran out and was reshuffled.', 'card');
+	}
+	const card = s.deck.pop()!;
 	s.stats[s.current].cardsDrawn++;
 	return card;
 }
@@ -1760,6 +1789,8 @@ function enforceHandLimit(s: GameState) {
 		for (let i = 1; i < hand.length; i++) {
 			if (CARD_BY_ID[hand[i]].weight > CARD_BY_ID[hand[worst]].weight) worst = i;
 		}
+		if (!s.discardPile) s.discardPile = [];
+		s.discardPile.push(hand[worst]);
 		s.hands[s.current] = hand.filter((_, i) => i !== worst);
 	}
 }
@@ -2102,7 +2133,12 @@ export function confirmMove(qty: number) {
 
 // -- Card actions --
 export function consumeCard(s: GameState, idx: number) {
+	const card = s.hands[s.current][idx];
 	s.hands[s.current] = s.hands[s.current].filter((_, i) => i !== idx);
+	if (card) {
+		if (!s.discardPile) s.discardPile = [];
+		s.discardPile.push(card);
+	}
 	s.cardPlayedThisTurn = true;
 	s.stats[s.current].cardsPlayed++;
 	// Any pending selection is finished once the card is consumed.
