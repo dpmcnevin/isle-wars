@@ -281,7 +281,17 @@ private struct GameView: View {
             PostGameStatsView(state: state, onNewGame: vm.startOver, vm: vm)
         } else if state.phase == .attackRolling || state.phase == .attackMoveIn {
             AttackModalView(vm: vm, state: state)
-        } else if state.phase == .buy {
+        } else if state.phase == .buy, state.current == .human, vm.debugSettings?.autoPlay != true {
+            // state.current == .human alone isn't enough to gate this: beginTurn
+            // sets phase to 'buy' for whichever player is up next the instant the
+            // previous turn ends, but runAiTurn doesn't actually fire until
+            // scheduleAiTurnIfNeeded's delay elapses (400ms, or 16ms in
+            // auto-play) — without the current-player check, this modal would
+            // flash open for the AI's own shopping during that gap. Auto-play
+            // needs its own check on top: it can drive the human slot too, in
+            // which case current == .human is true but nobody should see a
+            // shopping prompt for a turn the AI is actually playing.
+            //
             // No tap-outside-to-cancel here (unlike the other modals) — there's
             // no "cancel" concept for shopping, only "done" (finishShopping),
             // which the view's own button drives.
