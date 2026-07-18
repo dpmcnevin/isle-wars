@@ -15,14 +15,6 @@
 	let data = $state<RecapData | null>(null);
 	let invalid = $state(false);
 	let linkCopied = $state(false);
-	// Same detection/reasoning as routes/+page.svelte's isDesktopApp — a
-	// native window shouldn't scroll the way a browser tab does, but this
-	// page is a lot more content-dense (stats, two charts, a whole turning-
-	// point map viewer), so unlike the main page it's the stats/charts row
-	// that gets tucked behind a toggle here, not the moment viewer, which is
-	// the actual point of a recap page.
-	let isDesktopApp = $state(false);
-	let showStats = $state(false);
 	// Regenerated from the seed alone — see map.ts's generateMap — so the
 	// recap link doesn't need to embed the (much heavier) hex geometry.
 	let map = $state<GameMap | null>(null);
@@ -41,7 +33,6 @@
 	let hoverIdx = $state<number | null>(null);
 
 	onMount(async () => {
-		isDesktopApp = '__TAURI_INTERNALS__' in window;
 		// Fragments never reach the server, so this only ever resolves
 		// client-side — the prerendered HTML shell always shows "invalid"
 		// until this runs.
@@ -352,7 +343,7 @@
 
 <svelte:window onkeydown={onKey} />
 
-<main class:app-mode={isDesktopApp}>
+<main>
 	{#if invalid}
 		<p class="msg">This recap link is invalid or incomplete.</p>
 	{:else if !data}
@@ -383,9 +374,6 @@
 				<button onclick={copyLink}>{linkCopied ? '✓ Copied!' : '🔗 Copy Share Link'}</button>
 				<button class="ghost" onclick={startFreshAndGoHome}>Back to Main Page</button>
 				<button onclick={() => (showLifetime = true)}>Career</button>
-				{#if isDesktopApp}
-					<button onclick={() => (showStats = !showStats)}>{showStats ? '✕ Close' : '📊 Stats'}</button>
-				{/if}
 			</div>
 		</section>
 
@@ -492,11 +480,8 @@
 			</svg>
 		{/snippet}
 
-		<div class="top-row-wrap" class:app-mode={isDesktopApp} class:open={showStats}>
+		<div class="top-row-wrap">
 		<div class="top-row">
-			{#if isDesktopApp}
-				<button class="top-row-close" onclick={() => (showStats = false)} aria-label="Close stats">✕</button>
-			{/if}
 			<section class="chart stat-table">
 				<h3>Stats</h3>
 				<table class="stats-table">
@@ -835,104 +820,4 @@
 		.moment-arrow { transform: rotate(90deg); }
 	}
 
-	/* Desktop app (Tauri) only — see isDesktopApp in the script block, and
-	   the near-identical block in routes/+page.svelte for the full
-	   rationale. Unlike that page, it's .top-row (stats table + charts)
-	   that gets tucked behind a toggle here, not .moments — the turning-
-	   point map viewer is the actual point of this page, so it's the one
-	   that always stays visible and fills the remaining height instead.
-	   All selectors are compound (main.app-mode ...), which is what makes
-	   them win regardless of where in the file they're declared — higher
-	   specificity than the plain rules above, not source order. */
-	main.app-mode {
-		height: 100dvh;
-		overflow: hidden;
-		display: flex;
-		flex-direction: column;
-		box-sizing: border-box;
-		padding: 0.6rem;
-	}
-	main.app-mode .banner { flex: none; margin-bottom: 0.5rem; padding: 0.75rem 1rem; }
-	main.app-mode .moments {
-		flex: 1 1 0;
-		min-height: 0;
-		display: flex;
-		flex-direction: column;
-		overflow: hidden;
-	}
-	main.app-mode .moment-nav,
-	main.app-mode .kbd-hint,
-	main.app-mode .moment-headline,
-	main.app-mode .tp-no-capture {
-		flex: none;
-	}
-	/* The single starting-position map and the before/after pair both need
-	   to fill whatever height .moments has left after the nav/headline
-	   text above, then fit their own mini-map to that (rather than the
-	   width-only sizing TpMiniMap defaults to — see the :global override
-	   below), the same "fit to available height" approach used for the
-	   main board on routes/+page.svelte. */
-	main.app-mode .moment-single {
-		flex: 1 1 0;
-		min-height: 0;
-		max-width: 70%;
-		width: 100%;
-		margin: 0 auto;
-		display: flex;
-		align-items: center;
-		justify-content: center;
-	}
-	main.app-mode .moment-compare {
-		flex: 1 1 0;
-		min-height: 0;
-		align-items: stretch;
-	}
-	main.app-mode .moment-pane { min-height: 0; height: 100%; justify-content: center; }
-	main.app-mode .moment-single :global(.tp-map),
-	main.app-mode .moment-pane :global(.tp-map) {
-		width: auto;
-		height: 100%;
-		max-width: 100%;
-		max-height: none;
-	}
-	/* .top-row (stats table + 2 charts) is secondary detail here — hidden by
-	   default so it can't push the window's content taller than its own
-	   viewport, revealed as a dismissible overlay via the banner's Stats
-	   button instead. */
-	.top-row-wrap.app-mode {
-		display: none;
-		position: fixed;
-		inset: 0;
-		z-index: 60;
-		align-items: center;
-		justify-content: center;
-		background: rgba(4, 10, 20, 0.75);
-		backdrop-filter: blur(2px);
-	}
-	.top-row-wrap.app-mode.open { display: flex; }
-	.top-row-wrap.app-mode .top-row {
-		position: relative;
-		background: #10182a;
-		border: 1px solid #345;
-		border-radius: 10px;
-		padding: 1rem 1.25rem;
-		max-width: min(90vw, 1200px);
-		max-height: 85vh;
-		overflow-y: auto;
-		margin: 0;
-		box-shadow: 0 12px 40px rgba(0, 0, 0, 0.5);
-	}
-	.top-row-close {
-		position: absolute;
-		top: -0.4rem;
-		right: -0.4rem;
-		z-index: 1;
-		background: rgba(15, 32, 53, 0.95);
-		border: 1px solid #4a9fcf;
-		color: #d0e6f5;
-		border-radius: 50%;
-		width: 30px;
-		height: 30px;
-		cursor: pointer;
-	}
 </style>
