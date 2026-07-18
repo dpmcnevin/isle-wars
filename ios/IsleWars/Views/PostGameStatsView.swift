@@ -14,11 +14,11 @@ struct PostGameStatsView: View {
 
     @State private var seedCopied = false
     @State private var turningPointIndex = 0
-    /// Live horizontal drag offset for the turning-point page, tracked while
-    /// the finger is down so the swipe visibly follows it — see
-    /// `turningPointsSection`'s gesture for why this doesn't go through a
-    /// full page-swap transition.
-    @State private var turningPointDragOffset: CGFloat = 0
+    /// Backs the gallery ScrollView's `.scrollPosition(id:)` — the source of
+    /// truth for which page is centered while the user is actively swiping;
+    /// synced into `turningPointIndex` (used by the chips/charts elsewhere on
+    /// this screen) via `.onChange` in `turningPointsSection`.
+    @State private var turningPointScrollTarget: Int?
 
     // Identity must be stable across renders — a per-init UUID would hand
     // Swift Charts a "completely new" dataset on every body evaluation,
@@ -204,8 +204,20 @@ struct PostGameStatsView: View {
 
     /// Moment stepper over the game's turning points — mirrors the web
     /// recap page's chip stepper. Each moment (headline/stats + before/after
-    /// mini-map compare) is a `TabView` page, so a swipe left/right steps
-    /// through turning points same as tapping a chip or a chevron button.
+    /// mini-map compare) is one page in a real horizontally-paging gallery
+    /// (iOS 17's ScrollView + .paging behavior + .scrollPosition — the native
+    /// primitive behind Photos-style swiping), so a swipe left/right steps
+    /// through turning points with the same feel as tapping a chip or a
+    /// chevron button, and the system handles the drag/snap physics rather
+    /// than a hand-rolled gesture.
+    ///
+    /// An earlier version tried a plain `TabView(.page)`: it built every
+    /// page (~15 × 2 mini-map Canvases) eagerly, which read as scroll lag on
+    /// the whole screen, and lazily swapping far pages for placeholders
+    /// changed page identity mid-swipe, freezing the page turn mid-flight.
+    /// `LazyHStack` inside a `ScrollView` is genuinely lazy (only the
+    /// visible page plus a small neighbor buffer are ever instantiated), so
+    /// there's no eager build-up and no manual placeholder-swap needed.
     private func turningPointsSection(_ vm: GameViewModel, points: [TurningPoint]) -> some View {
         Group {
             if !points.isEmpty {
@@ -215,6 +227,7 @@ struct PostGameStatsView: View {
                     HStack(spacing: 6) {
                         ForEach(Array(points.enumerated()), id: \.offset) { i, p in
                             Button {
+                                withAnimation { turningPointScrollTarget = i }
                                 turningPointIndex = i
                             } label: {
                                 Text(p.isFinal ? "★" : "\(i + 1)")
@@ -226,62 +239,34 @@ struct PostGameStatsView: View {
                         }
                     }
 
-                    // One rendered page + an explicit swipe gesture, instead
-                    // of a page-style TabView. The TabView built every page
-                    // (~15 × 2 mini-map Canvases) eagerly, which read as
-                    // scroll lag on the whole screen — and lazily swapping
-                    // far pages for placeholders changed page identity
-                    // mid-swipe, making the page turn bounce back. A single
-                    // page with a drag handler keeps the swipe interaction
-                    // and only ever draws the selected moment's mini-maps.
-                    // No .id()/transition-based page swap (an animated
-                    // identity swap left the old and new page frozen
-                    // mid-flight, verified via simulator screenshots) — the
-                    // content itself still swaps in place the instant the
-                    // index changes. What DOES animate is turningPointDragOffset,
-                    // applied as a plain .offset below: it tracks the finger
-                    // 1:1 while dragging (so the swipe is visibly happening,
-                    // not just a snap on release) and springs back to 0 once
-                    // the gesture ends, whether or not the index changed —
-                    // cheap because it never touches which mini-maps are
-                    // rendered, only where the existing page sits on screen.
-                    let selected = min(turningPointIndex, points.count - 1)
-                    turningPointPage(vm, point: points[selected], index: selected, count: points.count)
-                        .frame(height: 440)
-                        .contentShape(Rectangle())
-                        .offset(x: turningPointDragOffset)
-                        // Plain .gesture (not highPriority) so the enclosing
-                        // vertical ScrollView still wins vertical pans; only
-                        // clearly-horizontal swipes step the moment.
-                        .gesture(
-                            DragGesture(minimumDistance: 15)
-                                .onChanged { value in
-                                    guard abs(value.translation.width) > abs(value.translation.height) else { return }
-                                    // Deliberately NOT wrapped in withAnimation —
-                                    // this needs to track the finger 1:1 with no
-                                    // lag; only the release/snap below animates.
-                                    turningPointDragOffset = value.translation.width
-                                }
-                                .onEnded { value in
-                                    let dx = value.translation.width
-                                    let advance = abs(dx) > 50 && abs(dx) > abs(value.translation.height)
-                                    if advance {
-                                        // Swipe left = advance (content moves left).
-                                        turningPointIndex = dx < 0
-                                            ? min(points.count - 1, selected + 1)
-                                            : max(0, selected - 1)
-                                    }
-                                    withAnimation(.interactiveSpring(response: 0.3, dampingFraction: 0.8)) {
-                                        turningPointDragOffset = 0
-                                    }
-                                }
-                        )
+                    ScrollView(.horizontal) {
+                        LazyHStack(spacing: 0) {
+                            ForEach(Array(points.enumerated()), id: \.offset) { i, p in
+                                turningPointPage(vm, point: p, index: i, count: points.count)
+                                    .containerRelativeFrame(.horizontal)
+                                    .id(i)
+                            }
+                        }
+                        .scrollTargetLayout()
+                    }
+                    .scrollTargetBehavior(.paging)
+                    .scrollPosition(id: $turningPointScrollTarget)
+                    .scrollIndicators(.hidden)
+                    .frame(height: 440)
+                    .onChange(of: turningPointScrollTarget) { _, newValue in
+                        if let newValue { turningPointIndex = newValue }
+                    }
                 }
                 .frame(maxWidth: modalWidth)
                 .padding(12)
                 .background(RoundedRectangle(cornerRadius: 10).fill(AppTheme.panelDark.opacity(0.6)))
+                .onAppear {
+                    turningPointScrollTarget = turningPointIndex
+                }
                 .onChange(of: points.count) { _, newCount in
-                    turningPointIndex = min(turningPointIndex, max(0, newCount - 1))
+                    let clamped = min(turningPointIndex, max(0, newCount - 1))
+                    turningPointIndex = clamped
+                    turningPointScrollTarget = clamped
                 }
             }
         }
@@ -293,7 +278,9 @@ struct PostGameStatsView: View {
         VStack(alignment: .leading, spacing: 10) {
             HStack {
                 Button {
-                    turningPointIndex = max(0, index - 1)
+                    let newIndex = max(0, index - 1)
+                    withAnimation { turningPointScrollTarget = newIndex }
+                    turningPointIndex = newIndex
                 } label: { Image(systemName: "chevron.left") }
                     .disabled(index == 0)
                 VStack(alignment: .leading, spacing: 4) {
@@ -307,7 +294,9 @@ struct PostGameStatsView: View {
                 }
                 Spacer()
                 Button {
-                    turningPointIndex = min(count - 1, index + 1)
+                    let newIndex = min(count - 1, index + 1)
+                    withAnimation { turningPointScrollTarget = newIndex }
+                    turningPointIndex = newIndex
                 } label: { Image(systemName: "chevron.right") }
                     .disabled(index == count - 1)
             }
