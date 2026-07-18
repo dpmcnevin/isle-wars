@@ -1362,6 +1362,20 @@ function runAiMarket(p: Player) {
 	let rerolled = false;
 
 	for (let guard = 0; guard < 8; guard++) {
+		// buyCard pauses in 'discard' instead of auto-trimming when the buyer
+		// is flagged human (isHumanPlayer) — which stays true for whoever the
+		// UI's human slot is even under auto-play, where the AI is actually
+		// driving that turn. Nothing is waiting on a real tap here, so resolve
+		// it immediately (same arbitrary-index approach runAiTurn's own
+		// leftover-phase recovery uses) rather than let the turn get
+		// force-cancelled below with the hand never actually trimmed — left
+		// alone this grows the hand without bound, turn after turn, since the
+		// limit is never enforced (confirmed via simulation: 0 -> 26+ cards
+		// over ~170 turns).
+		let discardSafety = 0;
+		while (get(game).phase === 'discard' && get(game).current === p && discardSafety++ < 20) {
+			discardCard(0);
+		}
 		const s = get(game);
 		if (s.phase !== 'buy' || s.current !== p) return;
 		const spentSoFar = startingGold - s.gold[p]; // armies aren't bought until after this loop
