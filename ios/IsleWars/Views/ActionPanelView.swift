@@ -25,7 +25,7 @@ struct ActionPanelView: View {
                 Button("End Turn") { vm.pass() }
                     .buttonStyle(GameButtonStyle(small: true))
 
-            case .placing, .attackRolling, .attackMoveIn, .moveQty, .airQty, .paratroopQty, .discard, .gameOver:
+            case .buy, .placing, .attackRolling, .attackMoveIn, .moveQty, .airQty, .paratroopQty, .discard, .gameOver:
                 EmptyView() // guidance is in the message; modals handle the rest
 
             default:

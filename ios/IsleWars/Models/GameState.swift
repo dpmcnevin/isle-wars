@@ -129,13 +129,17 @@ struct GameState: Codable {
     let current: Player
     let turn: Int
     let phase: Phase
+    /// Gold economy: income carries over unspent turn to turn, spent in the
+    /// 'buy' phase on armies (armiesToPlace) and market cards (hand).
+    /// Optional: absent on saves from before the economy existed.
+    let gold: [String: Int]?
+    let goldIncomeThisTurn: Int?
+    let marketOffer: [CardType?]?
+    let marketRerollCount: Int?
     let armiesToPlace: Int
-    let doubleActive: Bool
     let selectedFrom: Int?
     let selectedTo: Int?
     let pendingArmies: Int
-    let defeatedThisTurn: Bool
-    let turnCardAwarded: Bool
     let lastAttackResult: AttackResult?
     let pendingDiscard: Bool
     let eliteAttackActive: Bool
@@ -161,8 +165,9 @@ struct GameState: Codable {
 
     enum CodingKeys: String, CodingKey {
         case map, seed, difficulty, states, hands, alive, current, turn, phase
-        case armiesToPlace, doubleActive, selectedFrom, selectedTo, pendingArmies
-        case defeatedThisTurn, turnCardAwarded, lastAttackResult, pendingDiscard
+        case gold, goldIncomeThisTurn, marketOffer, marketRerollCount
+        case armiesToPlace, selectedFrom, selectedTo, pendingArmies
+        case lastAttackResult, pendingDiscard
         case eliteAttackActive, bridgeAttackActive, pendingInvasionLane
         case cardPlayedThisTurn, usedMarshHexes, gameStarted, log, message, winner
         case history, stats
@@ -175,6 +180,17 @@ struct GameState: Codable {
     func hand(for player: Player) -> [CardType] {
         hands[player] ?? []
     }
+
+    /// Convenience: this player's banked gold, defaulting to 0 if absent
+    /// (old saves from before the economy existed).
+    func gold(for player: Player) -> Int {
+        gold?[player] ?? 0
+    }
+
+    /// The 3 market slots, defaulting to empty if absent (old saves). A
+    /// `nil` entry means that slot was already bought this turn — still
+    /// empty until a reroll or the next turn's refill.
+    var marketSlots: [CardType?] { marketOffer ?? [] }
 
     var isHumanTurn: Bool { current == .human }
 

@@ -1,7 +1,7 @@
 import Foundation
 
 enum Phase: String, Codable {
-    case placing, action
+    case buy, placing, action
     case attackSelectFrom = "attack_select_from"
     case attackSelectTo = "attack_select_to"
     case attackRolling = "attack_rolling"

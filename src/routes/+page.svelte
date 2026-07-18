@@ -36,6 +36,13 @@
 		armyCount,
 		fullIslandBonus,
 		isSelectableHex,
+		buyArmies,
+		buyCard,
+		rerollMarket,
+		rerollCost,
+		finishShopping,
+		cardPrice,
+		CARD_BY_ID,
 		PLAYERS,
 		PLAYER_COLORS,
 		PLAYER_NAMES,
@@ -254,6 +261,7 @@
 	// phases fall back to their card's display label via PHASE_TO_STEP, and
 	// anything still unmapped just gets its underscores stripped.
 	const PHASE_LABELS: Partial<Record<Phase, string>> = {
+		buy: 'shop for armies & cards',
 		placing: 'place armies',
 		action: 'attack, move, or pass',
 		attack_select_from: 'attack — choose source',
@@ -395,23 +403,16 @@
 	function scrollToCards() {
 		cardsPanelEl?.scrollIntoView({ behavior: 'smooth', block: 'start' });
 	}
+	let marketPanelEl: HTMLElement | undefined = $state();
+	function scrollToMarket() {
+		marketPanelEl?.scrollIntoView({ behavior: 'smooth', block: 'start' });
+	}
 	// Same breakpoint: the header (scoreboard/actions) and message bar are
 	// collapsed by default so they don't eat into the map's first screen —
 	// toggled open via .chrome-toggle. Starts closed since maximizing the
 	// map is the point; irrelevant outside the landscape breakpoint, where
 	// the toggle button itself is hidden via CSS and the header always shows.
 	let landscapeChromeOpen = $state(false);
-	// True only inside the Tauri desktop shell (src-tauri/), never in a
-	// regular browser tab — detected via the global Tauri's own JS runtime
-	// injects, checked once on mount since it can't change mid-session.
-	// Browser tabs are expected to scroll like any other web page; the
-	// desktop window isn't, so this gates a dedicated no-scroll layout
-	// (main.app-mode below) that fills the window exactly instead.
-	let isDesktopApp = $state(false);
-	// Analytics/charts are hidden by default in app-mode (see main.app-mode
-	// .analytics) so they don't push the window's content taller than its
-	// viewport — this reveals them as a dismissible overlay instead.
-	let showAnalytics = $state(false);
 	let dragFrom = $state<number | null>(null);
 	let dragPt = $state<{ x: number; y: number } | null>(null);
 	let pointerDownGrid: number | null = null;
@@ -568,7 +569,6 @@
 	}
 
 	onMount(() => {
-		isDesktopApp = '__TAURI_INTERNALS__' in window;
 		loadDebugUi();
 		// A shared map link (?seed=...) always wins over any saved game — the
 		// whole point is to reproduce that exact game. The seed itself packs
@@ -1122,7 +1122,7 @@
 	}
 </script>
 
-<svelte:head><title>Isle Wars — SvelteKit clone</title></svelte:head>
+<svelte:head><title>Isle Wars</title></svelte:head>
 
 <!-- Shared hex-render snippets: used by both the map SVG and the attack modal
      so any change to how a hex reads (badge, fort ring, prod star, terrain
@@ -1192,7 +1192,7 @@
 	</g>
 {/snippet}
 
-<main class:app-mode={isDesktopApp}>
+<main>
 	<!-- Groups the header/menu/message chrome with the map+side grid so the
 	     short-landscape media query below can flex just this region to fill
 	     the viewport, without the (always-in-the-DOM) analytics section past
@@ -1222,9 +1222,6 @@
 						<option value={0}>⚡</option>
 					</select>
 				</label>
-				{#if isDesktopApp}
-					<button class="icon-btn" title="Stats" onclick={() => (showAnalytics = !showAnalytics)}>{showAnalytics ? '✕' : 'Stats'}</button>
-				{/if}
 				<button class="icon-btn" title="New Game" onclick={() => (showMenu = !showMenu)}>{showMenu ? '✕' : 'New'}</button>
 				<button class="icon-btn" title="Copy a link to this exact game — map and settings (seed {$game.seed})" onclick={copyShareLink}>{seedCopied ? 'Copied!' : 'Share'}</button>
 				<button class="icon-btn" title="Lifetime stats across all your games" onclick={() => (showLifetime = true)}>Career</button>
@@ -1607,7 +1604,7 @@
 			<section class="panel">
 				<h3>{PLAYER_NAMES[$game.current]}'s turn — {phaseLabel($game.phase)}</h3>
 				{#if $game.current === HUMAN && $game.phase === 'placing'}
-					<p class="hint">Armies remaining: <strong>{$game.armiesToPlace}</strong>. Click one of your territories.</p>
+					<p class="hint">Armies to place: <strong>{$game.armiesToPlace}</strong>. Click one of your territories.</p>
 				{/if}
 
 				{#if $game.current === HUMAN && $game.phase === 'action'}
@@ -1650,6 +1647,55 @@
 					<p class="hint">🤖 {PLAYER_NAMES[$game.current]} is thinking…</p>
 				{/if}
 			</section>
+
+			{#if $game.current === HUMAN && $game.phase === 'buy'}
+				<section class="panel" bind:this={marketPanelEl}>
+					<h3>Shop — {$game.gold[HUMAN]} gold <span class="hint-inline">(+{$game.goldIncomeThisTurn} this turn)</span></h3>
+					<div class="row buy-armies-row">
+						<button onclick={() => buyArmies(1)} disabled={$game.gold[HUMAN] < 1}>+1 army</button>
+						<button onclick={() => buyArmies(5)} disabled={$game.gold[HUMAN] < 1}>+5 armies</button>
+						<button onclick={() => buyArmies($game.gold[HUMAN])} disabled={$game.gold[HUMAN] < 1}>Max armies</button>
+					</div>
+					{#if $game.armiesToPlace > 0}
+						<p class="hint">{$game.armiesToPlace} armies bought so far.</p>
+					{/if}
+					<div class="card-grid">
+						{#each $game.marketOffer as c, i}
+							{#if c}
+								{@const meta = CARD_META[c]}
+								{@const price = cardPrice(CARD_BY_ID[c].weight)}
+								{@const disabled = $game.gold[HUMAN] < price || $game.hands[HUMAN].length >= 5}
+								<button
+									class="card-tile kind-{meta.kind}"
+									class:disabled
+									disabled={disabled}
+									onclick={() => buyCard(i)}
+									onpointerenter={(e) => onCardHoverEnter(c, e)}
+									onpointerleave={onCardHoverLeave}
+									onpointermove={(e) => onCardHoverMove(e)}
+								>
+									<div class="card-icon">{meta.icon}</div>
+									<div class="card-name">{CARD_LABELS[c]}</div>
+									<div class="card-price">{price}g</div>
+								</button>
+							{:else}
+								<div class="card-tile card-tile-empty">
+									<div class="card-name">sold</div>
+								</div>
+							{/if}
+						{/each}
+					</div>
+					{#if $game.hands[HUMAN].length >= 5}
+						<p class="hint">Hand is full — discard before buying more cards.</p>
+					{/if}
+					<div class="row">
+						<button onclick={rerollMarket} disabled={$game.gold[HUMAN] < rerollCost($game)}>
+							Reroll ({rerollCost($game)}g)
+						</button>
+						<button class="primary" onclick={finishShopping}>Done Shopping</button>
+					</div>
+				</section>
+			{/if}
 
 			<section class="panel" bind:this={cardsPanelEl}>
 				{#if $game.current === HUMAN && $game.phase === 'discard'}
@@ -1773,6 +1819,8 @@
 		<button class="end-turn-fab" onclick={endTurn}>End Turn</button>
 	{:else if $game.current === HUMAN && $game.phase === 'placing'}
 		<button class="end-turn-fab placing" disabled>{$game.armiesToPlace} to place</button>
+	{:else if $game.current === HUMAN && $game.phase === 'buy'}
+		<button class="end-turn-fab buy" onclick={scrollToMarket}>{$game.gold[HUMAN]}g — Shop</button>
 	{/if}
 
 	{#if showShortcuts}
@@ -1955,15 +2003,8 @@
 	{/if}
 
 	{#if $game.history}
-		<section class="analytics" class:app-mode={isDesktopApp} class:open={showAnalytics}>
-			{#if isDesktopApp}
-				<div class="analytics-card">
-					<button class="analytics-close" onclick={() => (showAnalytics = false)} aria-label="Close stats">✕</button>
-					{@render analyticsCharts($game.history)}
-				</div>
-			{:else}
-				{@render analyticsCharts($game.history)}
-			{/if}
+		<section class="analytics">
+			{@render analyticsCharts($game.history)}
 		</section>
 	{/if}
 </main>
@@ -2251,6 +2292,11 @@
 	}
 	@media (max-width: 1000px) {
 		.grid { grid-template-columns: 1fr; }
+		/* Map and side panel stack here, so the panel's own End Turn button
+		   can scroll out of view — show the floating one again (higher-
+		   specificity .placing/.buy rules elsewhere still override this for
+		   their own cases regardless of source order). */
+		.end-turn-fab { display: block; }
 	}
 	/* Phones and small tablets: tighten spacing, avoid horizontal scroll,
 	   and give tap targets enough room for fingers instead of a mouse cursor. */
@@ -2472,10 +2518,15 @@
 			display: none;
 		}
 	}
-	/* Top-right, mirroring .inspect-toggle's left-edge/always-visible
-	   treatment — the panel button it shadows can be scrolled out of view
-	   or behind the collapsed header, so this stays reachable regardless. */
+	/* Top-right, mirroring .inspect-toggle's left-edge treatment — the side
+	   panel's own End Turn button (in the "action" phase card) sits right
+	   beside the map on any normal desktop-width window (see .grid's
+	   1000px breakpoint below), so showing this too is a plain duplicate
+	   there. Below that width the map and side panel stack vertically and
+	   the panel button can scroll out of view, which is what this exists
+	   to cover — so it's hidden by default and only shown under 1000px. */
 	.end-turn-fab {
+		display: none;
 		position: fixed;
 		right: max(0.6rem, env(safe-area-inset-right));
 		/* Clears the header, which is visible by default everywhere except
@@ -2513,10 +2564,20 @@
 		font-family: monospace;
 	}
 	.end-turn-fab.placing:hover { background: rgba(15, 32, 53, 0.9); }
+	/* Actionable (unlike .placing above) — scrolls to the shop panel, so it
+	   keeps the bright look/hover affordance of the base .end-turn-fab, just
+	   in the gold-ish color of the shop itself. */
+	.end-turn-fab.buy {
+		display: none;
+		background: #8a6a1a;
+		border-color: #d4a83a;
+	}
+	.end-turn-fab.buy:hover { background: #a67f22; }
 	@media (max-height: 600px) and (orientation: landscape) {
 		.cards-fab { display: flex; }
 		.chrome-toggle { display: flex; }
 		.end-turn-fab.placing { display: block; }
+		.end-turn-fab.buy { display: block; }
 		/* .end-turn-fab sits at top-right too, same corner as the header's
 		   own New/Share/Debug/Clear cluster. Everywhere else the header is
 		   always visible, so the fab's default top offset clears it — but
@@ -2744,6 +2805,31 @@
 	.card-tile.kind-boost { border-top: 3px solid #ffe14a; }
 	.card-tile.kind-movement { border-top: 3px solid #c68fff; }
 	.card-tile.kind-terrain { border-top: 3px solid #7fff7f; }
+
+	.card-price {
+		margin-top: 0.25rem;
+		font-size: 0.65rem;
+		font-family: monospace;
+		color: #ffd67f;
+	}
+	.card-tile-empty {
+		display: flex;
+		align-items: center;
+		justify-content: center;
+		min-height: 74px;
+		border-radius: 6px;
+		border: 1px dashed #2a4a6a;
+		color: #4a6a8a;
+		font-size: 0.7rem;
+		text-transform: uppercase;
+		letter-spacing: 0.05em;
+	}
+	.hint-inline {
+		font-size: 0.75rem;
+		font-weight: normal;
+		color: #6a9abf;
+	}
+	.buy-armies-row { margin-bottom: 0.5rem; }
 
 	.card-tooltip {
 		position: fixed;
@@ -3495,90 +3581,4 @@
 	/* Game-over/turning-point UI now lives entirely on routes/recap — see
 	   TurningPointCompareModal.svelte and TpMiniMap.svelte. */
 
-	/* Desktop app (Tauri) only — see isDesktopApp in the script block. A
-	   browser tab is expected to scroll like any other web page; a native
-	   window isn't, so this fills the window exactly instead: header/menu
-	   keep their natural height, .grid (map + side panel) absorbs whatever
-	   space is left, and .side/.analytics get their own internal scroll
-	   instead of growing the page. All selectors here are compound
-	   (main.app-mode ...), which is what makes them win regardless of where
-	   in the file they're declared — higher specificity than the plain
-	   .grid/.mapwrap/etc. rules above, not source order, so there's no
-	   repeat of the "override placed before the base rule silently loses"
-	   bug from the mobile layout work. */
-	main.app-mode {
-		height: 100dvh;
-		overflow: hidden;
-		display: flex;
-		flex-direction: column;
-		box-sizing: border-box;
-	}
-	main.app-mode .board-frame {
-		display: flex;
-		flex-direction: column;
-		height: 100%;
-		min-height: 0;
-	}
-	main.app-mode .board-frame > :global(*) { flex: none; }
-	main.app-mode .grid {
-		flex: 1 1 0;
-		min-height: 0;
-		/* Implicit grid rows default to auto (max-content) sizing and won't
-		   shrink below that even with a definite container height — same
-		   trap as flexbox's default min-height:auto. minmax(0, 1fr) is what
-		   actually lets the row respect the flex-fill height above. */
-		grid-template-rows: minmax(0, 1fr);
-	}
-	main.app-mode .mapwrap {
-		height: 100%;
-		min-height: 0;
-		display: flex;
-		align-items: center;
-		justify-content: center;
-		overflow: hidden;
-	}
-	/* Fit the map to the available height instead of the width:100%/
-	   height:auto default, which sizes purely off width and ignores
-	   whatever vertical space this row actually has. */
-	main.app-mode .map { width: auto; height: 100%; max-width: 100%; }
-	main.app-mode .side { max-height: 100%; min-height: 0; overflow-y: auto; }
-	/* Hidden by default so charts/stats don't push the window taller than
-	   its own viewport — the Stats header button toggles this open as a
-	   dismissible overlay instead of normal-flow content below the fold. */
-	.analytics.app-mode {
-		display: none;
-		position: fixed;
-		inset: 0;
-		z-index: 60;
-		margin: 0;
-		align-items: center;
-		justify-content: center;
-		background: rgba(4, 10, 20, 0.75);
-		backdrop-filter: blur(2px);
-	}
-	.analytics.app-mode.open { display: flex; }
-	.analytics-card {
-		position: relative;
-		background: #0f2035;
-		border: 1px solid #2a5a8a;
-		border-radius: 10px;
-		padding: 1rem 1.25rem;
-		max-width: min(90vw, 1100px);
-		max-height: 85vh;
-		overflow-y: auto;
-		box-shadow: 0 12px 40px rgba(0, 0, 0, 0.5);
-	}
-	.analytics-close {
-		position: absolute;
-		top: 0.6rem;
-		right: 0.6rem;
-		z-index: 1;
-		background: rgba(15, 32, 53, 0.9);
-		border: 1px solid #4a9fcf;
-		color: #d0e6f5;
-		border-radius: 50%;
-		width: 30px;
-		height: 30px;
-		cursor: pointer;
-	}
 </style>

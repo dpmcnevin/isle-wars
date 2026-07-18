@@ -150,6 +150,21 @@ final class GameViewModel: ObservableObject {
     func playCard(_ index: Int) { run { try $0.playCard(index) } }
     func discardCard(_ index: Int) { run { try $0.discardCard(index: index) } }
 
+    // MARK: - Shopping ('buy' phase)
+
+    func buyArmies(_ qty: Int) { run { try $0.buyArmies(qty) } }
+    func buyCard(offerIndex: Int) { run { try $0.buyCard(offerIndex: offerIndex) } }
+    func rerollMarket() { run { try $0.rerollMarket() } }
+    func finishShopping() { run { try $0.finishShopping() } }
+
+    func cardPrice(_ card: CardType) -> Int {
+        (try? engine.cardPrice(card: card)) ?? 0
+    }
+
+    func rerollCost() -> Int {
+        (try? engine.rerollCost()) ?? 0
+    }
+
     // MARK: - Read-only helpers (attack modal)
 
     func winProbability(atkArmies: Int, defArmies: Int, defenderBonus: Int, attackerBonus: Int) -> Double {

@@ -183,7 +183,7 @@ conversion. Per-grid arrays are indexed by grid `id` (0-based, dense).
   "grid_production":  [ 0, 1, 0, 0, 0, 0, 1, ...],   // 0/1
   "sea_lanes":        [[3, 21], [14, 39]],           // dynamic — can grow (Ferry / Water Invasion) or shrink (Storm)
   "hands": {
-    "blue":  ["bonus5", "ferry"],
+    "blue":  ["reinforce", "ferry"],
     "green": [],
     "red":   ["bomb"],
     "brown": []
